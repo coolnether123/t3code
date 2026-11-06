@@ -3,6 +3,7 @@ import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import * as NodeCrypto from "node:crypto";
 import * as NodeChildProcess from "node:child_process";
+import { resolveNightlyConflict } from "./t3-nightly-resolver.mjs";
 
 export const nightlyLabel = "com.christinesmith.t3-nightly-sync";
 const branch = "christine/t3-3669-mac-20261028";
@@ -10,6 +11,7 @@ const trailer = "Otis-Task: agenda-task:751f84838c97405894f13c970a219c93";
 const controls = [
   "t3-nightly-sync.mjs",
   "t3-nightly-macos.mjs",
+  "t3-nightly-resolver.mjs",
   "t3-nightly-macos-host.py",
   "macos-activation-guard.py",
   "macos-native-idle.mjs",
@@ -191,6 +193,13 @@ export async function runMacNightly(input, io = {}) {
   let committed;
   let upstream;
   let deploymentAttempted = false;
+  let resolverMayBeRunning = false;
+  const history = (line) => {
+    if (ledger.historyRecorded !== undefined) return;
+    ledger.historyRecorded =
+      execute("/usr/bin/python3", [helper, hostConfig, "elora", "note", directory, line]).code ===
+      0;
+  };
   try {
     // oxlint-disable-next-line t3code/no-global-process-runtime -- This standalone launchd operator must verify the real host before invoking guarded deployment.
     const platform = process.platform;
@@ -257,7 +266,48 @@ export async function runMacNightly(input, io = {}) {
       )
         throw Error("The checkout changed before the owned merge.");
       mergeOwned = true;
-      git("merge", "--no-ff", "--no-commit", upstream);
+      if (stopped()) throw Error("The nightly update is stopped.");
+      const merge = execute("git", ["merge", "--no-ff", "--no-commit", upstream]);
+      if (merge.code !== 0) {
+        const conflicts = git("diff", "--name-only", "--diff-filter=U", "-z")
+          .split("\0")
+          .filter(Boolean);
+        if (
+          !conflicts.length ||
+          git("rev-parse", "MERGE_HEAD") !== upstream ||
+          git("rev-parse", "HEAD") !== base
+        )
+          throw Error("The owned merge failed without verified conflicts.");
+        bothIdle();
+        resolverMayBeRunning = true;
+        ledger.resolver = await resolveNightlyConflict(
+          {
+            config,
+            root,
+            directory,
+            upstream,
+            base,
+            conflicts,
+            env,
+          },
+          { run: io.run ? execute : undefined, launch: io.launchResolver },
+        );
+        resolverMayBeRunning = !ledger.resolver.safeToRecover;
+        if (ledger.resolver.status !== "resolved")
+          throw Error(
+            "The one-shot conflict resolver did not complete; its per-head claim is retained.",
+          );
+        if (
+          git("rev-parse", "HEAD") !== base ||
+          git("branch", "--show-current") !== branch ||
+          git("rev-parse", "MERGE_HEAD") !== upstream ||
+          git("ls-files", "--others", "--exclude-standard")
+        )
+          throw Error("The conflict resolver changed source ownership or left untracked files.");
+        git("add", "--update");
+        if (git("diff", "--name-only", "--diff-filter=U") || git("diff", "--name-only"))
+          throw Error("The conflict resolver left unresolved or unstaged changes.");
+      }
     }
     run(config.vp, ["install", "--frozen-lockfile"]);
     run(config.vp, ["run", "typecheck"]);
@@ -266,6 +316,7 @@ export async function runMacNightly(input, io = {}) {
     run(config.node, [
       "--test",
       NodePath.join(config.repository, "scripts/t3-nightly-macos.fixture.mjs"),
+      NodePath.join(config.repository, "scripts/t3-nightly-resolver.fixture.mjs"),
     ]);
     run("/usr/bin/python3", [
       NodePath.join(config.repository, "scripts/test_macos_activation_guard.py"),
@@ -362,28 +413,31 @@ export async function runMacNightly(input, io = {}) {
     } catch {
       ledger.cleanupHeld = true;
     }
-    if (!ledger.originPublished || ledger.retirementHolds.length || ledger.cleanupHeld)
-      ledger.historyRecorded =
-        execute("/usr/bin/python3", [
-          helper,
-          hostConfig,
-          "elora",
-          "note",
-          directory,
-          ledger.retirementHolds.length || ledger.cleanupHeld
-            ? "T3's nightly update installed. Older rollback copies are retained because local archiving did not finish; GitHub publication is recorded separately."
+    if (
+      ledger.resolver ||
+      !ledger.originPublished ||
+      ledger.retirementHolds.length ||
+      ledger.cleanupHeld
+    )
+      history(
+        ledger.retirementHolds.length || ledger.cleanupHeld
+          ? "T3's nightly update installed. Older rollback copies are retained because local archiving did not finish; GitHub publication is recorded separately."
+          : ledger.originPublished
+            ? "T3's nightly update repaired its merge conflicts, passed its checks and installed on both Macs."
             : "T3's nightly update installed on both Macs and was backed up. Publishing to GitHub still needs the repository owner's access.",
-        ]).code === 0;
+      );
     return ledger;
   } catch (error) {
     ledger.reason = error.message;
     if (
+      !resolverMayBeRunning &&
       mergeOwned &&
       execute("git", ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).text === upstream &&
       execute("git", ["rev-parse", "HEAD"]).text === base
     )
       execute("git", ["merge", "--abort"]);
     else if (
+      !resolverMayBeRunning &&
       committed &&
       !deploymentAttempted &&
       ledger.liveChanges.length === 0 &&
@@ -403,15 +457,7 @@ export async function runMacNightly(input, io = {}) {
       ? "T3's nightly install did not finish. A Mac may have changed; its saved rollback and exact install records are retained for recovery."
       : "T3's nightly update did not pass its checks. The installed apps were left alone.";
     // Failure history is one text-only request, never a speech or messaging route.
-    const note = execute("/usr/bin/python3", [
-      helper,
-      hostConfig,
-      "elora",
-      "note",
-      directory,
-      line,
-    ]);
-    ledger.historyRecorded = note.code === 0;
+    history(line);
     return ledger;
   } finally {
     ledger.finishedAt = new Date().toISOString();

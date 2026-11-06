@@ -95,18 +95,14 @@ export async function proveNativeIdle(rpc, bindings) {
   };
 }
 
-async function main() {
+export async function readNativeIdle(request, WebSocket, timers = globalThis) {
   let socket;
   const pending = new Map();
-  const timeout = setTimeout(() => {
-    socket?.terminate();
-    process.exitCode = 1;
-  }, 110000);
+  let deadline;
+  const timeout = new Promise((_, reject) => {
+    deadline = timers.setTimeout(() => reject(Error("native-proof-timeout")), 600000);
+  });
   try {
-    let input = "";
-    for await (const chunk of process.stdin) input += chunk;
-    const request = JSON.parse(input);
-    const WebSocket = NodeModule.createRequire(request.ws_require_from)("ws");
     socket = new WebSocket("ws://localhost/", {
       perMessageDeflate: false,
       createConnection: () => NodeNet.createConnection(request.socket),
@@ -125,44 +121,65 @@ async function main() {
     };
     socket.on("error", rejectPending);
     socket.on("close", rejectPending);
-    await new Promise((resolve, reject) => {
+    const connected = new Promise((resolve, reject) => {
       socket.once("open", resolve);
-      socket.once("error", reject);
+      socket.once("error", () => reject(Error("native-connect-unavailable")));
+      socket.once("close", () => reject(Error("native-connect-unavailable")));
     });
     const rpc = (method, params) =>
       new Promise((resolve, reject) => {
         const id = ++serial;
-        const timer = setTimeout(() => {
+        const timer = timers.setTimeout(() => {
           pending.delete(id);
-          reject(Error("native-rpc-timeout"));
-        }, 10000);
+          reject(Error("native-rpc-timeout:" + method));
+        }, 30000);
         pending.set(id, {
           resolve: (reply) => {
-            clearTimeout(timer);
+            timers.clearTimeout(timer);
             pending.delete(id);
             resolve(reply);
           },
           reject: (error) => {
-            clearTimeout(timer);
+            timers.clearTimeout(timer);
             pending.delete(id);
             reject(error);
           },
         });
         socket.send(JSON.stringify({ id, method, params }));
       });
-    const init = await rpc("initialize", {
-      clientInfo: { name: "t3_task_idle_guard", version: "1" },
-      capabilities: { experimentalApi: true },
-    });
-    if (init.error) throw Error("native-initialize-rejected");
-    socket.send(JSON.stringify({ method: "initialized" }));
-    console.log(JSON.stringify(await proveNativeIdle(rpc, request.bindings)));
-  } catch {
-    console.error("native read-only idle proof unavailable");
-    process.exitCode = 1;
+    const proof = async () => {
+      await connected;
+      const init = await rpc("initialize", {
+        clientInfo: { name: "t3_task_idle_guard", version: "1" },
+        capabilities: { experimentalApi: true },
+      });
+      if (init.error) throw Error("native-initialize-rejected");
+      socket.send(JSON.stringify({ method: "initialized" }));
+      return proveNativeIdle(rpc, request.bindings);
+    };
+    return await Promise.race([proof(), timeout]);
   } finally {
-    clearTimeout(timeout);
+    timers.clearTimeout(deadline);
+    for (const request of pending.values()) request.reject(Error("native-socket-closed"));
     socket?.terminate();
+  }
+}
+
+async function main() {
+  try {
+    let input = "";
+    for await (const chunk of process.stdin) input += chunk;
+    const request = JSON.parse(input);
+    const WebSocket = NodeModule.createRequire(request.ws_require_from)("ws");
+    console.log(JSON.stringify(await readNativeIdle(request, WebSocket)));
+  } catch (error) {
+    const reason = /^native-[a-z-]+(?::(?:initialize|thread\/(?:list|read|turns\/list)))?$/.test(
+      error?.message,
+    )
+      ? error.message
+      : "native-helper-error";
+    console.error("native read-only idle proof unavailable: " + reason);
+    process.exitCode = 1;
   }
 }
 

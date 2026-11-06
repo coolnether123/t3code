@@ -9,7 +9,8 @@ candidate_identity_file, candidate_identity_sha256, allocation_bytes,
 baseline_file, node, ws_require_from, native_socket. Paths must be absolute.
 
 --capture admits two unchanged idle observations, then creates baseline_file
-exclusively. --gate-only requires that baseline and makes no writes. A bounded
+exclusively. --gate-only never changes that baseline. Native failures save private
+stderr diagnostics beside it. A bounded
 --wait-seconds N retries *only* busy observations, captures once and exits. It
 never runs deployment. Existing deployment hooks invoke --gate-only directly.
 """
@@ -29,6 +30,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -231,13 +233,30 @@ def native_snapshot(m, bindings):
     require(stat.S_ISSOCK(info.st_mode) and info.st_uid == os.getuid(), "native socket ownership changed")
     request = {"socket": str(sock), "ws_require_from": m["ws_require_from"], "bindings": bindings}
     helper = pathlib.Path(__file__).with_name("macos-native-idle.mjs")
-    result = subprocess.run([m["node"], str(helper)], input=json.dumps(request), capture_output=True, text=True, timeout=120)
-    require(result.returncode == 0, "native read-only proof unavailable")
+    try:
+        result = subprocess.run([m["node"], str(helper)], input=json.dumps(request), capture_output=True, text=True, timeout=610)
+    except subprocess.TimeoutExpired as error:
+        native_failure(m, "helper-timeout", error.stderr)
+    if result.returncode != 0:
+        native_failure(m, "helper-exit:" + str(result.returncode), result.stderr)
     proof = json.loads(result.stdout)
     if proof.get("busy") is True:
         raise Busy("active native turn")
     require(proof.get("idle") is True and proof.get("bindings_checked") == len(bindings), "native idle proof incomplete")
     return proof
+
+
+def native_failure(m, reason, stderr):
+    parent = pathlib.Path(m["baseline_file"]).parent
+    info = parent.stat()
+    require(not parent.is_symlink() and info.st_uid == os.getuid() and info.st_mode & 0o077 == 0,
+            "native diagnostic directory must be private")
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="native-proof-",
+                                     suffix=".stderr.log", dir=parent, delete=False) as stream:
+        stream.write(reason + "\n" + (stderr or ""))
+    raise Hold("native read-only proof unavailable")
 
 
 def observe(m):

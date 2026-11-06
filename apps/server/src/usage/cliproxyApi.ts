@@ -176,7 +176,7 @@ export const makeCliproxyApi = Effect.gen(function* () {
     const url = yield* Effect.try({
       try: () => {
         const base = new URL(hub.url);
-        base.pathname = `${base.pathname.replace(/\/+$/, "")}/v0/management/${path}`;
+        base.pathname = `${base.pathname.replace(/(\/management\.html)?\/*$/i, "")}/v0/management/${path}`;
         base.search = "";
         base.hash = "";
         return base.toString();

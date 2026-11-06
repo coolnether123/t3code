@@ -983,6 +983,8 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
     it.effect("excludes sandboxes reached through a symlink into the worktrees dir", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-01-01T00:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
         const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
         const codexHomePath = yield* makeTempDir("t3code-codex-home-");
         const configBaseDir = yield* makeTempDir("t3code-scanner-base-");
@@ -995,13 +997,20 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         yield* fileSystem.symlink(worktreeCwd, symlinkCwd);
         yield* writeTranscript({
           filePath: path.join(claudeHomePath, "projects", "-slug", "a.jsonl"),
-          contents: claudeSessionLine(symlinkCwd),
-          mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+          contents: encodeTranscriptRecord({
+            type: "user",
+            cwd: symlinkCwd,
+            sessionId: "sandbox-session",
+            message: { role: "user", content: "Work in the sandbox" },
+          }),
+          mtimeMs: nowMs,
         });
 
-        const result = yield* runScan({ claudeHomePath, codexHomePath, configBaseDir });
+        const input = { claudeHomePath, codexHomePath, configBaseDir };
+        const result = yield* runScan(input);
 
         expect(result.candidates).toEqual([]);
+        expect(yield* runRecentThreads({ ...input, workspaceRoot: symlinkCwd })).toEqual([]);
       }),
     );
 
@@ -1342,6 +1351,91 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         });
 
         expect(threads.map((thread) => thread.title)).toEqual(["Renamed chat"]);
+      }),
+    );
+
+    it.effect("imports a rewound Codex thread with the history its new rollout inherits", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const workspace = yield* makeTempDir("t3code-workspace-");
+        const threadId = "019a0000-0000-7000-8000-000000000001";
+        const rolloutId = "019a0000-0000-7000-8000-000000000002";
+        const sessionsDir = path.join(codexHomePath, "sessions", "2026", "08", "24");
+        const prompt = (message: string) =>
+          encodeTranscriptRecord({ type: "event_msg", payload: { type: "user_message", message } });
+        const reply = (text: string) =>
+          encodeTranscriptRecord({
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text }],
+            },
+          });
+        const keptHistory = [
+          encodeTranscriptRecord({
+            type: "session_meta",
+            payload: { id: threadId, cwd: workspace, history_mode: "paginated" },
+          }),
+          prompt("Keep the first request"),
+          reply("First reply"),
+        ]
+          .map((record) => `${record}\n`)
+          .join("");
+
+        yield* writeTranscript({
+          filePath: path.join(sessionsDir, `rollout-2026-08-24T10-00-00-${threadId}.jsonl`),
+          contents: `${keptHistory}${prompt("Rewound request")}\n${reply("Rewound reply")}\n`,
+          mtimeMs: nowMs - 60_000,
+        });
+        yield* writeTranscript({
+          filePath: path.join(
+            sessionsDir,
+            `rollout-2026-08-24T11-00-00-${threadId}_${rolloutId}.jsonl`,
+          ),
+          contents: [
+            encodeTranscriptRecord({
+              type: "session_meta",
+              payload: {
+                id: threadId,
+                cwd: workspace,
+                history_mode: "paginated",
+                history_base: {
+                  thread_id: threadId,
+                  end_ordinal_exclusive: 3,
+                  end_byte_offset: Buffer.byteLength(keptHistory),
+                },
+              },
+            }),
+            prompt("Ask again"),
+            reply("Final reply"),
+          ].join("\n"),
+          mtimeMs: nowMs,
+        });
+
+        const threads = yield* runRecentThreads({
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+        });
+
+        expect(
+          threads.map((thread) => ({
+            id: thread.providerSessionId,
+            title: thread.title,
+            messages: thread.messages.map((message) => message.text),
+          })),
+        ).toEqual([
+          {
+            id: threadId,
+            title: "Keep the first request",
+            messages: ["Keep the first request", "First reply", "Ask again", "Final reply"],
+          },
+        ]);
       }),
     );
 

@@ -1,8 +1,9 @@
 # Christine's macOS nightly
 
 The existing `t3-nightly-sync.mjs` controller selects its macOS route when the
-private configuration has `platform: "darwin"`. It never starts a model or a
-repair agent, sends a message, or requests speech. Windows behavior is unchanged.
+private configuration has `platform: "darwin"`. A verified merge conflict permits
+one `gpt-6.1-sol` high resolver per upstream head. It never sends a message or
+requests speech. Windows behavior is unchanged.
 
 Run the installer on Elora after review. Without `--execute` it only reports the
 label, plist and first run. With `--execute` it installs
@@ -87,6 +88,12 @@ holds installation. Never change a network setting to make a guard pass. An
 explicit wildcard listener also requires the actual userdata
 `desktop-settings.json` to remain pinned as network-accessible.
 
+Native proof scans every active and archived page, including child sources. Its
+bounded read budgets are 30 seconds per RPC and 600 seconds for the full scan,
+with a 610-second outer helper limit. A nonzero exit or outer timeout saves a
+private `native-proof-*.stderr.log` beside the run's baseline. Missing or failed
+proof still holds installation; a timeout never means idle.
+
 ## Transaction and recovery
 
 The route requires a clean exact checkout, both Macs proven idle, and the normal
@@ -96,6 +103,34 @@ focused tests and `check:changed` against the pre-run source pin. Only then does
 it commit. A failed owned merge is aborted. A clean owned candidate is restored
 with `reset --merge` only before any installation attempt. No hard reset,
 clones, additional worktrees or hook bypasses are used.
+
+For real conflicts in its own merge, the controller reserves
+`artifactRoot/resolver-heads/<upstream-sha>.json` durably before launching the
+resolver. This is enabled without a configuration switch. It verifies Christine's
+logged-in `gui/<uid>` domain, then runs her exact `~/.local/bin/codex` through
+`launchctl asuser`. No GUI window opens or takes focus. Missing GUI, authentication,
+model availability or launch failure holds the run. There is no alternate model,
+account or route, and no second attempt for that upstream head, even after a crash.
+Do not remove a reservation to retry an unchanged head.
+
+The resolver uses `gpt-6.1-sol` with high effort, no user configuration, an ephemeral
+session, noninteractive workspace-write protection and no shell network access.
+It edits tracked source to resolve the merge and integration problems while
+preserving parent wake, Sol-medium defaults without costly fallback, Mac features
+and the existing nightly/deployment guards. It may run relevant focused checks.
+It must not stage, commit, publish, install, change branches, touch live chats or
+userdata, send Deck updates, spawn agents, or control apps/processes. The controller
+stages its edits, verifies the original base and merge identity, and runs every
+normal gate before committing or calling the unchanged guarded install steps.
+The install path remains callable through the normal locked controller for the
+combined maintenance window; the resolver never installs directly.
+
+The resolver's prompt, stdout, stderr, final response and result stay in the run
+folder. A one-hour limit cancels only its owned process group. If that group's
+exit is uncertain, the merge is retained for recovery and no install or automatic
+abort occurs. Partial or running reservation records also hold source recovery.
+One quiet text-only note uses the existing Deck history route when the run ends;
+history delivery failure is recorded without retry or speech.
 
 Both staged artifacts must pass. Controls copied to Millie are refreshed after
 the accepted source commit. Both Macs are rechecked before each guarded install,

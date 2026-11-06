@@ -1,6 +1,8 @@
 import * as NodeTest from "node:test";
 import * as NodeAssert from "node:assert/strict";
-import { proveNativeIdle, sourceKinds } from "./macos-native-idle.mjs";
+import * as NodeEvents from "node:events";
+import * as native from "./macos-native-idle.mjs";
+const { proveNativeIdle, sourceKinds } = native;
 
 const bindings = [{ thread_id: "t3", native_id: "native" }];
 const thread = { id: "native", status: { type: "idle" } };
@@ -136,3 +138,105 @@ NodeTest.test("inconsistent list/read state and duplicates hold", async () => {
   fixture["thread/list"].result.data = [thread, thread];
   await NodeAssert.rejects(proveNativeIdle(fixtureRpc(fixture), bindings));
 });
+
+NodeTest.test(
+  "native transport deadlines reject and terminate without admitting incomplete scans",
+  async () => {
+    for (const [deadline, reason] of [
+      [30_000, "native-rpc-timeout:initialize"],
+      [600_000, "native-proof-timeout"],
+    ]) {
+      const scheduled = new Map();
+      const timers = {
+        setTimeout(callback, delay) {
+          const key = {};
+          scheduled.set(key, { callback, delay });
+          return key;
+        },
+        clearTimeout(key) {
+          scheduled.delete(key);
+        },
+      };
+      let socket;
+      class Socket extends NodeEvents.EventEmitter {
+        constructor() {
+          super();
+          socket = this;
+        }
+        send() {}
+        terminate() {
+          this.terminated = true;
+          this.emit("close");
+        }
+      }
+      const proof = native.readNativeIdle({ bindings: [] }, Socket, timers);
+      socket.emit("open");
+      await Promise.resolve();
+      const expiry = [...scheduled.entries()].find(([, { delay }]) => delay === deadline);
+      NodeAssert.ok(expiry, "bounded native deadline must be installed");
+      scheduled.delete(expiry[0]);
+      expiry[1].callback();
+      await NodeAssert.rejects(proof, { message: reason });
+      NodeAssert.equal(socket.terminated, true);
+      NodeAssert.equal(scheduled.size, 0);
+    }
+  },
+);
+
+NodeTest.test("native connection closure before open holds instead of hanging", async () => {
+  let socket;
+  class Socket extends NodeEvents.EventEmitter {
+    constructor() {
+      super();
+      socket = this;
+    }
+    terminate() {}
+  }
+  const proof = native.readNativeIdle({ bindings: [] }, Socket);
+  socket.emit("close");
+  await NodeAssert.rejects(proof, { message: "native-connect-unavailable" });
+});
+
+NodeTest.test(
+  "native transport completes full proof and preserves active-thread refusal",
+  async () => {
+    for (const active of [false, true]) {
+      let socket;
+      const methods = [];
+      class Socket extends NodeEvents.EventEmitter {
+        constructor() {
+          super();
+          socket = this;
+        }
+        send(input) {
+          const { id, method } = JSON.parse(input);
+          methods.push(method);
+          if (id === undefined) return;
+          const result =
+            method === "initialize"
+              ? {}
+              : {
+                  data: active ? [{ id: "root", status: { type: "active" } }] : [],
+                  nextCursor: null,
+                };
+          this.emit("message", JSON.stringify({ id, result }));
+        }
+        terminate() {
+          this.terminated = true;
+          this.emit("close");
+        }
+      }
+      const proof = native.readNativeIdle({ bindings: [] }, Socket);
+      socket.emit("open");
+      const result = await proof;
+      NodeAssert.equal(active ? result.busy : result.idle, true);
+      NodeAssert.deepEqual(
+        methods,
+        active
+          ? ["initialize", "initialized", "thread/list"]
+          : ["initialize", "initialized", "thread/list", "thread/list"],
+      );
+      NodeAssert.equal(socket.terminated, true);
+    }
+  },
+);

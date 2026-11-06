@@ -41,6 +41,7 @@ async function scenario(kind) {
   let head = base;
   let merging = false;
   let captures = 0;
+  let unresolved = false;
   const installed = { elora: base, millie: kind === "current-partial" ? "0".repeat(40) : base };
   const run = (exe, args) => {
     commands.push([exe, args]);
@@ -64,10 +65,18 @@ async function scenario(kind) {
       if (args[0] === "merge") {
         if (args[1] === "--abort") {
           merging = false;
+          unresolved = false;
           return ok();
         }
         merging = true;
-        return { code: kind === "conflict" ? 1 : 0, text: "" };
+        unresolved = kind.startsWith("conflict");
+        return { code: unresolved || kind === "merge-error" ? 1 : 0, text: "" };
+      }
+      if (args[0] === "diff" && args.includes("--diff-filter=U"))
+        return ok(unresolved ? "apps/server/src/example.ts\0" : "");
+      if (args[0] === "add") {
+        unresolved = false;
+        return ok();
       }
       if (args[0] === "commit") {
         merging = false;
@@ -87,7 +96,8 @@ async function scenario(kind) {
       }
       return ok();
     }
-    if (exe === "/vp" && args[0] === "check" && kind === "gate") return { code: 1, text: "" };
+    if (exe === "/vp" && args[0] === "check" && ["gate", "conflict-gate"].includes(kind))
+      return { code: 1, text: "" };
     if (
       (exe === "/usr/bin/python3" && args[3] === "installed") ||
       (exe === "/usr/bin/ssh" && args.at(-1).includes("'installed'"))
@@ -125,6 +135,10 @@ async function scenario(kind) {
       artifactRoot: NodePath.join(directory, "artifacts"),
       stopRoot: directory,
       stage: async () => {},
+      launchResolver: async () => {
+        commands.push(["resolver", []]);
+        return { code: kind === "conflict" ? 1 : 0, safeToRecover: kind !== "conflict-live" };
+      },
     });
     return { result, commands, head, merging };
   } finally {
@@ -136,7 +150,16 @@ NodeTest.test("nightly refuses a clone, missing focused tests and arbitrary remo
   NodeAssert.throws(() => validateMacConfig({ repository: "/tmp/clone" }));
 });
 
-for (const kind of ["busy", "conflict", "gate", "nas", "publish", "late-busy"]) {
+for (const kind of [
+  "busy",
+  "conflict",
+  "conflict-gate",
+  "merge-error",
+  "gate",
+  "nas",
+  "publish",
+  "late-busy",
+]) {
   NodeTest.test(
     `nightly ${kind} leaves live installations alone and restores owned source`,
     async () => {
@@ -160,6 +183,37 @@ for (const kind of ["busy", "conflict", "gate", "nas", "publish", "late-busy"]) 
     },
   );
 }
+
+NodeTest.test("conflict resolver returns to normal gates and guarded installs once", async () => {
+  const { result, commands } = await scenario("conflict-repaired");
+  NodeAssert.equal(result.result, "deployed");
+  NodeAssert.equal(commands.filter(([exe]) => exe === "resolver").length, 1);
+  NodeAssert.ok(
+    commands.findIndex(([exe]) => exe === "resolver") <
+      commands.findIndex(([exe, args]) => exe === "/vp" && args[0] === "install"),
+  );
+  NodeAssert.equal(
+    commands.filter(([exe, args]) => exe === "/usr/bin/python3" && args[3] === "note").length,
+    1,
+  );
+});
+
+NodeTest.test(
+  "uncertain resolver exit never aborts or installs under a possibly live writer",
+  async () => {
+    const { result, commands } = await scenario("conflict-live");
+    NodeAssert.equal(result.result, "held");
+    NodeAssert.equal(result.sourceRecoveryRequired, true);
+    NodeAssert.equal(
+      commands.some(([, args]) => args[0] === "merge" && args[1] === "--abort"),
+      false,
+    );
+    NodeAssert.equal(
+      commands.some(([, args]) => args.includes("deploy")),
+      false,
+    );
+  },
+);
 
 NodeTest.test(
   "nightly deploys only after strict gates, NAS publication and both-host rechecks",

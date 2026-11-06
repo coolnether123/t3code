@@ -3,6 +3,8 @@ import importlib.util
 import json
 import os
 import pathlib
+import socket
+import subprocess
 from contextlib import closing
 import sqlite3
 import tempfile
@@ -15,6 +17,27 @@ spec.loader.exec_module(guard)
 
 
 class GuardTests(unittest.TestCase):
+    def test_native_failure_stderr_is_private_and_timeout_remains_held(self):
+        sock = self.root / "native.sock"
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(sock))
+            manifest = dict(self.m, native_socket=str(sock), node="/synthetic/node", ws_require_from="/synthetic/package.json")
+            for result in (subprocess.CompletedProcess([], 1, "", "native-rpc-timeout:thread/list\n"),
+                           subprocess.TimeoutExpired([], 610, stderr=b"native-proof-timeout\n")):
+                with self.subTest(result=type(result).__name__):
+                    action = {"side_effect": result} if isinstance(result, Exception) else {"return_value": result}
+                    before = set(self.root.glob("native-proof-*.stderr.log"))
+                    with patch.object(guard.subprocess, "run", **action) as child:
+                        with self.assertRaisesRegex(guard.Hold, "native read-only proof unavailable"):
+                            guard.native_snapshot(manifest, [])
+                    self.assertGreaterEqual(child.call_args.kwargs["timeout"], 610)
+                    logs = set(self.root.glob("native-proof-*.stderr.log")) - before
+                    self.assertEqual(len(logs), 1)
+                    log = logs.pop()
+                    self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+                    self.assertIn("native-", log.read_text())
+                    self.assertFalse(pathlib.Path(manifest["baseline_file"]).exists())
+
     def test_wildcard_requires_explicit_existing_network_setting_and_exact_listener(self):
         setting = self.root / "desktop-settings.json"
         setting.write_text('{"serverExposureMode":"network-accessible"}')
