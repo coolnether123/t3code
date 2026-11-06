@@ -449,6 +449,7 @@ it.layer(
             slug: "gpt-live-codex",
             name: "GPT Live Codex",
             isCustom: false,
+            isDefault: true,
             capabilities: codexModelCapabilities,
           },
         ]);
@@ -3224,9 +3225,7 @@ it.layer(
           const serverSettings = yield* makeMutableServerSettingsService(
             decodeServerSettings(
               deepMerge(encodedDefaultServerSettings, {
-                providerInstances: Object.fromEntries(
-                  ["codex", "grok", "claudeAgent"].map((id) => [id, { enabled: false }]),
-                ),
+                providerInstances: disabledDefaultSlots("codex", "grok", "claudeAgent"),
               }),
             ),
           );
@@ -3305,7 +3304,9 @@ it.layer(
               "claudeAgent",
               "codex",
               "cursor",
+              "fx",
               "grok",
+              "kiro",
               "muse",
               "opencode",
               "pi",
