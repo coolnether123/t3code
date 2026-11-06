@@ -112,6 +112,16 @@ uncertain attempted deployment retains source, artifacts and recovery evidence.
 A command failing after installed acceptance is reconciled from the actual
 installed marker; retirement holds are separate from installation acceptance.
 
+An archive peer may win Millie's cold-backup gap before the installed service
+starts. The controller permits one bounded handoff only after proving the new
+installed service, this attempt's intact cold backups, the exact new peer PID
+and its SSH ownership records. It briefly pauses only Elora's exact idle desktop
+main, not its backend or renderers. A separate identity-pinned watchdog resumes
+that same main after the remote action lease expires, no later than 75 seconds.
+The hosts' clocks and SSH latency must pass a bounded check first. The candidate is never
+reinstalled. Changed identities, in-flight peer startup, active or unknown work,
+missing backup evidence, or failed ownership proof hold the run for recovery.
+
 One active rollback is retained. Superseded receipt-owned originals are first
 APFS-cloned to the owner's private local `rollback-archive`, with a complete
 byte inventory, then retired from the active backup root. They are not exported

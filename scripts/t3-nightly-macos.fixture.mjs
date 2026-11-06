@@ -103,8 +103,12 @@ async function scenario(kind) {
       if (kind === "partial" && name === "millie") return { code: 1, text: "unknown install" };
       if (kind === "unknown" && name === "elora") return { code: 1, text: "unknown install" };
       installed[name] = head;
+      if (kind === "peer" && name === "millie")
+        return ok(JSON.stringify({ peerRecoveryRequired: true }));
       return ok(JSON.stringify({ commitPrefix: head, maintenanceHold: kind === "retirement" }));
     }
+    if (exe === "/usr/bin/ssh" && args.at(-1).includes("'accept-recovered'"))
+      return ok(JSON.stringify({ commitPrefix: head, maintenanceHold: false }));
     if (
       (exe === "/usr/bin/python3" && args[3] === "capture") ||
       (exe === "/usr/bin/ssh" && args.at(-1).includes("'capture'"))
@@ -177,6 +181,28 @@ NodeTest.test(
         1,
       );
     }
+  },
+);
+
+NodeTest.test(
+  "nightly hands off an installed peer collision once without reinstalling",
+  async () => {
+    const { result, commands } = await scenario("peer");
+    NodeAssert.equal(result.result, "deployed");
+    NodeAssert.deepEqual(result.liveChanges, ["elora", "millie"]);
+    NodeAssert.equal(
+      commands.filter(([exe, args]) => exe === "/usr/bin/ssh" && args.at(-1).includes("'deploy'"))
+        .length,
+      1,
+    );
+    NodeAssert.equal(
+      commands.filter(
+        ([, args]) =>
+          args.some((arg) => String(arg).endsWith("macos-peer-handoff.py")) &&
+          args.includes("coordinate"),
+      ).length,
+      1,
+    );
   },
 );
 

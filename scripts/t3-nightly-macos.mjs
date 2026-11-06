@@ -15,6 +15,7 @@ const controls = [
   "macos-native-idle.mjs",
   "macos-storage.py",
   "macos-rollback-archive.py",
+  "macos-peer-handoff.py",
 ];
 
 export function validateMacConfig(config) {
@@ -334,9 +335,22 @@ export async function runMacNightly(input, io = {}) {
       if (committed.startsWith(installed[name])) continue;
       bothIdle();
       deploymentAttempted = true;
-      const accepted = JSON.parse(
+      let accepted = JSON.parse(
         host(name, "deploy", committed, ...(name === "elora" ? [ledger.app ?? "fixture-app"] : [])),
       );
+      if (name === "millie" && accepted.peerRecoveryRequired === true) {
+        host("elora", "capture");
+        run("/usr/bin/python3", [
+          NodePath.join(config.repository, "scripts/macos-peer-handoff.py"),
+          "coordinate",
+          hostConfig,
+          directory,
+          remote,
+          committed,
+        ]);
+        accepted = JSON.parse(host("millie", "accept-recovered", committed));
+        ledger.peerHandoff = true;
+      }
       if (!committed.startsWith(accepted.commitPrefix ?? "!"))
         throw Error("A deployment receipt is uncertain.");
       ledger.liveChanges.push(name);

@@ -176,14 +176,41 @@ def deploy(host, name, folder, commit, app=None):
     else:
         args = backend_args(host, folder, commit) + ["--execute"]
     maintenance_hold = False
+    attempted_at = time.time()
     try:
         command(args, env)
     except subprocess.CalledProcessError:
         maintenance_hold = True
     capture(host, folder)
-    proof = installed(host, name, folder)
+    try:
+        proof = installed(host, name, folder)
+    except guard.Hold:
+        if name != "millie" or not maintenance_hold:
+            raise
+        command(["/usr/bin/python3", str(ROOT / "macos-peer-handoff.py"), "plan", str(CONFIG),
+                 str(folder), commit, str(attempted_at)])
+        return {"peerRecoveryRequired": True}
     guard.require(commit.startswith(proof["commitPrefix"]), "deployment did not prove the requested installed source")
     versions(host)
+    return dict(proof, maintenanceHold=maintenance_hold)
+
+
+def accept_recovered(host, folder, commit):
+    capture(host, folder)
+    proof = installed(host, "millie", folder)
+    guard.require(commit == proof["commitPrefix"], "recovered installed source differs")
+    pending = json.loads(guard.private_file(folder / "peer-recovery.json").read_text())
+    backup = Path(pending["backup"])
+    guard.require(pending["commit"] == commit and backup.parent == Path(host["backupRoot"])
+                  and not backup.is_symlink(), "recovered rollback receipt differs")
+    versions(host)
+    maintenance_hold = False
+    try:
+        script = "const m=await import(process.argv[1]);await m.retirePreviousRollback(process.argv[2],process.argv[3]);"
+        command([host["node"], "--input-type=module", "-e", script, str(ROOT / "deploy-macos-backend.mjs"),
+                 host["backupRoot"], str(backup)])
+    except subprocess.CalledProcessError:
+        maintenance_hold = True
     return dict(proof, maintenanceHold=maintenance_hold)
 
 
@@ -251,6 +278,8 @@ if __name__ == "__main__":
                 maintenance(host, name)
             elif operation == "deploy":
                 print(json.dumps(deploy(host, name, folder, sys.argv[5], sys.argv[6] if len(sys.argv) > 6 else None)))
+            elif operation == "accept-recovered":
+                print(json.dumps(accept_recovered(host, folder, sys.argv[5])))
             elif operation == "cleanup":
                 guard.require(folder.parent == Path(host["home"]) / ".local/share/t3-nightly"
                               and folder.name.startswith("run-") and not folder.is_symlink(),
@@ -261,7 +290,7 @@ if __name__ == "__main__":
                 shutil.rmtree(candidate)
             else:
                 raise guard.Hold("unknown nightly host operation")
-        if sys.argv[1:] == ["--gate-only"] or operation not in ("installed", "deploy"):
+        if sys.argv[1:] == ["--gate-only"] or operation not in ("installed", "deploy", "accept-recovered"):
             print("nightly host step passed")
     except Exception as error:
         print("nightly host step held: " + (str(error) if isinstance(error, guard.Hold) else type(error).__name__), file=sys.stderr)
