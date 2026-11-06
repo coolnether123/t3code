@@ -5,6 +5,7 @@ import {
   ElementContextDetails,
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
+  MODEL_SLUG_ALIASES_BY_PROVIDER,
   defaultInstanceIdForDriver,
   EnvironmentId,
   ModelSelection,
@@ -1223,7 +1224,11 @@ function withFallbackInstanceOptions(input: {
       readInstanceCustomModels(input.settings, instanceId, input.selectedProvider).some(
         (entry) => entry.slug === model,
       );
-    return isCustom ? model : normalizeModelSlug(model, input.selectedProvider);
+    if (isCustom || !model) return model;
+    const aliases = MODEL_SLUG_ALIASES_BY_PROVIDER[input.selectedProvider] ?? {};
+    return Object.prototype.hasOwnProperty.call(aliases, model)
+      ? aliases[model]
+      : normalizeModelSlug(model, input.selectedProvider);
   };
   const sameModel =
     requestedModel === input.selectedModel ||
