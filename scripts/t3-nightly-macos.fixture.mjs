@@ -43,6 +43,7 @@ async function scenario(kind) {
   let merging = false;
   let captures = 0;
   let unresolved = false;
+  const persistedSwaps = [];
   const installed = { elora: base, millie: kind === "current-partial" ? "0".repeat(40) : base };
   const run = (exe, args, cwd, env) => {
     commands.push([exe, args, cwd, env]);
@@ -111,15 +112,34 @@ async function scenario(kind) {
       (exe === "/usr/bin/ssh" && args.at(-1).includes("'deploy'"))
     ) {
       const name = exe === "/usr/bin/ssh" ? "millie" : "elora";
+      const artifactRoot = NodePath.join(directory, "artifacts");
+      const runDirectory = NodeFS.readdirSync(artifactRoot).find((name) => name.startsWith("run-"));
+      persistedSwaps.push(
+        JSON.parse(
+          NodeFS.readFileSync(NodePath.join(artifactRoot, runDirectory, "result.json"), "utf8"),
+        ),
+      );
       if (kind === "partial" && name === "millie") return { code: 1, text: "unknown install" };
       if (kind === "unknown" && name === "elora") return { code: 1, text: "unknown install" };
       installed[name] = head;
       if (kind === "peer" && name === "millie")
         return ok(JSON.stringify({ peerRecoveryRequired: true }));
-      return ok(JSON.stringify({ commitPrefix: head, maintenanceHold: kind === "retirement" }));
+      return ok(
+        JSON.stringify({
+          commitPrefix: head,
+          maintenanceHold: kind === "retirement",
+          recovery: { verified: kind !== "recovery-unverified", resumed: 1, held: 1 },
+        }),
+      );
     }
     if (exe === "/usr/bin/ssh" && args.at(-1).includes("'accept-recovered'"))
-      return ok(JSON.stringify({ commitPrefix: head, maintenanceHold: false }));
+      return ok(
+        JSON.stringify({
+          commitPrefix: head,
+          maintenanceHold: false,
+          recovery: { verified: true, resumed: 1, held: 1 },
+        }),
+      );
     if (
       (exe === "/usr/bin/python3" && args[3] === "capture") ||
       (exe === "/usr/bin/ssh" && args.at(-1).includes("'capture'"))
@@ -127,12 +147,21 @@ async function scenario(kind) {
       captures++;
       if ((kind === "busy" && captures === 2) || (kind === "late-busy" && captures === 6))
         return { code: 1, text: "" };
+      return ok(
+        JSON.stringify({
+          admitted: true,
+          activeRuns: kind === "preview-active" ? 1 : 0,
+          pendingApprovals: kind === "preview-active" ? 1 : 0,
+          childAgents: kind === "preview-active" ? 1 : 0,
+        }),
+      );
     }
     return ok();
   };
   try {
     const result = await runMacNightly(config, {
       run,
+      preview: kind === "preview-active",
       artifactRoot: NodePath.join(directory, "artifacts"),
       stopRoot: directory,
       stage: async () => {},
@@ -141,7 +170,7 @@ async function scenario(kind) {
         return { code: kind === "conflict" ? 1 : 0, safeToRecover: kind !== "conflict-live" };
       },
     });
-    return { result, commands, head, merging };
+    return { result, commands, head, merging, persistedSwaps };
   } finally {
     NodeFS.rmSync(directory, { recursive: true, force: true });
   }
@@ -149,6 +178,46 @@ async function scenario(kind) {
 
 NodeTest.test("nightly refuses a clone, missing focused tests and arbitrary remote route", () => {
   NodeAssert.throws(() => validateMacConfig({ repository: "/tmp/clone" }));
+});
+
+NodeTest.test(
+  "active preview admits work without merge, install, resume or history mutation",
+  async () => {
+    const { result, commands, head } = await scenario("preview-active");
+    NodeAssert.equal(result.result, "previewed");
+    NodeAssert.equal(head, base);
+    NodeAssert.deepEqual(result.liveChanges, []);
+    for (const name of ["elora", "millie"])
+      NodeAssert.deepEqual(result.admission[name], {
+        admitted: true,
+        activeRuns: 1,
+        pendingApprovals: 1,
+        childAgents: 1,
+      });
+    for (const operation of ["fetch", "push", "merge", "commit", "maintenance", "deploy", "note"])
+      NodeAssert.equal(
+        commands.some(
+          ([, args]) => args.includes(operation) || args.at(-1)?.includes?.("'" + operation + "'"),
+        ),
+        false,
+        operation,
+      );
+  },
+);
+
+NodeTest.test("an installed marker without recovery proof retains an uncertain swap", async () => {
+  const { result, commands, head } = await scenario("recovery-unverified");
+  NodeAssert.equal(result.result, "held");
+  NodeAssert.equal(head, candidate);
+  NodeAssert.equal(result.swaps.elora.phase, "attempting");
+  NodeAssert.equal(
+    commands.some(([, args]) => args[0] === "reset"),
+    false,
+  );
+  NodeAssert.equal(
+    commands.some(([, args]) => args.at(-1)?.includes?.("'cleanup'")),
+    false,
+  );
 });
 
 NodeTest.test(
@@ -311,8 +380,13 @@ NodeTest.test(
   "partial or unknown attempted installations never reset source or claim no change",
   async () => {
     for (const kind of ["partial", "unknown", "retirement"]) {
-      const { result, commands, head } = await scenario(kind);
+      const { result, commands, head, persistedSwaps } = await scenario(kind);
       NodeAssert.equal(head, candidate);
+      NodeAssert.equal(persistedSwaps[0].swaps.elora.phase, "attempting");
+      if (kind === "partial") {
+        NodeAssert.equal(persistedSwaps[1].swaps.elora.phase, "accepted");
+        NodeAssert.equal(persistedSwaps[1].swaps.millie.phase, "attempting");
+      }
       NodeAssert.equal(
         commands.some(([, args]) => args[0] === "reset"),
         false,

@@ -14,6 +14,7 @@ const controls = [
   "t3-nightly-resolver.mjs",
   "t3-nightly-macos-host.py",
   "macos-activation-guard.py",
+  "macos-active-checkpoint.py",
   "macos-native-idle.mjs",
   "macos-storage.py",
   "macos-rollback-archive.py",
@@ -63,6 +64,7 @@ export function validateMacConfig(config) {
 
 export async function runMacNightly(input, io = {}) {
   const config = validateMacConfig(input);
+  const preview = io.preview === true;
   const prepareOnly = config.maintenanceMode === "prepare-only";
   const runId = NodeCrypto.randomUUID();
   const root = io.artifactRoot ?? config.artifactRoot;
@@ -83,8 +85,28 @@ export async function runMacNightly(input, io = {}) {
     directory,
     result: "held",
     liveChanges: [],
+    swaps: {},
     startedAt: new Date().toISOString(),
   };
+  const saveLedger = () => {
+    const path = NodePath.join(directory, "result.json");
+    const next = path + ".next";
+    const descriptor = NodeFS.openSync(next, "w", 0o600);
+    try {
+      NodeFS.writeFileSync(descriptor, JSON.stringify(ledger, null, 2));
+      NodeFS.fsyncSync(descriptor);
+    } finally {
+      NodeFS.closeSync(descriptor);
+    }
+    NodeFS.renameSync(next, path);
+    const parent = NodeFS.openSync(directory, "r");
+    try {
+      NodeFS.fsyncSync(parent);
+    } finally {
+      NodeFS.closeSync(parent);
+    }
+  };
+  saveLedger();
   const env = {
     ...process.env,
     PATH: `${NodePath.dirname(config.node)}:${NodePath.dirname(config.vp)}:${process.env.PATH}`,
@@ -188,9 +210,18 @@ export async function runMacNightly(input, io = {}) {
       `${config.millie.ssh}:${remote}/control/`,
     ]);
   };
-  const bothIdle = () => {
-    host("elora", "capture");
-    host("millie", "capture");
+  const captureHosts = () => {
+    const admission = Object.fromEntries(
+      ["elora", "millie"].map((name) => {
+        const text = host(name, "capture");
+        const proof = JSON.parse(text);
+        if (proof?.admitted !== true) throw Error("Active-work admission proof is incomplete.");
+        return [name, proof];
+      }),
+    );
+    ledger.admission = admission;
+    saveLedger();
+    return admission;
   };
   let base;
   let mergeOwned = false;
@@ -243,7 +274,11 @@ export async function runMacNightly(input, io = {}) {
       hostConfig,
       `${config.millie.ssh}:${remote}/config.json`,
     ]);
-    if (!prepareOnly) bothIdle();
+    if (!prepareOnly || preview) captureHosts();
+    if (preview) {
+      ledger.result = "previewed";
+      return ledger;
+    }
     const installed = prepareOnly
       ? {}
       : Object.fromEntries(
@@ -290,7 +325,7 @@ export async function runMacNightly(input, io = {}) {
           git("rev-parse", "HEAD") !== base
         )
           throw Error("The owned merge failed without verified conflicts.");
-        bothIdle();
+        captureHosts();
         resolverMayBeRunning = true;
         ledger.resolver = await resolveNightlyConflict(
           {
@@ -337,7 +372,7 @@ export async function runMacNightly(input, io = {}) {
     run(config.vp, ["run", "check:changed", base]);
     if (git("diff", "--name-only") || git("ls-files", "--others", "--exclude-standard"))
       throw Error("A gate modified source files; the nightly merge was not accepted.");
-    if (!prepareOnly) bothIdle();
+    if (!prepareOnly) captureHosts();
     if (git("rev-parse", "HEAD") !== base || git("branch", "--show-current") !== branch)
       throw Error("The checkout advanced during the nightly gates.");
     if (mergeOwned)
@@ -387,7 +422,7 @@ export async function runMacNightly(input, io = {}) {
       ]);
       if (!prepareOnly) host("millie", "prepare", committed);
     }
-    if (!prepareOnly) bothIdle();
+    if (!prepareOnly) captureHosts();
     git("push", "nas", `HEAD:refs/heads/${branch}`);
     if (stopped()) throw Error("The nightly update is stopped.");
     ledger.originPublished =
@@ -453,12 +488,14 @@ export async function runMacNightly(input, io = {}) {
       ledger.result = "prepared";
       return ledger;
     }
-    bothIdle();
+    captureHosts();
     ledger.retirementHolds = [];
     for (const name of ["elora", "millie"]) {
       if (committed.startsWith(installed[name])) continue;
-      bothIdle();
+      captureHosts();
       deploymentAttempted = true;
+      ledger.swaps[name] = { phase: "attempting", commit: committed };
+      saveLedger();
       let accepted = JSON.parse(
         host(name, "deploy", committed, ...(name === "elora" ? [ledger.app ?? "fixture-app"] : [])),
       );
@@ -477,7 +514,11 @@ export async function runMacNightly(input, io = {}) {
       }
       if (!committed.startsWith(accepted.commitPrefix ?? "!"))
         throw Error("A deployment receipt is uncertain.");
+      if (accepted.recovery?.verified !== true)
+        throw Error("The installed source lacks verified active-work recovery.");
       ledger.liveChanges.push(name);
+      ledger.swaps[name] = { phase: "accepted", commit: committed, recovery: accepted.recovery };
+      saveLedger();
       if (accepted.maintenanceHold) ledger.retirementHolds.push(name);
     }
     ledger.result = "deployed";
@@ -530,13 +571,11 @@ export async function runMacNightly(input, io = {}) {
       ? "T3's nightly install did not finish. A Mac may have changed; its saved rollback and exact install records are retained for recovery."
       : "T3's nightly update did not pass its checks. The installed apps were left alone.";
     // Failure history is one text-only request, never a speech or messaging route.
-    history(line);
+    if (!preview) history(line);
     return ledger;
   } finally {
     ledger.finishedAt = new Date().toISOString();
-    NodeFS.writeFileSync(NodePath.join(directory, "result.json"), JSON.stringify(ledger, null, 2), {
-      mode: 0o600,
-    });
+    saveLedger();
     if (
       ledger.result !== "prepared" &&
       (!deploymentAttempted || ledger.result === "deployed") &&

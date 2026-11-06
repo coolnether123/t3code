@@ -31,7 +31,9 @@ if __name__ == "__main__":
         config = json.loads(path.read_text())
         descriptor = acquire(config["artifactRoot"])
         env = dict(os.environ, T3_NIGHTLY_LOCKED="1")
-        os.execve(config["node"], [config["node"], str(Path(config["repository"]) / "scripts/t3-nightly-sync.mjs"), str(path)], env)
+        if any(arg != "--preview" for arg in sys.argv[2:]):
+            raise RuntimeError("unknown nightly wrapper option")
+        os.execve(config["node"], [config["node"], str(Path(config["repository"]) / "scripts/t3-nightly-sync.mjs"), str(path), *sys.argv[2:]], env)
     except BlockingIOError:
         print("nightly controller already running")
     except Exception:

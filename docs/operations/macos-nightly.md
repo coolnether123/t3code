@@ -27,6 +27,14 @@ the controller manually without installing the schedule, use the same wrapper:
 /usr/bin/python3 scripts/t3-nightly-macos-lock.py /absolute/private/nightly.json
 ```
 
+Add `--preview` for active-work admission only. It verifies the clean source,
+host identities, native daemon versions and each host's checkpoint snapshot,
+then writes the admission counts to the private `result.json`. It does not fetch,
+merge, build, publish, checkpoint the running backend, restart, resume work or
+write task history. Transferred controls, configuration and proof files stay in
+the run's private directories. `maintenanceMode: "prepare-only"` is different:
+it builds and publishes a candidate without installing it.
+
 ## Private configuration
 
 Keep the config outside Git as an owner-only regular file, mode 0600. Confirm
@@ -82,9 +90,11 @@ requires the verified Node 24.18.0 runtime on matching arm64 Macs.
 
 For a read-only host rehearsal, create a private empty directory outside Git and
 run the host helper's `capture`, then `installed` operations with the config,
-host name and directory as arguments. `capture` writes only private proof files.
-Unknown native pagination, status, source identity, schema or daemon versions
-holds installation. Never change a network setting to make a guard pass. An
+host name and directory as arguments. `capture` writes only private proof files
+and returns counts of active runs, pending approvals, child agents and held work.
+Active work does not require idle admission. Unknown native pagination, source
+identity, schema or daemon versions still holds installation. Never change a
+network setting to make a guard pass. An
 explicit wildcard listener also requires the actual userdata
 `desktop-settings.json` to remain pinned as network-accessible.
 
@@ -96,7 +106,7 @@ proof still holds installation; a timeout never means idle.
 
 ## Transaction and recovery
 
-The route requires a clean exact checkout, both Macs proven idle, and the normal
+The route requires a clean exact checkout, both Macs' active-work admission, and the normal
 NAS source push preflight. It fetches origin and upstream, merges upstream main
 without committing, installs locked dependencies, runs typecheck, `vp check`,
 focused tests and `check:changed` against the pre-run source pin. Only then does
@@ -135,7 +145,12 @@ history delivery failure is recorded without retry or speech.
 Both staged artifacts must pass. Controls copied to Millie are refreshed after
 the accepted source commit. Both Macs are rechecked before each guarded install,
 and the deployers recheck their own host immediately before stopping its exact
-processes. Userdata backups, environment identity and managed Codex daemon
+processes. The active checkpoint guard records source run identities and fences
+uncertain work before the stop. Eligible continuation identities are durable and
+reused after a crash; the updater never resubmits the original prompt or replays
+confirmed tool writes or sends. Work that cannot be resumed safely receives a
+held note, including approval state that cannot be carried forward live.
+Userdata backups, environment identity and managed Codex daemon
 version equality remain required. Source publication to NAS is required. Origin
 is attempted once; denial is recorded separately and does not authorize another
 account or prevent an otherwise proven installation.
@@ -146,6 +161,11 @@ the accepted commit. Already-correct installations are not replayed. An
 uncertain attempted deployment retains source, artifacts and recovery evidence.
 A command failing after installed acceptance is reconciled from the actual
 installed marker; retirement holds are separate from installation acceptance.
+The controller durably records each host as `attempting` before invoking its
+deployer, then as `accepted` only after the installed source and checkpoint
+recovery both verify. A source marker alone cannot accept a swap. The pre-stop
+manifest remains separately pinned while a fresh capture records the new
+listener. Missing or duplicate continuation proof retains the run for recovery.
 
 An archive peer may win Millie's cold-backup gap before the installed service
 starts. The controller permits one bounded handoff only after proving the new

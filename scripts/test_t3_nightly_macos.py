@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import plistlib
-import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch, call
@@ -119,22 +118,36 @@ class NightlyTests(unittest.TestCase):
             second = lock.acquire(directory)
             os.close(second)
 
-    def test_current_ready_provider_is_idle_but_unknown_or_running_is_not(self):
+    def test_active_gate_uses_checkpoint_admission_without_an_idle_precondition(self):
+        manifest = {"active_checkpoint": True}
+        proof = {"activeRuns": 1, "pendingApprovals": 1, "childAgents": 1}
+        with patch.object(host, "current_idle", create=True, side_effect=AssertionError("idle gate")), patch.object(host.guard, "load_manifest", return_value=manifest), patch.object(host.guard, "admit", return_value=proof) as admit, patch.object(host, "versions"):
+            self.assertEqual(host.gate({"baseDir": "/unused"}, Path("/private/run")), proof)
+            admit.assert_called_once_with(manifest)
+
+    def test_checkpoint_manifest_survives_new_listener_capture_and_rejects_replacement(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
-            (root / "userdata").mkdir()
-            sqlite3.connect(root / "userdata/state.sqlite").close()
-            with sqlite3.connect(root / "userdata/statev2.sqlite") as db:
-                for suffix in host.SETTLED:
-                    db.execute("CREATE TABLE orchestration_v2_projection_" + suffix + "(status TEXT,payload_json TEXT)")
-                db.execute("INSERT INTO orchestration_v2_projection_provider_sessions VALUES('ready','{}')")
-                db.commit()
-                host.current_idle(root)
-                for status in ("running", "future"):
-                    db.execute("UPDATE orchestration_v2_projection_provider_sessions SET status=?", (status,))
-                    db.commit()
-                    with self.assertRaises(host.guard.Hold):
-                        host.current_idle(root)
+            current = root / "current-manifest.json"
+            current.write_text(json.dumps({"listener_pid": 123, "baseline_file": "/private/before.json"}))
+            current.chmod(0o600)
+            host.preserve_checkpoint(root)
+            host.preserve_checkpoint(root)
+            current.write_text(json.dumps({"listener_pid": 124, "baseline_file": "/private/after.json"}))
+            checkpoint = root / "checkpoint-manifest.json"
+            self.assertEqual(json.loads(checkpoint.read_text())["listener_pid"], 123)
+            with self.assertRaises(host.guard.Hold):
+                host.preserve_checkpoint(root)
+            self.assertEqual(checkpoint.stat().st_mode & 0o777, 0o600)
+
+    def test_capture_summary_requires_counts_and_recovery_requires_explicit_verification(self):
+        counts = {"activeRuns": 1, "pendingApprovals": 1, "childAgents": 1, "held": 1}
+        self.assertEqual(host.admission_summary({"state": counts}), dict(counts, admitted=True))
+        with patch.object(host, "command", return_value=json.dumps({"resumed": 1})):
+            with self.assertRaises(host.guard.Hold):
+                host.verify_checkpoint(Path("/private/run"))
+        with patch.object(host, "command", return_value=json.dumps({"verified": True, "resumed": 1})):
+            self.assertTrue(host.verify_checkpoint(Path("/private/run"))["verified"])
 
     def test_local_archive_is_recoverable_and_reuses_only_identical_bytes(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -9,7 +9,6 @@ import plistlib
 import shlex
 import shutil
 import socket
-import sqlite3
 import subprocess
 import sys
 import time
@@ -21,15 +20,6 @@ ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("activation_guard", ROOT / "macos-activation-guard.py")
 guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
-SETTLED = {
-    "runs": ("completed", "interrupted", "failed", "cancelled", "rolled_back"),
-    "run_attempts": ("completed", "interrupted", "failed", "cancelled", "superseded"),
-    "provider_sessions": ("ready", "stopped", "error"),
-    "runtime_requests": ("resolved", "expired", "cancelled"),
-    "subagents": ("idle", "completed", "failed", "cancelled", "interrupted"),
-    "provider_threads": ("not_loaded", "idle", "archived", "closed", "error"),
-    "turn_items": ("idle", "completed", "failed", "cancelled", "interrupted"),
-}
 
 
 def command(argv, env=None):
@@ -37,35 +27,6 @@ def command(argv, env=None):
     guard.require(not any((controls / name).exists() for name in ("STOP-ALL", "STOP-t3-nightly-sync")),
                   "nightly update is stopped")
     return subprocess.check_output(argv, text=True, env=env, timeout=7200).strip()
-
-
-def current_idle(base):
-    for name in ("state.sqlite", "statev2.sqlite"):
-        path = Path(base) / "userdata" / name
-        guard.require(not path.is_symlink(), "database symlink")
-        if not path.exists():
-            guard.require(name != "state.sqlite", "legacy database unavailable")
-            continue
-        with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
-            db.execute("PRAGMA query_only=ON")
-            db.execute("BEGIN")
-            tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            present = "orchestration_v2_projection_runs" in tables
-            guard.require(present or name != "statev2.sqlite", "current schema unavailable")
-            if not present:
-                continue
-            for suffix, settled in SETTLED.items():
-                table = "orchestration_v2_projection_" + suffix
-                columns = {r[1] for r in db.execute("PRAGMA table_info(" + table + ")")}
-                guard.require({"status", "payload_json"} <= columns, "current projection schema unavailable")
-                count = db.execute("SELECT count(*) FROM " + table + " WHERE status IS NULL OR status NOT IN (" +
-                                   ",".join("?" for _ in settled) + ")", settled).fetchone()[0]
-                guard.require(count == 0, "active or unknown current work in " + suffix + ", rows=" + str(count))
-                if suffix == "provider_threads":
-                    for (payload,) in db.execute("SELECT payload_json FROM " + table):
-                        value = json.loads(payload)
-                        guard.require(isinstance(value, dict) and not value.get("pendingBackgroundTasks"),
-                                      "current provider background work")
 
 
 def versions(host):
@@ -79,7 +40,6 @@ def versions(host):
 def capture(host, folder):
     guard.require(socket.gethostname() == host["hostname"] and str(Path.home()) == host["home"],
                   "nightly host identity changed")
-    current_idle(host["baseDir"])
     versions(host)
     endpoint = "http://127.0.0.1:3773"
     raw = command(["/usr/sbin/lsof", "-nP", "-a", "-iTCP:3773", "-sTCP:LISTEN", "-Fpn"])
@@ -89,7 +49,7 @@ def capture(host, folder):
     identity = host.get("identityFile", str(Path(host["sourceRoot"]) / "package.json"))
     websocket = [ROOT / "node_modules/ws/package.json"] if (ROOT / "node_modules/ws/package.json").is_file() else list((Path(host["sourceRoot"]) / "node_modules/.pnpm").glob("ws@8*/node_modules/ws/package.json"))
     guard.require(len(websocket) == 1, "one supported native websocket dependency is required")
-    manifest = dict(version=1, task="T-Z9T3", hostname=host["hostname"],
+    manifest = dict(version=1, task="T-Z9T3", active_checkpoint=True, hostname=host["hostname"],
                     user=Path.home().name, home=host["home"], expires_at=time.time() + 7200,
                     environment_id=host["environmentId"], endpoint=endpoint,
                     database=str(Path(host["baseDir"]) / "userdata/state.sqlite"),
@@ -107,14 +67,48 @@ def capture(host, folder):
     path.write_text(json.dumps(manifest))
     path.chmod(0o600)
     state = guard.admit(guard.load_manifest(str(path)), capture=True)
-    current_idle(host["baseDir"])
     return state
 
 
 def gate(host, folder):
-    current_idle(host["baseDir"])
     versions(host)
-    return guard.admit(guard.load_manifest(str(folder / "current-manifest.json")))
+    manifest = guard.load_manifest(str(folder / "current-manifest.json"))
+    guard.require(manifest.get("active_checkpoint") is True, "active checkpoint admission required")
+    return guard.admit(manifest)
+
+
+def admission_summary(proof):
+    state = proof["state"]
+    result = {key: state[key] for key in ("activeRuns", "pendingApprovals", "childAgents", "held")}
+    guard.require(all(type(value) is int and value >= 0 for value in result.values()),
+                  "active checkpoint counts unavailable")
+    return dict(result, admitted=True)
+
+
+def preserve_checkpoint(folder):
+    source = guard.private_file(folder / "current-manifest.json")
+    target = folder / "checkpoint-manifest.json"
+    if target.exists():
+        guard.require(guard.private_file(target).read_bytes() == source.read_bytes(),
+                      "prior checkpoint requires reconciliation")
+    else:
+        with target.open("xb") as stream:
+            os.chmod(target, 0o600)
+            stream.write(source.read_bytes())
+            stream.flush()
+            os.fsync(stream.fileno())
+        descriptor = os.open(folder, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def verify_checkpoint(folder):
+    proof = json.loads(command(["/usr/bin/python3", str(ROOT / "macos-active-checkpoint.py"),
+                                "--manifest", str(folder / "checkpoint-manifest.json"), "--verify"]))
+    guard.require(proof.get("verified") is True, "active checkpoint recovery unverified")
+    return proof
 
 
 def backend_args(host, folder, commit):
@@ -164,8 +158,10 @@ def prepare(host, folder, commit):
 
 def deploy(host, name, folder, commit, app=None):
     gate(host, folder)
+    preserve_checkpoint(folder)
     env = dict(os.environ, PATH=str(Path(host["node"]).parent) + ":" + os.environ.get("PATH", ""),
                T3_NIGHTLY_CONFIG=str(CONFIG), T3_NIGHTLY_HOST=name, T3_NIGHTLY_FOLDER=str(folder),
+               T3CODE_GUARD_MANIFEST=str(folder / "current-manifest.json"),
                T3CODE_PRESTOP_GUARD=str(Path(__file__).resolve()))
     if name == "elora":
         env["T3CODE_PREPARED_APP"] = app
@@ -192,7 +188,7 @@ def deploy(host, name, folder, commit, app=None):
         return {"peerRecoveryRequired": True}
     guard.require(commit.startswith(proof["commitPrefix"]), "deployment did not prove the requested installed source")
     versions(host)
-    return dict(proof, maintenanceHold=maintenance_hold)
+    return dict(proof, maintenanceHold=maintenance_hold, recovery=verify_checkpoint(folder))
 
 
 def accept_recovered(host, folder, commit):
@@ -211,7 +207,7 @@ def accept_recovered(host, folder, commit):
                  host["backupRoot"], str(backup)])
     except subprocess.CalledProcessError:
         maintenance_hold = True
-    return dict(proof, maintenanceHold=maintenance_hold)
+    return dict(proof, maintenanceHold=maintenance_hold, recovery=verify_checkpoint(folder))
 
 
 def maintenance(host, name):
@@ -269,7 +265,7 @@ if __name__ == "__main__":
             if operation == "note":
                 note(sys.argv[5])
             elif operation == "capture":
-                capture(host, folder)
+                print(json.dumps(admission_summary(capture(host, folder))))
             elif operation == "prepare":
                 prepare(host, folder, sys.argv[5])
             elif operation == "installed":
