@@ -21,6 +21,8 @@ const controls = [
 ];
 
 export function validateMacConfig(config) {
+  if (config.maintenanceMode !== undefined && config.maintenanceMode !== "prepare-only")
+    throw Error("Unknown nightly maintenance mode.");
   if (config.repository !== "/Users/christinesmith/Developer/t3code" || config.branch !== branch)
     throw Error("The nightly source must be Christine's single checkout and branch.");
   for (const key of ["artifactRoot", "node", "stagingNode", "vp", "stopRoot"])
@@ -61,6 +63,7 @@ export function validateMacConfig(config) {
 
 export async function runMacNightly(input, io = {}) {
   const config = validateMacConfig(input);
+  const prepareOnly = config.maintenanceMode === "prepare-only";
   const runId = NodeCrypto.randomUUID();
   const root = io.artifactRoot ?? config.artifactRoot;
   NodeFS.mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -240,22 +243,30 @@ export async function runMacNightly(input, io = {}) {
       hostConfig,
       `${config.millie.ssh}:${remote}/config.json`,
     ]);
-    bothIdle();
-    const installed = Object.fromEntries(
-      ["elora", "millie"].map((name) => {
-        const value = JSON.parse(host(name, "installed"));
-        if (!/^[0-9a-f]{12,40}$/.test(value.commitPrefix ?? ""))
-          throw Error("An installed source identity is uncertain.");
-        return [name, value.commitPrefix];
-      }),
-    );
-    host("elora", "maintenance");
-    host("millie", "maintenance");
+    if (!prepareOnly) bothIdle();
+    const installed = prepareOnly
+      ? {}
+      : Object.fromEntries(
+          ["elora", "millie"].map((name) => {
+            const value = JSON.parse(host(name, "installed"));
+            if (!/^[0-9a-f]{12,40}$/.test(value.commitPrefix ?? ""))
+              throw Error("An installed source identity is uncertain.");
+            return [name, value.commitPrefix];
+          }),
+        );
+    if (!prepareOnly) {
+      host("elora", "maintenance");
+      host("millie", "maintenance");
+    }
     git("fetch", "origin");
     git("fetch", "upstream");
     upstream = git("rev-parse", "refs/remotes/upstream/main");
     const integrated = execute("git", ["merge-base", "--is-ancestor", upstream, base]).code === 0;
-    if (integrated && Object.values(installed).every((prefix) => base.startsWith(prefix))) {
+    if (
+      !prepareOnly &&
+      integrated &&
+      Object.values(installed).every((prefix) => base.startsWith(prefix))
+    ) {
       ledger.result = "already-current";
       return ledger;
     }
@@ -326,7 +337,7 @@ export async function runMacNightly(input, io = {}) {
     run(config.vp, ["run", "check:changed", base]);
     if (git("diff", "--name-only") || git("ls-files", "--others", "--exclude-standard"))
       throw Error("A gate modified source files; the nightly merge was not accepted.");
-    bothIdle();
+    if (!prepareOnly) bothIdle();
     if (git("rev-parse", "HEAD") !== base || git("branch", "--show-current") !== branch)
       throw Error("The checkout advanced during the nightly gates.");
     if (mergeOwned)
@@ -374,13 +385,74 @@ export async function runMacNightly(input, io = {}) {
         candidate,
         `${config.millie.ssh}:${remote}/`,
       ]);
-      host("millie", "prepare", committed);
+      if (!prepareOnly) host("millie", "prepare", committed);
     }
-    bothIdle();
+    if (!prepareOnly) bothIdle();
     git("push", "nas", `HEAD:refs/heads/${branch}`);
     if (stopped()) throw Error("The nightly update is stopped.");
     ledger.originPublished =
       execute("git", ["push", "origin", `HEAD:refs/heads/${branch}`]).code === 0;
+    if (prepareOnly) {
+      if (!io.stage) {
+        const inventory = (root) => {
+          const files = {};
+          const walk = (directory, prefix = "") => {
+            for (const name of NodeFS.readdirSync(directory).sort()) {
+              const path = NodePath.join(directory, name);
+              const key = prefix + name;
+              const info = NodeFS.lstatSync(path);
+              if (info.isSymbolicLink()) {
+                const target = NodeFS.readlinkSync(path);
+                const resolved = NodePath.resolve(NodePath.dirname(path), target);
+                if (!resolved.startsWith(NodePath.resolve(root) + NodePath.sep))
+                  throw Error("Staged artifact symlink escapes its root.");
+                files[key] = "link:" + target;
+              } else if (info.isDirectory()) walk(path, key + "/");
+              else if (info.isFile())
+                files[key] = NodeCrypto.createHash("sha256")
+                  .update(NodeFS.readFileSync(path))
+                  .digest("hex");
+              else throw Error("Unsupported staged artifact entry.");
+            }
+          };
+          walk(root);
+          return files;
+        };
+        const common = {
+          version: 1,
+          commit: committed,
+          preparedAt: ledger.startedAt,
+          configSha256: NodeCrypto.createHash("sha256")
+            .update(NodeFS.readFileSync(hostConfig))
+            .digest("hex"),
+          controls: inventory(NodePath.join(directory, "control")),
+          candidate: inventory(NodePath.join(directory, "candidate")),
+        };
+        const local = {
+          ...common,
+          host: "elora",
+          runDirectory: directory,
+          app: ledger.app,
+          appFiles: inventory(ledger.app),
+        };
+        const peer = { ...common, host: "millie", runDirectory: remote };
+        NodeFS.writeFileSync(NodePath.join(directory, "staged.json"), JSON.stringify(local), {
+          mode: 0o600,
+        });
+        const peerManifest = NodePath.join(directory, "staged-millie.json");
+        NodeFS.writeFileSync(peerManifest, JSON.stringify(peer), { mode: 0o600 });
+        run("/usr/bin/scp", [
+          "-q",
+          "-o",
+          "BatchMode=yes",
+          "--",
+          peerManifest,
+          `${config.millie.ssh}:${remote}/staged.json`,
+        ]);
+      }
+      ledger.result = "prepared";
+      return ledger;
+    }
     bothIdle();
     ledger.retirementHolds = [];
     for (const name of ["elora", "millie"]) {
@@ -466,6 +538,7 @@ export async function runMacNightly(input, io = {}) {
       mode: 0o600,
     });
     if (
+      ledger.result !== "prepared" &&
       (!deploymentAttempted || ledger.result === "deployed") &&
       NodeFS.readFileSync(NodePath.join(directory, "OWNER"), "utf8") === runId
     ) {
