@@ -17,6 +17,13 @@ spec.loader.exec_module(guard)
 
 
 class GuardTests(unittest.TestCase):
+    def test_current_schema_missing_other_projections_holds_even_with_terminal_runs(self):
+        with closing(sqlite3.connect(self.root / "statev2.sqlite")) as db, db:
+            db.execute("CREATE TABLE orchestration_v2_projection_runs(status TEXT)")
+            db.execute("INSERT INTO orchestration_v2_projection_runs VALUES ('completed')")
+        with self.assertRaises(guard.Hold):
+            guard.current_database_snapshot(str(self.db))
+
     def test_native_failure_stderr_is_private_and_timeout_remains_held(self):
         sock = self.root / "native.sock"
         with socket.socket(socket.AF_UNIX) as listener:
@@ -67,7 +74,8 @@ class GuardTests(unittest.TestCase):
             guard.database_snapshot(str(self.db))
         with closing(sqlite3.connect(current)) as db, db:
             db.execute("UPDATE orchestration_v2_projection_runs SET status='completed'")
-        self.assertIsNotNone(guard.database_snapshot(str(self.db))["current_runs_sha256"])
+        with self.assertRaisesRegex(guard.Hold, "schema unavailable"):
+            guard.database_snapshot(str(self.db))
         with closing(sqlite3.connect(current)) as db, db:
             db.execute("DROP TABLE orchestration_v2_projection_runs")
         with self.assertRaisesRegex(guard.Hold, "schema unavailable"):
@@ -212,6 +220,91 @@ class GuardTests(unittest.TestCase):
         with patch.object(guard, "admit", side_effect=[guard.Busy("active"), {"ok": True}]) as admission:
             self.assertEqual(guard.finite_wait(self.m, 20, pause=lambda seconds: None), {"ok": True})
             self.assertEqual(admission.call_count, 2)
+
+
+class CurrentOrphanTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temp.name).resolve()
+        self.path = self.root / 'state.sqlite'
+        self.db = sqlite3.connect(self.root / 'statev2.sqlite')
+        for name in ('runs', 'run_attempts', 'provider_turns', 'subagents', 'provider_threads',
+                     'provider_sessions', 'runtime_requests', 'turn_items', 'nodes'):
+            self.db.execute('CREATE TABLE orchestration_v2_projection_' + name +
+                            '(status TEXT,payload_json TEXT,thread_id TEXT,run_id TEXT,provider_turn_id TEXT,runtime_request_id TEXT,provider_thread_id TEXT,provider_session_id TEXT)')
+        self.db.executescript('''
+            CREATE TABLE orchestration_v2_projection_threads(thread_id TEXT,archived_at TEXT,deleted_at TEXT);
+            CREATE TABLE orchestration_v2_projection_provider_session_bindings(thread_id TEXT,provider_session_id TEXT);
+            CREATE TABLE orchestration_v2_effect_outbox(status TEXT);
+            INSERT INTO orchestration_v2_projection_threads VALUES ('t3','archived',NULL);
+        ''')
+        self.insert('runs', 'interrupted', {}, run_id='run')
+        self.insert('provider_turns', 'interrupted', {}, provider_turn_id='turn')
+        self.insert('provider_sessions', 'ready', {'id': 'session'})
+        self.insert('runtime_requests', 'pending', {'id': 'request', 'nodeId': 'node', 'providerTurnId': 'turn',
+                    'kind': 'command', 'responseCapability': {'type': 'live', 'providerSessionId': 'session'}}, runtime_request_id='request')
+        self.insert('turn_items', 'waiting', {'id': 'item', 'nodeId': 'node', 'runId': 'run',
+                    'providerTurnId': 'turn', 'requestId': 'request', 'type': 'approval_request'})
+        self.insert('nodes', 'waiting', {'id': 'node'})
+        self.insert('provider_threads', 'idle', {'driver': 'codex', 'nativeThreadRef': {
+                    'driver': 'codex', 'strength': 'strong', 'nativeId': 'native'}, 'pendingBackgroundTasks': []})
+        self.pins = [{'thread_id': 't3', 'request_id': 'request'}]
+        self.db.commit()
+
+    def insert(self, name, status, payload, **columns):
+        payload = dict(payload, status=status)
+        fields = dict(status=status, payload_json=json.dumps(payload), thread_id='t3', **columns)
+        self.db.execute('INSERT INTO orchestration_v2_projection_' + name + '(' + ','.join(fields) + ') VALUES (' +
+                        ','.join('?' for _ in fields) + ')', tuple(fields.values()))
+
+    def tearDown(self):
+        self.db.close()
+        self.temp.cleanup()
+
+    def snapshot(self):
+        return guard.current_database_snapshot(str(self.path), self.pins)
+
+    def test_exact_archived_interrupted_unbound_orphan_preserves_rows(self):
+        before = (self.root / 'statev2.sqlite').read_bytes()
+        proof = self.snapshot()
+        self.assertEqual(proof['orphan_count'], 1)
+        self.assertEqual(proof['bindings'], [{'thread_id': 't3', 'native_id': 'native'}])
+        self.assertEqual(before, (self.root / 'statev2.sqlite').read_bytes())
+        with self.assertRaises(guard.Busy):
+            guard.current_database_snapshot(str(self.path))
+
+    def test_live_unknown_background_and_changed_orphan_hold(self):
+        for mutation in (
+            "UPDATE orchestration_v2_projection_threads SET archived_at=NULL",
+            "UPDATE orchestration_v2_projection_runs SET status='running'",
+            "UPDATE orchestration_v2_projection_provider_turns SET status='completed'",
+            "INSERT INTO orchestration_v2_projection_provider_session_bindings VALUES('t3','session')",
+            "INSERT INTO orchestration_v2_effect_outbox VALUES('pending')",
+            "UPDATE orchestration_v2_projection_provider_threads SET payload_json=json_set(payload_json,'$.pendingBackgroundTasks',json('[{}]'))",
+            "UPDATE orchestration_v2_projection_provider_threads SET payload_json=json_set(payload_json,'$.nativeThreadRef',json('null'))",
+            "UPDATE orchestration_v2_projection_subagents SET status='future'",
+        ):
+            with self.subTest(mutation=mutation):
+                self.db.execute('SAVEPOINT test')
+                self.db.execute(mutation)
+                # Separate read-only connection sees committed state; restore with a snapshot.
+                self.db.execute('RELEASE test')
+                self.db.commit()
+                if 'subagents SET' not in mutation:
+                    with self.assertRaises(guard.Hold):
+                        self.snapshot()
+                self.tearDown()
+                self.setUp()
+
+    def test_other_waiting_requests_and_unknown_status_always_hold(self):
+        for name in ('runtime_requests', 'turn_items', 'nodes', 'subagents', 'run_attempts', 'provider_sessions'):
+            with self.subTest(name=name):
+                self.insert(name, 'future', {'id': 'other'})
+                self.db.commit()
+                with self.assertRaises(guard.Busy):
+                    self.snapshot()
+                self.db.execute('DELETE FROM orchestration_v2_projection_' + name + " WHERE status='future'")
+                self.db.commit()
 
 
 if __name__ == "__main__":

@@ -20,10 +20,10 @@ export const sourceKinds = [
   "unknown",
 ];
 
-export async function proveNativeIdle(rpc, bindings) {
+export async function proveNativeIdle(rpc, bindings, ownedOnly = false) {
   const statuses = [];
   const listed = new Map();
-  for (const archived of [false, true]) {
+  for (const archived of ownedOnly ? [] : [false, true]) {
     const cursors = new Set();
     let cursor = null;
     do {
@@ -66,7 +66,8 @@ export async function proveNativeIdle(rpc, bindings) {
       if (thread.status?.type === "active") return { idle: false, busy: true };
       throw Error("native-read-status-unknown");
     }
-    if (listed.get(native_id) !== thread.status.type) throw Error("native-list-read-inconsistent");
+    if (!ownedOnly && listed.get(native_id) !== thread.status.type)
+      throw Error("native-list-read-inconsistent");
     const turns = await rpc("thread/turns/list", {
       threadId: native_id,
       limit: 1,
@@ -155,7 +156,7 @@ export async function readNativeIdle(request, WebSocket, timers = globalThis) {
       });
       if (init.error) throw Error("native-initialize-rejected");
       socket.send(JSON.stringify({ method: "initialized" }));
-      return proveNativeIdle(rpc, request.bindings);
+      return proveNativeIdle(rpc, request.bindings, request.owned_only === true);
     };
     return await Promise.race([proof(), timeout]);
   } finally {

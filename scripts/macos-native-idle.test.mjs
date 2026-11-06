@@ -16,6 +16,33 @@ const fixtureRpc = (fixture) => async (method, params) =>
     ? { result: { data: [], nextCursor: null } }
     : fixture[method];
 
+NodeTest.test("T3-owned proof reads only pinned native threads", async () => {
+  const methods = [];
+  const proof = await proveNativeIdle(async (method, params) => {
+    methods.push(method);
+    NodeAssert.notEqual(method, "thread/list");
+    NodeAssert.equal(params.threadId, "native");
+    return replies()[method];
+  }, bindings, true);
+  NodeAssert.equal(proof.idle, true);
+  NodeAssert.deepEqual(methods, ["thread/read", "thread/turns/list"]);
+});
+
+NodeTest.test("T3-owned proof still refuses active turns and unknown native identity", async () => {
+  for (const status of ["inProgress", "unknown"]) {
+    const fixture = replies();
+    fixture["thread/turns/list"].result.data[0].status = status;
+    if (status === "inProgress") {
+      NodeAssert.equal((await proveNativeIdle(fixtureRpc(fixture), bindings, true)).busy, true);
+    } else {
+      await NodeAssert.rejects(proveNativeIdle(fixtureRpc(fixture), bindings, true));
+    }
+  }
+  const fixture = replies();
+  fixture["thread/read"].result.thread = { ...thread, id: "other-chat" };
+  await NodeAssert.rejects(proveNativeIdle(fixtureRpc(fixture), bindings, true));
+});
+
 NodeTest.test("only read-only native methods and notLoaded turn items", async () => {
   const fixture = replies();
   const methods = [];

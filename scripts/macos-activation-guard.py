@@ -7,6 +7,9 @@ endpoint (http://127.0.0.1:PORT), database, environment_file, processes (list of
 {pid, uid, started, command_sha256}), listener_pid, source_root, commit,
 candidate_identity_file, candidate_identity_sha256, allocation_bytes,
 baseline_file, node, ws_require_from, native_socket. Paths must be absolute.
+Optional orphan_requests pins exact {thread_id, request_id} approval identities.
+Only archived, interrupted, unbound requests can survive the pre-stop gate;
+normal server reconciliation closes them, never this read-only guard.
 
 --capture admits two unchanged idle observations, then creates baseline_file
 exclusively. --gate-only never changes that baseline. Native failures save private
@@ -161,7 +164,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise Hold("environment endpoint redirected")
 
 
-def current_database_snapshot(path):
+def current_database_snapshot(path, orphan_requests=None):
     current = pathlib.Path(path).with_name("statev2.sqlite")
     require(not current.is_symlink(), "current database is symlinked")
     if not current.exists():
@@ -176,11 +179,90 @@ def current_database_snapshot(path):
         statuses = db.execute("SELECT status FROM orchestration_v2_projection_runs").fetchall()
         if any(status not in ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back') for (status,) in statuses):
             raise Busy("active or unknown current orchestration run")
-        return digest(runs)
+        settled = {
+            "run_attempts": ('completed', 'interrupted', 'failed', 'cancelled', 'superseded'),
+            "provider_turns": ('completed', 'interrupted', 'failed', 'cancelled'),
+            "subagents": ('idle', 'completed', 'failed', 'cancelled', 'interrupted'),
+            "provider_threads": ('not_loaded', 'idle', 'archived', 'closed', 'error'),
+            "provider_sessions": ('ready', 'stopped', 'error'),
+            "runtime_requests": ('resolved', 'expired', 'cancelled'),
+            "turn_items": ('idle', 'completed', 'failed', 'cancelled', 'interrupted'),
+            "nodes": ('completed', 'failed', 'cancelled', 'interrupted'),
+        }
+        preserved, bindings, fingerprints = {}, [], {"runs": digest(runs)}
+        allowed = {name: set() for name in ('runtime_requests', 'turn_items', 'nodes')}
+        prefix = "orchestration_v2_projection_"
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        require(all(prefix + name in tables for name in (*settled, 'threads', 'provider_session_bindings'))
+                and 'orchestration_v2_effect_outbox' in tables, "current orchestration schema unavailable")
+        pins = orphan_requests or []
+        require(isinstance(pins, list) and all(isinstance(pin, dict) and set(pin) == {'thread_id', 'request_id'}
+                and all(isinstance(v, str) and v for v in pin.values()) for pin in pins), "orphan pins invalid")
+        require(len({pin['request_id'] for pin in pins}) == len(pins), "duplicate orphan pin")
+        for pin in pins:
+            thread, request_id = pin['thread_id'], pin['request_id']
+            rows = db.execute("SELECT payload_json FROM " + prefix + "runtime_requests WHERE thread_id=? AND runtime_request_id=?",
+                              (thread, request_id)).fetchall()
+            require(len(rows) == 1, "pinned orphan request missing")
+            request = json.loads(rows[0][0])
+            require(request.get('status') == 'pending' and request.get('kind') in ('command', 'file_read', 'file_change')
+                    and request.get('responseCapability', {}).get('type') == 'live', "pinned request is not orphan approval")
+            session_id = request['responseCapability'].get('providerSessionId')
+            archived = db.execute("SELECT archived_at,deleted_at FROM " + prefix + "threads WHERE thread_id=?", (thread,)).fetchall()
+            require(len(archived) == 1 and archived[0][0] is not None and archived[0][1] is None, "orphan thread is not archived")
+            require(not db.execute("SELECT 1 FROM " + prefix + "provider_session_bindings WHERE thread_id=? AND provider_session_id=?",
+                                   (thread, session_id)).fetchall(), "orphan provider binding still exists")
+            turns = db.execute("SELECT status FROM " + prefix + "provider_turns WHERE thread_id=? AND provider_turn_id=?",
+                               (thread, request.get('providerTurnId'))).fetchall()
+            require(turns == [('interrupted',)], "orphan provider turn is not interrupted")
+            items = db.execute("SELECT payload_json FROM " + prefix + "turn_items WHERE thread_id=? AND status='waiting' AND json_extract(payload_json,'$.requestId')=?",
+                               (thread, request_id)).fetchall()
+            require(len(items) == 1, "orphan approval item missing or ambiguous")
+            item = json.loads(items[0][0])
+            require(item.get('type') == 'approval_request' and item.get('nodeId') == request.get('nodeId')
+                    and item.get('providerTurnId') == request.get('providerTurnId'), "orphan approval identity differs")
+            owner = db.execute("SELECT status FROM " + prefix + "runs WHERE thread_id=? AND run_id=?", (thread, item.get('runId'))).fetchall()
+            require(owner == [('interrupted',)], "orphan owning run is not interrupted")
+            preserved[request_id] = request['nodeId']
+            allowed['runtime_requests'].add((thread, request_id))
+            allowed['turn_items'].add((thread, item['id']))
+            allowed['nodes'].add((thread, request['nodeId']))
+            fingerprints[request_id] = digest([request, item, archived, turns, owner])
+        for name, terminal in settled.items():
+            table = prefix + name
+            placeholders = ','.join('?' for _ in terminal)
+            rows = db.execute("SELECT thread_id,payload_json FROM " + table + " WHERE status IS NULL OR status NOT IN (" + placeholders + ")", terminal).fetchall()
+            for thread_id, payload in rows:
+                value = json.loads(payload)
+                permitted = ((thread_id, value.get('id')) in allowed.get(name, set()) and
+                             ((name == 'runtime_requests' and value.get('id') in preserved and value.get('status') == 'pending')
+                             or (name == 'turn_items' and value.get('requestId') in preserved and value.get('type') == 'approval_request' and value.get('status') == 'waiting')
+                             or (name == 'nodes' and value.get('id') in preserved.values() and value.get('status') == 'waiting')))
+                if not permitted:
+                    raise Busy("active or unknown current orchestration " + name)
+            fingerprints[name] = digest(rows)
+        if db.execute("SELECT 1 FROM orchestration_v2_effect_outbox WHERE status IS NULL OR status NOT IN ('succeeded','failed','cancelled') LIMIT 1").fetchall():
+            raise Busy("current orchestration effect pending")
+        provider_rows = db.execute("SELECT thread_id,payload_json FROM " + prefix + "provider_threads ORDER BY provider_thread_id").fetchall()
+        provider_ids = {row[0] for row in db.execute("SELECT provider_thread_id FROM " + prefix + "provider_threads")}
+        for (payload,) in db.execute("SELECT payload_json FROM " + prefix + "subagents"):
+            require(json.loads(payload).get('providerThreadId') in provider_ids, "current child native mapping unknown")
+        for thread_id, payload in provider_rows:
+            value = json.loads(payload)
+            require(isinstance(value, dict) and value.get('pendingBackgroundTasks') == [], "current background work unknown or pending")
+            native = value.get('nativeThreadRef')
+            require(value.get('driver') == 'codex' and isinstance(native, dict) and native.get('driver') == 'codex'
+                    and native.get('strength') == 'strong' and isinstance(native.get('nativeId'), str)
+                    and native['nativeId'] and isinstance(thread_id, str) and thread_id, "current native mapping unknown")
+            bindings.append({'thread_id': thread_id, 'native_id': native['nativeId']})
+        fingerprints['provider_threads'] = digest(provider_rows)
+        fingerprints['provider_sessions'] = digest(db.execute("SELECT * FROM " + prefix + "provider_sessions ORDER BY provider_session_id").fetchall())
+        fingerprints['session_bindings'] = digest(db.execute("SELECT * FROM " + prefix + "provider_session_bindings ORDER BY provider_session_id,thread_id").fetchall())
+        return {'fingerprint': digest(fingerprints), 'bindings': bindings, 'orphan_count': len(preserved)}
 
 
-def database_snapshot(path):
-    current = current_database_snapshot(path)
+def database_snapshot(path, orphan_requests=None):
+    current = current_database_snapshot(path, orphan_requests)
     require(pathlib.Path(path).is_file() and not pathlib.Path(path).is_symlink(), "database missing or symlinked")
     db = sqlite3.connect(pathlib.Path(path).as_uri() + "?mode=ro", uri=True, timeout=5)
     try:
@@ -221,7 +303,7 @@ def database_snapshot(path):
         pending = {"approvals_count": len(approvals), "approvals_sha256": digest(approvals),
                    "input_threads_count": len(inputs), "inputs_sha256": digest(inputs),
                    "input_events_count": len(events), "input_events_sha256": digest(events)}
-        return {"pending": pending, "bindings": bindings, "runtime_sha256": digest(runtime),
+        return {"pending": pending, "bindings": bindings if current is None else current['bindings'], "runtime_sha256": digest(runtime),
                 "current_runs_sha256": current}
     finally:
         db.close()
@@ -231,7 +313,8 @@ def native_snapshot(m, bindings):
     sock = pathlib.Path(m["native_socket"])
     info = sock.stat()
     require(stat.S_ISSOCK(info.st_mode) and info.st_uid == os.getuid(), "native socket ownership changed")
-    request = {"socket": str(sock), "ws_require_from": m["ws_require_from"], "bindings": bindings}
+    request = {"socket": str(sock), "ws_require_from": m["ws_require_from"], "bindings": bindings,
+               "owned_only": pathlib.Path(m['database']).with_name('statev2.sqlite').exists()}
     helper = pathlib.Path(__file__).with_name("macos-native-idle.mjs")
     try:
         result = subprocess.run([m["node"], str(helper)], input=json.dumps(request), capture_output=True, text=True, timeout=610)
@@ -261,9 +344,9 @@ def native_failure(m, reason, stderr):
 
 def observe(m):
     check_pins(m)
-    before = database_snapshot(m["database"])
+    before = database_snapshot(m["database"], m.get('orphan_requests'))
     native = native_snapshot(m, before["bindings"])
-    after = database_snapshot(m["database"])
+    after = database_snapshot(m["database"], m.get('orphan_requests'))
     require(before == after, "runtime or pending state changed during native proof")
     check_pins(m)
     return {"manifest_sha256": m["_manifest_sha256"], "environment_id": m["environment_id"],
