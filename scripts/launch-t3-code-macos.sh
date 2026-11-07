@@ -37,7 +37,20 @@ set_aside_first_start_database() {
   done
   printf '%s' "$moved"
 }
-storage() { /usr/bin/python3 "$STORAGE_HELPER" "$@"; }
+storage() {
+  local remaining
+  if (( LIVE_HEALTH_DEADLINE > 0 )); then
+    remaining=$((LIVE_HEALTH_DEADLINE - SECONDS)); (( remaining > 0 )) || return 1
+    /usr/bin/python3 -c 'import subprocess,sys
+try:
+    sys.exit(subprocess.run(sys.argv[2:], timeout=int(sys.argv[1])).returncode)
+except subprocess.TimeoutExpired:
+    print("storage operation exceeded live downtime budget", file=sys.stderr)
+    sys.exit(1)' "$remaining" /usr/bin/python3 "$STORAGE_HELPER" "$@"
+  else
+    /usr/bin/python3 "$STORAGE_HELPER" "$@"
+  fi
+}
 space_gate() { storage capacity "$1" --allocation "${2:-1048576}" || fail "T3 space guard refused step; 20 GiB reserve required"; }
 
 usage() {
@@ -487,7 +500,7 @@ launch_verify() {
   done; printf 'app did not pass API health within %s seconds; see %s\n' "$limit" "$log" >&2; return 1
 }
 launch_previous() {
-  LIVE_HEALTH_DEADLINE=0
+  LIVE_HEALTH_DEADLINE=0; WAIT_SECONDS=30
   if [[ "$HEADLESS_ROLLBACK" -eq 1 ]]; then
     local exe; exe="$(validate_app "$APP_PATH")"
     /usr/bin/python3 "$SOURCE_ROOT/scripts/macos-headless-backend.py" --executable "$exe" \
@@ -548,7 +561,7 @@ deploy() {
   if [[ -n "${T3CODE_GUARD_MANIFEST:-}" ]]; then
     /usr/bin/python3 "$SOURCE_ROOT/scripts/macos-active-checkpoint.py" --prepare >>"$LOG_PATH" 2>&1 || fail "active checkpoint preparation failed"
   fi
-  LIVE_HEALTH_DEADLINE=$((SECONDS + 90)); RESTART_OLD_ON_FAILURE=1; stop_existing "$old"
+  LIVE_HEALTH_DEADLINE=$((SECONDS + 60)); RESTART_OLD_ON_FAILURE=1; stop_existing "$old"
   storage checkpoint "$T3_HOME/userdata/state.sqlite" >>"$LOG_PATH" 2>&1 || fail "quiescent SQLite checkpoint failed"
   if [[ -e "$T3_HOME/userdata/statev2.sqlite" ]]; then
     storage checkpoint "$T3_HOME/userdata/statev2.sqlite" >>"$LOG_PATH" 2>&1 || fail "current quiescent SQLite checkpoint failed"
@@ -562,7 +575,7 @@ deploy() {
   mv "$APP_PATH" "$PREVIOUS_APP"; write_state old-moved; mv "$STAGED_APP" "$APP_PATH"; write_state new-installed
   local first_mode=""; [[ "$FIRST_V2_START" == 1 ]] && first_mode=first-start
   if ! launch_verify "$first_mode"; then printf 'new app health failed; rolling back\n' >&2; fail "candidate health failed; restoring backup"; fi
-  write_state accepted; ROLLBACK_REQUIRED=0
+  write_state accepted; ROLLBACK_REQUIRED=0; LIVE_HEALTH_DEADLINE=0
   verify_backup
   storage retire "$RUN_DIR" "$PREVIOUS_APP" --app "$APP_PATH" >>"$LOG_PATH" 2>&1 || fail "accepted rollback retirement failed; current rollback retained"
   rm -f "$STATE_PATH"; printf 'deployment ready: %s\nbackup: %s\nprevious app retained: %s\n' "$APP_PATH" "$RUN_DIR" "$PREVIOUS_APP"

@@ -295,6 +295,24 @@ describe("launch-t3-code-macos", () => {
     assert.include(source, 'if ! launch_verify "$first_mode"; then');
     assert.include(source, "(( limit <= 90 )) || limit=90");
     assert.include(source, "local deadline=$((SECONDS + limit))");
+    assert.include(source, "LIVE_HEALTH_DEADLINE=$((SECONDS + 60))");
+    const storage = source.match(/storage\(\) \{[\s\S]*?\n\}/)?.[0];
+    assert.isString(storage);
+    const expired = NodeChildProcess.spawnSync(
+      bash,
+      [
+        "-c",
+        [
+          "set -eu",
+          storage,
+          "SECONDS=10; LIVE_HEALTH_DEADLINE=9; STORAGE_HELPER=/must-not-run",
+          "if storage capacity /unused; then exit 9; fi",
+        ].join("\n"),
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(expired.status, 0, expired.stderr);
+    assert.notInclude(expired.stderr, "/must-not-run");
     assert.include(source, '"$RUN_DIR/failed-first-start-database"');
     assert.match(source, /launch_previous\(\) \{[\s\S]*?\n    launch_verify\n/);
     assert.isBelow(

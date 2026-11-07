@@ -565,11 +565,15 @@ export const cloneCodeTree = async (source: string, destination: string): Promis
   );
 };
 
+let liveSwitchDeadline = 0;
 const runCommand = async (command: string, args: ReadonlyArray<string>, timeout = 30_000) => {
+  const remaining = liveSwitchDeadline - Date.now();
+  if (liveSwitchDeadline > 0 && remaining <= 0)
+    return { stdout: "", stderr: "live switch budget exhausted; restore the old backend", code: 1 };
   try {
     const result = await execFile(command, [...args], {
       encoding: "utf8",
-      timeout,
+      timeout: liveSwitchDeadline > 0 ? Math.min(timeout || remaining, remaining) : timeout,
       maxBuffer: 2 * 1024 * 1024,
     });
     return { stdout: String(result.stdout), stderr: String(result.stderr), code: 0 };
@@ -1032,6 +1036,7 @@ const runIsolatedSmoke = async (options: BackendDeployOptions): Promise<void> =>
       options.smokeHome + "-real-state",
     ],
     "copied-state candidate preflight",
+    600_000,
   );
   await ensurePrivateDirectory(options.smokeHome, "smoke home", true);
   await assertPortFree(options.smokePort);
@@ -1359,7 +1364,7 @@ const assertInstalledBackendOwner = async (
  */
 const bootoutAndWait = async (uid: number, label: string, description: string): Promise<void> => {
   await runCommand("launchctl", ["bootout", `gui/${uid}/${label}`]);
-  for (let wait = 0; wait < 30; wait += 1) {
+  for (let wait = 0; wait < 10; wait += 1) {
     if (!(await launchctlPrint(uid, label))) return;
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
@@ -1367,7 +1372,7 @@ const bootoutAndWait = async (uid: number, label: string, description: string): 
 };
 
 const waitForListenerRelease = async (options: BackendDeployOptions): Promise<void> => {
-  for (let wait = 0; wait < 30; wait += 1) {
+  for (let wait = 0; wait < 10; wait += 1) {
     if ((await inspectListeners(options, true)).length === 0) return;
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
@@ -1431,7 +1436,7 @@ const rollbackDeployment = async (input: {
       input.options.port,
       process.env,
     );
-    await waitForHttp(input.options.port, input.environmentId, 60_000);
+    await waitForHttp(input.options.port, input.environmentId, 30_000);
     if (old.exitCode !== null) fail("rollback old server exited before health completed.");
   }
   if (setAsideError !== undefined)
@@ -1665,6 +1670,7 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
       },
       onStopping: () => {
         phase = "stopped";
+        liveSwitchDeadline = Date.now() + 45_000;
       },
       bootout: () => bootoutAndWait(uid, options.label, "owned LaunchAgent bootout"),
       listeners: () => inspectListeners(options, true),
@@ -1692,7 +1698,6 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
     firstCurrentStart = !(await optionalLstat(currentDatabase));
     if (!firstCurrentStart) {
       await backupDatabase(currentDatabase, NodePath.join(runDir, "statev2.sqlite"));
-      await verifyDatabaseBackup(NodePath.join(runDir, "statev2.sqlite"));
     }
     if (process.env.T3CODE_DEPLOY_CODE_ONLY !== "1") {
       await backupConfig(options.baseDir, NodePath.join(runDir, "config"));
@@ -1703,12 +1708,15 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
       ["bootstrap", `gui/${uid}`, plist],
       "candidate LaunchAgent bootstrap",
     );
-    await waitForHttp(options.port, environmentId, 60_000);
+    await waitForHttp(options.port, environmentId, Math.max(1, liveSwitchDeadline - Date.now()));
+    liveSwitchDeadline = 0;
     await assertInstalledBackendOwner(options, uid, destination);
     await verifyDatabaseBackup(NodePath.join(runDir, "state.sqlite"));
+    if (!firstCurrentStart) await verifyDatabaseBackup(NodePath.join(runDir, "statev2.sqlite"));
     await assertInstalledBackendOwner(options, uid, destination);
     console.log(`deployment passed for ${options.commit}; backup: ${runDir}`);
   } catch (error) {
+    liveSwitchDeadline = 0;
     await recoverFailedDeployment({
       phase,
       error,
