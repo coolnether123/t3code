@@ -17,6 +17,7 @@ import {
   type ProjectId,
   type ProjectIconOverride,
   type ProjectScript,
+  type ProjectSection,
   type ProviderApprovalDecision,
   type ProviderInteractionMode,
   type ProviderUserInputAnswers,
@@ -62,6 +63,8 @@ export interface UpdateProjectInput extends CommandMetadata {
   readonly scripts?: ReadonlyArray<ProjectScript>;
   readonly pinned?: boolean;
   readonly archived?: boolean;
+  readonly sections?: ReadonlyArray<ProjectSection>;
+  readonly unsortedSectionCollapsed?: boolean;
 }
 
 export interface DeleteProjectInput extends CommandMetadata {
@@ -127,6 +130,8 @@ export interface VisitThreadInput extends ThreadCommandInput {
 export type MarkThreadUnreadInput = ThreadCommandInput;
 
 export interface UpdateThreadMetadataInput extends ThreadCommandInput {
+  readonly sectionId?: string | null;
+  readonly sectionAssignment?: "manual" | "auto";
   readonly paused?: boolean;
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecoveryUpdate | null;
   readonly title?: string;
@@ -382,6 +387,10 @@ export const updateProject = Effect.fn("EnvironmentCommands.updateProject")(func
     ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
     ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
     ...(input.archived === undefined ? {} : { archived: input.archived }),
+    ...(input.sections === undefined ? {} : { sections: input.sections }),
+    ...(input.unsortedSectionCollapsed === undefined
+      ? {}
+      : { unsortedSectionCollapsed: input.unsortedSectionCollapsed }),
   });
 });
 
@@ -620,10 +629,14 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
       input.worktreePath !== undefined ||
       input.regenerateTitle !== undefined ||
       input.linkedPullRequest !== undefined ||
-      input.limitRecovery !== undefined
+      input.limitRecovery !== undefined ||
+      input.sectionId !== undefined
     ) {
       result = yield* dispatch({
         type: "thread.metadata.update",
+        ...(input.sectionId === undefined
+          ? {}
+          : { sectionId: input.sectionId, sectionAssignment: input.sectionAssignment ?? "manual" }),
         ...(input.paused === undefined ? {} : { paused: input.paused }),
         ...(input.limitRecovery === undefined ? {} : { limitRecovery: input.limitRecovery }),
         commandId,

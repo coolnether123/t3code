@@ -173,6 +173,8 @@ effectIt.effect("an icon kind from a newer server shows the default icon", () =>
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
     assert.isNull(shell.projectIcon);
+    assert.deepEqual(shell.sections, []);
+    assert.isFalse(shell.unsortedSectionCollapsed);
     const broken = yield* Effect.exit(decodeReceivedIcon({ kind: "emoji" }));
     assert.strictEqual(broken._tag, "Failure");
   }),

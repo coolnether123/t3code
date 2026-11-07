@@ -443,6 +443,12 @@ const LenientThreadOpens = Schema.NullOr(OrchestrationV2ThreadOpens).pipe(
 );
 
 export const OrchestrationV2AppThread = Schema.Struct({
+  sectionId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  sectionManualOverride: Schema.optional(Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   subagentBackend: Schema.optional(SubagentBackend),
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -2088,6 +2094,12 @@ export type OrchestrationV2LatestVisibleMessageSummary =
   typeof OrchestrationV2LatestVisibleMessageSummary.Type;
 
 export const OrchestrationV2ThreadShell = Schema.Struct({
+  sectionId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  sectionManualOverride: Schema.optional(Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   ...OrchestrationV2CreationFields,
   id: ThreadId,
   projectId: ProjectId,
@@ -2940,6 +2952,8 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.create"),
+    clientName: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
+    sectionId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     subagentBackend: Schema.optional(SubagentBackend),
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
@@ -3080,6 +3094,8 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.metadata.update"),
+    sectionId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+    sectionAssignment: Schema.optional(Schema.Literals(["manual", "auto"])),
     paused: Schema.optional(Schema.Boolean),
     subagentBackend: Schema.optional(SubagentBackend),
     commandId: CommandId,
@@ -3671,6 +3687,8 @@ export const OrchestrationV2ArchivedShellSnapshot = Schema.Struct({
 export type OrchestrationV2ArchivedShellSnapshot = typeof OrchestrationV2ArchivedShellSnapshot.Type;
 
 export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
+  clientName: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
+  sectionId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   commandId: CommandId,
   creationSource: Schema.optional(OrchestrationV2CreationSource),
   threadId: Schema.optional(ThreadId),

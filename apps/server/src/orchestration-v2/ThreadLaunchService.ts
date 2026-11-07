@@ -78,6 +78,8 @@ export interface ThreadLaunchInitialMessage {
 }
 
 export interface ThreadLaunchInput {
+  readonly clientName?: string;
+  readonly sectionId?: string | null;
   readonly commandId: CommandId;
   readonly threadId?: ThreadId;
   readonly reuseExistingThread?: boolean;
@@ -932,6 +934,8 @@ const make = Effect.gen(function* () {
               })
             : threads.dispatch({
                 type: "thread.create",
+                ...(input.clientName === undefined ? {} : { clientName: input.clientName }),
+                ...(input.sectionId === undefined ? {} : { sectionId: input.sectionId }),
                 commandId: input.commandId,
                 threadId: candidateThreadId,
                 projectId: input.projectId,

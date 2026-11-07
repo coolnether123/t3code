@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import * as Effect from "effect/Effect";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
 import { ModelSelection } from "./modelSelection.ts";
@@ -44,6 +45,15 @@ export const ProjectScript = Schema.Struct({
   autoOpenPreview: Schema.optional(Schema.Boolean),
 });
 export type ProjectScript = typeof ProjectScript.Type;
+
+export const ProjectSection = Schema.Struct({
+  id: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  collapsed: Schema.Boolean,
+});
+export type ProjectSection = typeof ProjectSection.Type;
+
+export const ProjectSections = Schema.Array(ProjectSection).check(Schema.isMaxLength(500));
 
 export const ProjectIconColor = Schema.Literals([
   "gray",
@@ -162,6 +172,10 @@ export const Project = Schema.Struct({
   // Opt-in because background sync performs network I/O and may move the checkout.
   autoPull: Schema.optional(Schema.Boolean),
   scripts: Schema.Array(ProjectScript),
+  sections: Schema.optional(ProjectSections).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  unsortedSectionCollapsed: Schema.optional(Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   archivedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   createdAt: IsoDateTime,
@@ -186,6 +200,8 @@ export const ProjectCreatePayload = Schema.Struct({
 export type ProjectCreatePayload = typeof ProjectCreatePayload.Type;
 
 export const ProjectUpdatePayload = Schema.Struct({
+  sections: Schema.optional(ProjectSections),
+  unsortedSectionCollapsed: Schema.optional(Schema.Boolean),
   title: Schema.optional(TrimmedNonEmptyString),
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),

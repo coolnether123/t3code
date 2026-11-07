@@ -4,6 +4,7 @@ import {
   EnvironmentId,
   MessageId,
   type OrchestrationV2Command,
+  type OrchestrationV2ServerCommand,
   type OrchestrationV2Run,
   type OrchestrationV2ProviderThread,
   ProviderThreadId,
@@ -37,6 +38,7 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import * as ProjectService from "../project/ProjectService.ts";
 
 it("stamps authoritative provenance on commands that create threads or messages", () => {
   const command: OrchestrationV2Command = {
@@ -78,6 +80,93 @@ it("stamps authoritative provenance on commands that create threads or messages"
 
 const layerReceiptsTest = CommandReceiptStore.layer.pipe(
   Layer.provide(SqlitePersistence.layerMemory),
+);
+
+it.effect(
+  "auto-files only new client threads, leaving manual targets, infrastructure, and retries alone",
+  () => {
+    const dispatched: Array<OrchestrationV2ServerCommand> = [];
+    const sectionRequests: Array<string> = [];
+    const instanceId = ProviderInstanceId.make("codex_work");
+    const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+      Layer.provide(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          dispatch: (command) =>
+            Effect.sync(() => {
+              dispatched.push(command);
+              return { sequence: 1, storedEvents: [] } as never;
+            }),
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(ProjectService.ProjectService)({
+          ensureSection: (input) =>
+            Effect.sync(() => {
+              sectionRequests.push(input.name);
+              return { id: "ita", name: "HT ITA IT Ally", collapsed: false };
+            }),
+        }),
+      ),
+      Layer.provide(
+        ServerSettings.layerTest({
+          providerInstances: {
+            [instanceId]: { driver: "codex", enabled: true },
+            [ProviderInstanceId.make("codex-jared")]: { driver: "codex", enabled: true },
+          },
+        }),
+      ),
+      Layer.provideMerge(layerReceiptsTest),
+    );
+    return Effect.gen(function* () {
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+      const command = {
+        type: "thread.create" as const,
+        commandId: CommandId.make("auto-client"),
+        threadId: ThreadId.make("auto-client"),
+        projectId: ProjectId.make("auto-client"),
+        title: "Client",
+        clientName: "IT Ally",
+        modelSelection: { instanceId, model: "test" },
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+        createdBy: "agent" as const,
+        creationSource: "mcp" as const,
+      };
+      yield* threads.dispatch(command);
+      expect(dispatched[0]).toMatchObject({ sectionId: "ita" });
+      yield* threads.dispatch({
+        ...command,
+        commandId: CommandId.make("manual-client"),
+        sectionId: null,
+      });
+      yield* threads.dispatch({
+        ...command,
+        commandId: CommandId.make("infra-client"),
+        modelSelection: {
+          ...command.modelSelection,
+          instanceId: ProviderInstanceId.make("codex-jared"),
+        },
+      });
+      yield* receipts.upsert({
+        commandId: command.commandId,
+        threadId: command.threadId,
+        commandType: command.type,
+        acceptedAt: DateTime.makeUnsafe("2026-10-22T00:00:00Z"),
+        resultSequence: 1,
+        status: "accepted",
+        error: null,
+      });
+      yield* threads.dispatch(command);
+      expect(sectionRequests).toEqual(["IT Ally"]);
+      expect(dispatched[1]).toMatchObject({ sectionId: null });
+      expect(dispatched[2]).not.toHaveProperty("sectionId");
+      expect(dispatched[3]).not.toHaveProperty("sectionId");
+    }).pipe(Effect.provide(layerTest));
+  },
 );
 
 const layerDispatchChokepointTest =

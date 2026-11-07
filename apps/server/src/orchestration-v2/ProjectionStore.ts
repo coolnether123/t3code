@@ -1695,6 +1695,8 @@ export function threadShellFromProjection(
 
     autoSettleDisabledAt: projection.thread.autoSettleDisabledAt ?? null,
     paused: projection.thread.paused ?? false,
+    sectionId: projection.thread.sectionId ?? null,
+    sectionManualOverride: projection.thread.sectionManualOverride ?? false,
     pinOrderKey: projection.thread.pinOrderKey ?? null,
     ...(projection.thread.tags?.length ? { tags: projection.thread.tags } : {}),
     lastVisitedAt: projection.thread.lastVisitedAt,
@@ -1962,6 +1964,8 @@ function shellFromState(input: {
 
     autoSettleDisabledAt: input.state.thread.autoSettleDisabledAt ?? null,
     paused: input.state.thread.paused ?? false,
+    sectionId: input.state.thread.sectionId ?? null,
+    sectionManualOverride: input.state.thread.sectionManualOverride ?? false,
     pinOrderKey: input.state.thread.pinOrderKey ?? null,
     ...(input.state.thread.tags?.length ? { tags: input.state.thread.tags } : {}),
     lastVisitedAt: input.state.thread.lastVisitedAt,
@@ -2080,6 +2084,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 deleted_at = excluded.deleted_at,
                 payload_json = excluded.payload_json
             `;
+              if (event.payload.sectionId != null) {
+                yield* sql`
+                  UPDATE orchestration_v2_projection_threads
+                  SET payload_json = json_set(payload_json, '$.sectionId', NULL, '$.sectionManualOverride', json('true'))
+                  WHERE thread_id = ${event.payload.id}
+                    AND NOT EXISTS (
+                      SELECT 1 FROM projection_projects AS project, json_each(project.sections_json) AS section
+                      WHERE project.project_id = ${event.payload.projectId}
+                        AND json_extract(section.value, '$.id') = ${event.payload.sectionId}
+                    )
+                `;
+              }
               break;
             }
             case "run.created":

@@ -4,6 +4,7 @@ import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
 
 import {
+  findClientSection,
   planProjectCommand,
   type ProjectCommand,
   type ProjectCommandState,
@@ -58,6 +59,48 @@ const failureOf = (result: ReturnType<typeof plan>) => {
 };
 
 describe("planProjectCommand", () => {
+  it("keeps named sections ordered and validates identities before persisting", () => {
+    const ita = { id: "ita", name: "HT ITA IT Ally", collapsed: false };
+    const amorso = { id: "amorso", name: "HT AHS Amorso", collapsed: true };
+    const update = (sections: ReadonlyArray<typeof ita>) =>
+      plan(
+        {
+          type: "project.meta.update",
+          commandId: CommandId.make("sections"),
+          projectId,
+          sections,
+        },
+        { project: row({ sections: [ita, amorso] }) },
+      );
+    assert.deepEqual(
+      payloadOf(update([amorso, { ...ita, name: "IT Ally", collapsed: true }])).sections,
+      [amorso, { ...ita, name: "IT Ally", collapsed: true }],
+    );
+    for (const sections of [
+      [ita, ita],
+      [ita, { ...amorso, name: "ht ita it ally" }],
+      [{ ...ita, name: " " }],
+    ]) {
+      assert.equal(failureOf(update(sections))._tag, "ProjectCommandInvariantError");
+    }
+    assert.deepEqual(payloadOf(update([])).sections, []);
+    assert.equal(findClientSection([ita, amorso], "IT Ally")?.id, "ita");
+    assert.equal(findClientSection([ita, amorso], "AMORSO")?.id, "amorso");
+    assert.isUndefined(findClientSection([ita, { ...amorso, name: "Other IT Ally" }], "IT Ally"));
+    assert.isUndefined(findClientSection([ita], "All"));
+    const ensured = payloadOf(
+      plan(
+        {
+          type: "project.meta.update",
+          commandId: CommandId.make("auto-section"),
+          projectId,
+          ensureSection: { ...ita, id: "new", name: "IT Ally" },
+        },
+        { project: row({ sections: [ita] }) },
+      ),
+    );
+    assert.deepEqual(ensured.sections, [ita]);
+  });
   it("keeps legacy scripts editable and removable while rejecting new invalid ones", () => {
     const legacy = script("install-javascript-dependencies");
     const withLegacy = (scripts: ReadonlyArray<ProjectScript>) =>

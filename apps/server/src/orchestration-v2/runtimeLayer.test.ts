@@ -2469,6 +2469,113 @@ it.layer(layerLegacyImportTest)("OrchestrationV2 legacy import", (it) => {
 });
 
 it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
+  it.effect("keeps manual section moves through automatic updates, deletion, and replay", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projects = yield* ProjectStore.ProjectStoreV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const replay = yield* ProjectionReplay.ProjectionReplay;
+      const projectId = ProjectId.make("section-project");
+      const threadId = ThreadId.make("section-thread");
+      const now = "2026-09-07T00:00:00.000Z";
+      yield* seedProject({
+        projectId,
+        title: "Sections",
+        workspaceRoot: "/workspace/sections",
+        defaultModelSelection: null,
+        createdAt: now,
+      });
+      const sections = [
+        { id: "ita", name: "IT Ally", collapsed: false },
+        { id: "amorso", name: "Amorso", collapsed: true },
+      ];
+      const setSections = (
+        sections: ReadonlyArray<{ id: string; name: string; collapsed: boolean }>,
+      ) =>
+        projects.apply({
+          sequence: 0,
+          eventId: EventId.make(`sections:${sections.length}`),
+          aggregateKind: "project",
+          aggregateId: projectId,
+          occurredAt: now,
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "project.meta-updated",
+          payload: { projectId, sections, updatedAt: now },
+        });
+      yield* setSections(sections);
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("section-create"),
+        threadId,
+        projectId,
+        title: "Client",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      assert.isNull((yield* projectionStore.getThread(threadId)).sectionId);
+      assert.isFalse((yield* projectionStore.getThread(threadId)).sectionManualOverride);
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("section-auto"),
+        threadId,
+        sectionId: "ita",
+        sectionAssignment: "auto",
+      });
+      assert.equal((yield* projectionStore.getThread(threadId)).sectionId, "ita");
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("section-manual"),
+        threadId,
+        sectionId: "amorso",
+      });
+      const manuallyMoved = yield* projectionStore.getThread(threadId);
+      assert.isTrue(manuallyMoved.sectionManualOverride);
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("section-reauto"),
+        threadId,
+        sectionId: "ita",
+        sectionAssignment: "auto",
+      });
+      assert.equal((yield* projectionStore.getThread(threadId)).sectionId, "amorso");
+      const rejected = yield* orchestrator
+        .dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("section-wrong-project"),
+          threadId,
+          sectionId: "another-project-section",
+        })
+        .pipe(Effect.flip);
+      assert.instanceOf(rejected, Orchestrator.OrchestratorDispatchError);
+      yield* setSections([sections[0]!]);
+      assert.isNull((yield* projectionStore.getThread(threadId)).sectionId);
+      assert.isTrue((yield* projectionStore.getThread(threadId)).sectionManualOverride);
+      assert.isNull(
+        (yield* orchestrator.getShellSnapshot()).threads.find((thread) => thread.id === threadId)
+          ?.sectionId,
+      );
+      yield* projectionStore.apply({
+        id: EventId.make("stale-section-event"),
+        type: "thread.metadata-updated",
+        threadId,
+        occurredAt: DateTime.makeUnsafe(now),
+        payload: manuallyMoved,
+      });
+      assert.isNull((yield* projectionStore.getThread(threadId)).sectionId);
+      yield* replay.rebuild;
+      assert.isNull((yield* projectionStore.getThread(threadId)).sectionId);
+      assert.isTrue((yield* projectionStore.getThread(threadId)).sectionManualOverride);
+      assert.isNull((yield* projectionStore.getThread(threadId)).deletedAt);
+    }),
+  );
   it.effect("applies lifecycle commands idempotently and emits archive/removal shell deltas", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

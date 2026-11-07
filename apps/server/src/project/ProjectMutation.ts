@@ -43,6 +43,10 @@ export const projectMutationOperation = Effect.fn("projectMutationOperation")(fu
           : { defaultThreadEnvMode: mutation.defaultThreadEnvMode }),
         ...(mutation.scripts === undefined ? {} : { scripts: mutation.scripts }),
         ...(mutation.pinned === undefined ? {} : { pinned: mutation.pinned }),
+        ...(mutation.sections === undefined ? {} : { sections: mutation.sections }),
+        ...(mutation.unsortedSectionCollapsed === undefined
+          ? {}
+          : { unsortedSectionCollapsed: mutation.unsortedSectionCollapsed }),
         ...(mutation.archived === undefined ? {} : { archived: mutation.archived }),
       });
 

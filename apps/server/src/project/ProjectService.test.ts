@@ -36,6 +36,7 @@ import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as ProjectService from "./ProjectService.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
+import { projectMutationOperation } from "./ProjectMutation.ts";
 
 const layerWorkspacePaths = Layer.succeed(WorkspacePaths.WorkspacePaths, {
   normalizeWorkspaceRoot: (workspaceRoot) => Effect.succeed(workspaceRoot.replace(/\/$/, "")),
@@ -225,6 +226,63 @@ const waitForProject = Effect.fn("ProjectServiceTest.waitForProject")(function* 
     }),
   );
 });
+
+it.effect(
+  "persists section edits through project mutations and matches imported client labels",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* ProjectService.ProjectService;
+      const projectId = ProjectId.make("project:sections");
+      const created = yield* service.create({
+        commandId: CommandId.make("sections:create"),
+        projectId,
+        title: "Sections",
+        workspaceRoot: "/work/sections",
+      });
+      assert.deepEqual(created.sections, []);
+      assert.isFalse(created.unsortedSectionCollapsed);
+      const sections = [
+        { id: "ita", name: "HT ITA IT Ally", collapsed: true },
+        { id: "amorso", name: "HT AHS Amorso", collapsed: false },
+      ];
+      yield* projectMutationOperation(service, {
+        type: "project.update",
+        commandId: CommandId.make("sections:set"),
+        projectId,
+        sections,
+        unsortedSectionCollapsed: true,
+      });
+      assert.deepEqual(Option.getOrThrow(yield* service.getShell(projectId)).sections, sections);
+      assert.isTrue(Option.getOrThrow(yield* service.getShell(projectId)).unsortedSectionCollapsed);
+      const match = yield* service.ensureSection({
+        commandId: CommandId.make("sections:auto-match"),
+        projectId,
+        name: "IT Ally",
+      });
+      assert.equal(match.id, "ita");
+      const fresh = yield* service.ensureSection({
+        commandId: CommandId.make("sections:auto-new"),
+        projectId,
+        name: "Gazelle",
+      });
+      assert.equal(fresh.name, "Gazelle");
+      assert.equal(
+        (yield* service.ensureSection({
+          commandId: CommandId.make("sections:auto-repeated"),
+          projectId,
+          name: "gazelle",
+        })).id,
+        fresh.id,
+      );
+      const reordered = [{ ...sections[1]!, name: "Amorso", collapsed: true }, sections[0]!];
+      yield* service.update({
+        commandId: CommandId.make("sections:reorder"),
+        projectId,
+        sections: reordered,
+      });
+      assert.deepEqual(Option.getOrThrow(yield* service.getById(projectId)).sections, reordered);
+    }).pipe(Effect.provide(layerTest)),
+);
 
 it.layer(layerTest)("ProjectService", (it) => {
   it.effect("creates, updates, resolves, snapshots, and soft-deletes projects", () =>
@@ -544,6 +602,11 @@ it.layer(layerTest)("ProjectService", (it) => {
         workspaceRoot: "/work/delete-retry",
       });
       const input = { commandId: CommandId.make("command:delete-retry:delete"), projectId };
+      yield* waitForProject(
+        service,
+        projectId,
+        (project) => project.repositoryIdentity != null && project.faviconPath != null,
+      );
       const deleted = yield* service.delete(input);
       assert.deepEqual(yield* service.delete(input), deleted);
       const events = yield* sql<{ readonly command_id: string }>`

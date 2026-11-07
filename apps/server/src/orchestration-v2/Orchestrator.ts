@@ -2943,9 +2943,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
 
+    if (command.sectionId != null) {
+      const project = yield* projects.get(command.projectId).pipe(mapDispatchError(command));
+      if (
+        Option.isNone(project) ||
+        !project.value.sections?.some((section) => section.id === command.sectionId)
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Section does not belong to this project.",
+        });
+      }
+    }
+
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
     const thread: OrchestrationV2AppThread = {
+      sectionId: command.sectionId ?? null,
+      sectionManualOverride: command.sectionId !== undefined && command.clientName === undefined,
       createdBy: command.createdBy,
       creationSource: command.creationSource,
       id: command.threadId,
@@ -3274,6 +3290,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }),
       ),
     );
+    if (
+      command.type === "thread.metadata.update" &&
+      command.sectionId != null &&
+      !(command.sectionAssignment === "auto" && thread.sectionManualOverride === true)
+    ) {
+      const project = yield* projects.get(thread.projectId).pipe(mapDispatchError(command));
+      if (
+        Option.isNone(project) ||
+        !project.value.sections?.some((section) => section.id === command.sectionId)
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Section does not belong to this project.",
+        });
+      }
+    }
     if (thread.deletedAt !== null) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
@@ -3846,6 +3879,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   };
           return {
             ...thread,
+            ...(command.sectionId === undefined ||
+            (command.sectionAssignment === "auto" && thread.sectionManualOverride === true)
+              ? {}
+              : {
+                  sectionId: command.sectionId,
+                  sectionManualOverride:
+                    command.sectionAssignment !== "auto" || thread.sectionManualOverride === true,
+                }),
             ...(command.title === undefined ? {} : { title: command.title }),
             ...(command.paused === undefined ? {} : { paused: command.paused }),
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),

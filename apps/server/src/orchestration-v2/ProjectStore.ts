@@ -6,6 +6,7 @@ import {
   StoredProjectIcon,
   ProjectId,
   ProjectScript,
+  ProjectSections,
   ThreadEnvMode,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -39,6 +40,8 @@ export const ProjectRow = Schema.Struct({
   faviconPath: Schema.NullOr(Schema.String),
   projectIcon: Schema.NullOr(StoredProjectIcon),
   scripts: Schema.Array(ProjectScript),
+  sections: Schema.optional(ProjectSections),
+  unsortedSectionCollapsed: Schema.optional(Schema.Boolean),
   pinnedAt: Schema.NullOr(IsoDateTime),
   archivedAt: Schema.NullOr(IsoDateTime),
   createdAt: IsoDateTime,
@@ -53,6 +56,8 @@ const ProjectDbRow = Schema.Struct({
   autoPull: Schema.BooleanFromBit,
   projectIcon: Schema.NullOr(Schema.fromJsonString(StoredProjectIcon)),
   scripts: Schema.fromJsonString(Schema.Array(ProjectScript)),
+  sections: Schema.fromJsonString(ProjectSections),
+  unsortedSectionCollapsed: Schema.BooleanFromBit,
 });
 
 function toShell(row: ProjectRow): OrchestrationProjectShell {
@@ -67,6 +72,8 @@ function toShell(row: ProjectRow): OrchestrationProjectShell {
     faviconPath: row.faviconPath,
     projectIcon: row.projectIcon,
     scripts: row.scripts,
+    sections: row.sections ?? [],
+    unsortedSectionCollapsed: row.unsortedSectionCollapsed ?? false,
     pinnedAt: row.pinnedAt,
     archivedAt: row.archivedAt,
     createdAt: row.createdAt,
@@ -124,6 +131,8 @@ export const make = Effect.gen(function* () {
         favicon_path AS "faviconPath",
         project_icon_json AS "projectIcon",
         scripts_json AS "scripts",
+        sections_json AS "sections",
+        unsorted_section_collapsed AS "unsortedSectionCollapsed",
         pinned_at AS "pinnedAt",
         archived_at AS "archivedAt",
         created_at AS "createdAt",
@@ -143,7 +152,11 @@ export const make = Effect.gen(function* () {
   });
 
   const upsertRow = (row: ProjectRow) =>
-    encodeRow(row).pipe(
+    encodeRow({
+      ...row,
+      sections: row.sections ?? [],
+      unsortedSectionCollapsed: row.unsortedSectionCollapsed ?? false,
+    }).pipe(
       Effect.flatMap(
         (encoded) => sql`
           INSERT INTO projection_projects (
@@ -156,6 +169,8 @@ export const make = Effect.gen(function* () {
             favicon_path,
             project_icon_json,
             scripts_json,
+            sections_json,
+            unsorted_section_collapsed,
             pinned_at,
             archived_at,
             created_at,
@@ -172,6 +187,8 @@ export const make = Effect.gen(function* () {
             ${encoded.faviconPath},
             ${encoded.projectIcon},
             ${encoded.scripts},
+            ${encoded.sections},
+            ${encoded.unsortedSectionCollapsed},
             ${encoded.pinnedAt},
             ${encoded.archivedAt},
             ${encoded.createdAt},
@@ -188,6 +205,8 @@ export const make = Effect.gen(function* () {
             favicon_path = excluded.favicon_path,
             project_icon_json = excluded.project_icon_json,
             scripts_json = excluded.scripts_json,
+            sections_json = excluded.sections_json,
+            unsorted_section_collapsed = excluded.unsorted_section_collapsed,
             pinned_at = excluded.pinned_at,
             archived_at = excluded.archived_at,
             created_at = excluded.created_at,
@@ -238,6 +257,8 @@ export const make = Effect.gen(function* () {
           faviconPath: payload.faviconPath ?? null,
           projectIcon: payload.projectIcon ?? null,
           scripts: payload.scripts,
+          sections: [],
+          unsortedSectionCollapsed: false,
           pinnedAt: null,
           archivedAt: null,
           createdAt: payload.createdAt,
@@ -270,10 +291,30 @@ export const make = Effect.gen(function* () {
         ...(payload.faviconPath === undefined ? {} : { faviconPath: payload.faviconPath }),
         ...(payload.projectIcon === undefined ? {} : { projectIcon: payload.projectIcon }),
         ...(payload.scripts === undefined ? {} : { scripts: payload.scripts }),
+        ...(payload.sections === undefined ? {} : { sections: payload.sections }),
+        ...(payload.unsortedSectionCollapsed === undefined
+          ? {}
+          : { unsortedSectionCollapsed: payload.unsortedSectionCollapsed }),
         ...(payload.pinnedAt === undefined ? {} : { pinnedAt: payload.pinnedAt }),
         ...(payload.archivedAt === undefined ? {} : { archivedAt: payload.archivedAt }),
         updatedAt: payload.updatedAt,
       }).pipe(mapError("apply"));
+      const sectionIds = new Set(payload.sections?.map((section) => section.id));
+      if (
+        payload.sections !== undefined &&
+        (row.sections ?? []).some((section) => !sectionIds.has(section.id))
+      ) {
+        yield* sql`
+          UPDATE orchestration_v2_projection_threads
+          SET payload_json = json_set(payload_json, '$.sectionId', NULL, '$.sectionManualOverride', json('true'))
+          WHERE project_id = ${payload.projectId}
+            AND json_extract(payload_json, '$.sectionId') IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM json_each((SELECT sections_json FROM projection_projects WHERE project_id = ${payload.projectId})) AS section
+              WHERE json_extract(section.value, '$.id') = json_extract(payload_json, '$.sectionId')
+            )
+        `.pipe(mapError("apply"));
+      }
     },
   );
 

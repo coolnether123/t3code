@@ -6,6 +6,7 @@ import {
   type ProjectIconOverride,
   ProjectId,
   type ProjectScript,
+  type ProjectSection,
   SCRIPT_RUN_COMMAND_PATTERN,
   type ThreadEnvMode,
 } from "@t3tools/contracts";
@@ -26,6 +27,9 @@ export interface ProjectCreateCommand {
 }
 
 export interface ProjectMetaUpdateCommand {
+  readonly sections?: ReadonlyArray<ProjectSection>;
+  readonly unsortedSectionCollapsed?: boolean;
+  readonly ensureSection?: ProjectSection;
   readonly type: "project.meta.update";
   readonly commandId: CommandId;
   readonly projectId: ProjectId;
@@ -106,6 +110,23 @@ export interface ProjectCommandState {
 const monogramSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const isScriptRunCommand = Schema.is(SCRIPT_RUN_COMMAND_PATTERN);
 
+const normalizedSectionName = (value: string) =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+
+export function findClientSection(sections: ReadonlyArray<ProjectSection>, clientName: string) {
+  const client = normalizedSectionName(clientName);
+  const exact = sections.find((section) => normalizedSectionName(section.name) === client);
+  if (exact !== undefined) return exact;
+  const matches = sections.filter((section) =>
+    ` ${normalizedSectionName(section.name)} `.includes(` ${client} `),
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 /** Read state and commit the planned event under the project lock. */
 export function planProjectCommand(input: {
   readonly command: ProjectCommand;
@@ -172,6 +193,26 @@ export function planProjectCommand(input: {
     case "project.meta.update": {
       const project = activeProject;
       if (project === undefined) return missingProject();
+      const ensured = command.ensureSection;
+      const sections =
+        ensured === undefined
+          ? command.sections
+          : findClientSection(project.sections ?? [], ensured.name) !== undefined
+            ? (project.sections ?? [])
+            : [...(project.sections ?? []), ensured];
+      if (sections !== undefined) {
+        if (sections.length > 500) return invariant("Projects support at most 500 sections.");
+        const ids = new Set<string>();
+        const names = new Set<string>();
+        for (const section of sections) {
+          const name = normalizedSectionName(section.name);
+          if (!section.id.trim() || !name || ids.has(section.id) || names.has(name)) {
+            return invariant("Sections need unique ids and non-empty, unique names.");
+          }
+          ids.add(section.id);
+          names.add(name);
+        }
+      }
       if (
         command.projectIcon?.kind === "monogram" &&
         Array.from(monogramSegmenter.segment(command.projectIcon.text)).length > 2
@@ -198,6 +239,10 @@ export function planProjectCommand(input: {
         type: "project.meta-updated",
         payload: {
           projectId: command.projectId,
+          ...(sections === undefined ? {} : { sections }),
+          ...(command.unsortedSectionCollapsed === undefined
+            ? {}
+            : { unsortedSectionCollapsed: command.unsortedSectionCollapsed }),
           ...(command.title === undefined ? {} : { title: command.title }),
           ...(command.workspaceRoot === undefined ? {} : { workspaceRoot: command.workspaceRoot }),
           ...(command.defaultModelSelection === undefined

@@ -67,6 +67,7 @@ import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveContinuationRoute } from "../provider/continuationRoute.ts";
+import * as ProjectService from "../project/ProjectService.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
@@ -582,6 +583,7 @@ const make = Effect.gen(function* () {
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+  const projects = yield* Effect.serviceOption(ProjectService.ProjectService);
 
   const assertProviderInstanceEnabled: ThreadManagementServiceShape["assertProviderInstanceEnabled"] =
     (input) =>
@@ -757,6 +759,39 @@ const make = Effect.gen(function* () {
     "ThreadManagementService.dispatch",
   )(function* (command) {
     let routed = command;
+    if (
+      command.type === "thread.create" &&
+      command.clientName !== undefined &&
+      command.sectionId === undefined &&
+      command.modelSelection.instanceId !== "codex-jared" &&
+      !(yield* hasReceipt(command.commandId))
+    ) {
+      yield* assertDispatchTargetEnabled(command);
+      if (Option.isNone(projects)) {
+        return yield* new Orchestrator.OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Client section filing is unavailable.",
+        });
+      }
+      const section = yield* projects.value
+        .ensureSection({
+          commandId: CommandId.make(`${command.commandId}:client-section`),
+          projectId: command.projectId,
+          name: command.clientName,
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new Orchestrator.OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause,
+              }),
+          ),
+        );
+      routed = { ...command, sectionId: section.id };
+    }
     if (command.type === "message.dispatch" && !(yield* hasReceipt(command.commandId))) {
       const projection = yield* orchestrator.getThreadRecords(command.threadId, []);
       const settings = yield* serverSettings.getSettings.pipe(

@@ -397,5 +397,6 @@ export const layerProduction = Layer.mergeAll(
 ).pipe(
   Layer.provide(ResourceCleanupService.layer.pipe(Layer.provide(layerScheduledTaskProvided))),
   Layer.provide(Scheduler.layer),
+  Layer.provide(layerProjectService),
   Layer.provideMerge(layerEventInfrastructure),
 );

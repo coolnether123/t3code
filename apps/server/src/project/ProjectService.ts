@@ -6,6 +6,7 @@ import {
   type ProjectCreatePayload,
   type ProjectUpdatePayload,
   type ProjectSnapshot,
+  type ProjectSection,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
@@ -26,6 +27,7 @@ import {
   decodeProjectCommandRejection,
   encodeProjectCommandRejection,
   planProjectCommand,
+  findClientSection,
   type ProjectCommand,
 } from "../orchestration-v2/ProjectCommands.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -133,6 +135,11 @@ export class ProjectService extends Context.Service<
       ProjectServiceError
     >;
     readonly update: (input: ProjectUpdateInput) => Effect.Effect<Project, ProjectServiceError>;
+    readonly ensureSection: (input: {
+      readonly commandId: CommandId;
+      readonly projectId: ProjectId;
+      readonly name: string;
+    }) => Effect.Effect<ProjectSection, ProjectServiceError>;
     readonly delete: (input: ProjectDeleteInput) => Effect.Effect<Project, ProjectServiceError>;
     readonly getById: (
       projectId: ProjectId,
@@ -190,6 +197,8 @@ export const make = Effect.gen(function* () {
     autoPull: row.autoPull,
     projectIcon: row.projectIcon,
     scripts: row.scripts,
+    sections: row.sections ?? [],
+    unsortedSectionCollapsed: row.unsortedSectionCollapsed ?? false,
     pinnedAt: row.pinnedAt,
     archivedAt: row.archivedAt,
     createdAt: row.createdAt,
@@ -402,6 +411,10 @@ export const make = Effect.gen(function* () {
           : { defaultThreadEnvMode: input.defaultThreadEnvMode }),
         ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
         ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
+        ...(input.sections === undefined ? {} : { sections: input.sections }),
+        ...(input.unsortedSectionCollapsed === undefined
+          ? {}
+          : { unsortedSectionCollapsed: input.unsortedSectionCollapsed }),
         ...(input.archived === undefined ? {} : { archived: input.archived }),
       });
       if (workspaceRoot !== previousRoot) {
@@ -418,6 +431,43 @@ export const make = Effect.gen(function* () {
       return { project: yield* create(input), created: true };
     },
   );
+
+  const ensureSection: ProjectService["Service"]["ensureSection"] = Effect.fn(
+    "ProjectService.ensureSection",
+  )(function* (input) {
+    const name = input.name.trim();
+    if (!name || name.length > 128) {
+      return yield* new ProjectInvalidError({
+        projectId: input.projectId,
+        detail: "Invalid section name.",
+      });
+    }
+    const sectionEventId = yield* idAllocator.allocate.event({ commandId: input.commandId }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProjectOperationError({
+            operation: "dispatch-project-command",
+            projectId: input.projectId,
+            cause,
+          }),
+      ),
+    );
+    yield* commit({
+      type: "project.meta.update",
+      commandId: input.commandId,
+      projectId: input.projectId,
+      ensureSection: { id: `client-${sectionEventId}`, name, collapsed: false },
+    });
+    const project = yield* readCommitted(input.projectId);
+    const section = findClientSection(project.sections ?? [], name);
+    if (section === undefined) {
+      return yield* new ProjectInvalidError({
+        projectId: input.projectId,
+        detail: "Section no longer exists.",
+      });
+    }
+    return section;
+  });
 
   const deleteChildThread = Effect.fn("ProjectService.deleteChildThread")(function* (
     input: ProjectDeleteInput,
@@ -605,6 +655,7 @@ export const make = Effect.gen(function* () {
   );
 
   return ProjectService.of({
+    ensureSection,
     create,
     bootstrap,
     update,

@@ -41,6 +41,8 @@ import {
   revertThreadCheckpoint,
   resumeThreadQueue,
   startThreadTurn,
+  updateProject,
+  updateThreadMetadata,
 } from "./commands.ts";
 
 const layerTestRandom = Layer.succeed(
@@ -131,6 +133,34 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
 });
 
 describe("V2 environment commands", () => {
+  it.effect("persists section layout and marks explicit moves, including Unsorted, as manual", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const projects: ProjectMutation[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects });
+      const sections = [{ id: "client", name: "Client", collapsed: true }];
+      yield* updateProject({
+        projectId: ProjectId.make("project"),
+        sections,
+        unsortedSectionCollapsed: true,
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      yield* updateThreadMetadata({ threadId: v2ThreadId, sectionId: "client" }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+      );
+      yield* updateThreadMetadata({ threadId: v2ThreadId, sectionId: null }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+      );
+      expect(projects[0]).toMatchObject({
+        type: "project.update",
+        sections,
+        unsortedSectionCollapsed: true,
+      });
+      expect(commands).toMatchObject([
+        { type: "thread.metadata.update", sectionId: "client", sectionAssignment: "manual" },
+        { type: "thread.metadata.update", sectionId: null, sectionAssignment: "manual" },
+      ]);
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
   it.effect("distinguishes sending a selected queued message from resuming queue order", () =>
     Effect.gen(function* () {
       const commands: OrchestrationV2Command[] = [];

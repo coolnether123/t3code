@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { buildThreadActionMenuItems, type ThreadActionMenuState } from "./threadActionMenu.logic";
+import { buildMoveToSectionMenuItem } from "./sidebar/projectSections.logic";
 
 const baseState: ThreadActionMenuState = {
   canOperate: true,
@@ -35,6 +36,10 @@ describe("buildThreadActionMenuItems", () => {
         isPinned: reversed,
         isSettled: reversed,
         isSnoozed: reversed,
+        moveToSection: buildMoveToSectionMenuItem(
+          [{ id: "client", name: "Client", collapsed: false }],
+          null,
+        ),
       });
       const expected = reversed
         ? [
@@ -42,6 +47,7 @@ describe("buildThreadActionMenuItems", () => {
             "unsettle",
             "unsnooze",
             "rename",
+            "move-to-section",
             "regenerate-title",
             "auto-settle",
             "archive",
@@ -52,6 +58,7 @@ describe("buildThreadActionMenuItems", () => {
             "settle",
             "snooze",
             "rename",
+            "move-to-section",
             "regenerate-title",
             "auto-settle",
             "archive",
@@ -61,6 +68,11 @@ describe("buildThreadActionMenuItems", () => {
       expect(
         items.find((item) => item.id === "snooze")?.children?.every((child) => child.disabled) ??
           true,
+      ).toBe(true);
+      expect(
+        items
+          .find((item) => item.id === "move-to-section")
+          ?.children?.every((child) => child.disabled),
       ).toBe(true);
     },
   );

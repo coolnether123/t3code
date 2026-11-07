@@ -69,9 +69,25 @@ in a new thread's model picker to add or remove them. A regular click returns to
 single model. Choose a base branch and send. Each selection starts a separate thread
 and worktree while you stay in the new thread composer. This requires a Git project.
 
+## Organize chats into sections
+
+On web and desktop, create named sections within a project using its **Create section** action.
+Drag a chat into a section, or choose **Move to section** from the chat's menu. A move changes
+only its filing, not its pinned, working, snoozed, or settled state. Unfiled chats appear in
+**Unsorted** at the bottom of the project.
+
+Use a section's menu to rename, reorder, or delete it. Deleting a section moves its chats to
+Unsorted and never deletes conversations. Each section, including Unsorted, can be collapsed.
+Names, order, collapse choices, and chat assignments are saved on the environment's server,
+so the desktop app and browsers connected to that environment share the layout.
+
+When a launcher supplies a client name, new chats use its matching section or create one.
+Automatic filing never overrides a chat you have moved yourself, even if you chose Unsorted.
+
 ## Pin and reorder threads
 
-Pin a thread from its menu to keep it above your active work.
+Pin a thread from its menu. Named sections preserve the thread's pin without moving it to a
+different section. On older servers without named sections, pins stay above active work.
 
 On web and desktop, unpinning, settling, snoozing, and archiving a thread each show
 a notification with **Undo** for five seconds. Undo restores the thread's previous
@@ -90,7 +106,7 @@ scroll position instead of following the thread to its new place in the list.
 
 Pinning does not prevent automatic settlement. Settling a thread removes its pin.
 
-On web and desktop, drag a thread between sections to change its state. Drag a thread up into
+On older servers without named project sections, drag a thread between status sections to change its state. Drag a thread up into
 the pinned section to pin it at the spot you drop it; drag a pinned thread down into the active
 list to unpin it. Dragging a thread onto the **Settled** header settles it, and dragging a settled
 thread into the active list un-settles it. A snoozed thread can be dragged out of the snoozed
@@ -161,7 +177,7 @@ cannot drag or move threads within it. Your saved order returns when you turn it
 
 ### Group threads by project (beta)
 
-Turn on **Settings → Labs → Boring sidebar (group by project)** on web and desktop to put active
+For servers without named project sections, turn on **Settings → Labs → Boring sidebar (group by project)** on web and desktop to put active
 threads in a folder for each project. Pinned projects come first. A project with no active
 threads has no folder unless it is pinned or you pick it in the project filter. An archived
 project's folder comes last and shows only while it has active threads. Click a folder to open or

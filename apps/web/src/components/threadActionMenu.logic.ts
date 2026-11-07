@@ -2,6 +2,9 @@ import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
 
 export type ThreadActionMenuId =
+  | "move-to-section"
+  | `move-to-section:${string}`
+  | "move-to-unsorted"
   | "find"
   | "new-thread-on-branch"
   | "filter-by-project"
@@ -68,6 +71,7 @@ export function buildDraftActionMenuItems(options: {
 }
 
 export interface ThreadActionMenuState {
+  readonly moveToSection?: ContextMenuItem<ThreadActionMenuId>;
   readonly canOperate: boolean;
   readonly canFind?: boolean;
   readonly branch: string | null;
@@ -167,6 +171,7 @@ export function buildThreadActionMenuItems(
         ]
       : []),
     { id: "rename", label: "Rename thread", icon: "pencil", separatorBefore: true },
+    ...(state.moveToSection ? [state.moveToSection] : []),
     ...(state.supports.titleRegeneration
       ? [
           {
