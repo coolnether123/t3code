@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { createPreviewStreamClient, type PreviewStreamControl } from "./serverBrowserStream.ts";
+import {
+  createPreviewFramePainter,
+  createPreviewStreamClient,
+  type PreviewStreamControl,
+} from "./serverBrowserStream.ts";
 
 class FakeSocket extends EventTarget {
   static readonly OPEN = 1;
@@ -47,14 +51,16 @@ describe("preview stream control", () => {
   const connect = () => {
     const onFrame = vi.fn();
     const onControl = vi.fn();
+    const onSuppressed = vi.fn();
     const client = createPreviewStreamClient(target, {
       onFrame,
       onControl,
+      onSuppressed,
       onViewport: vi.fn(),
       onConnectedChange: vi.fn(),
       onUnauthorized: vi.fn(),
     });
-    return { client, socket: FakeSocket.current, onFrame, onControl };
+    return { client, socket: FakeSocket.current, onFrame, onControl, onSuppressed };
   };
   const agent: PreviewStreamControl = {
     canOperate: true,
@@ -79,11 +85,13 @@ describe("preview stream control", () => {
   });
 
   it("keeps read-only frames flowing while refusing takeover and every mutation", () => {
-    const { client, socket, onFrame } = connect();
+    const { client, socket, onFrame, onSuppressed } = connect();
     socket.control({ ...agent, canOperate: false });
     const frame = new ArrayBuffer(3);
     socket.message(frame);
     expect(onFrame).toHaveBeenCalledWith(frame);
+    socket.message(JSON.stringify({ type: "suppressed" }));
+    expect(onSuppressed).toHaveBeenCalledExactlyOnceWith();
     expect(client.send({ type: "takeControl" })).toBe(false);
     expect(client.send({ type: "resize", width: 390, height: 844 })).toBe(false);
     expect(client.send({ type: "reload" })).toBe(false);
@@ -190,4 +198,44 @@ describe("preview stream agent pointer", () => {
       sequence: 2,
     });
   });
+});
+
+it("clears protected frames and invalidates pending decodes without stopping future frames", async () => {
+  const first = Promise.withResolvers<ImageBitmap>();
+  const next = Promise.withResolvers<ImageBitmap>();
+  const close = vi.fn();
+  const bitmap = { width: 10, height: 10, close } as unknown as ImageBitmap;
+  const drawImage = vi.fn();
+  const clearRect = vi.fn();
+  const onPainted = vi.fn();
+  const canvas = {
+    width: 10,
+    height: 10,
+    getContext: () => ({ drawImage, clearRect }),
+  } as unknown as HTMLCanvasElement;
+  vi.stubGlobal(
+    "createImageBitmap",
+    vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(next.promise),
+  );
+  try {
+    const painter = createPreviewFramePainter(canvas, onPainted);
+    painter.paint(new ArrayBuffer(1));
+    painter.paint(new ArrayBuffer(2));
+    painter.clear();
+    expect(clearRect).toHaveBeenCalledExactlyOnceWith(0, 0, 10, 10);
+    first.resolve(bitmap);
+    await first.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(drawImage).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+    painter.paint(new ArrayBuffer(3));
+    next.resolve(bitmap);
+    await next.promise;
+    expect(drawImage).toHaveBeenCalledExactlyOnceWith(bitmap, 0, 0);
+    expect(onPainted).toHaveBeenCalledOnce();
+    painter.stop();
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

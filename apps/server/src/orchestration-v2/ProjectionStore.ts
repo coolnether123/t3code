@@ -565,6 +565,9 @@ export interface ProjectionStoreV2Shape {
   readonly getThreadTitles: (
     threadIds: ReadonlyArray<ThreadId>,
   ) => Effect.Effect<Record<ThreadId, string>, ProjectionStoreV2Error>;
+  readonly getNativeThreadOwners: (
+    nativeIds: ReadonlyArray<string>,
+  ) => Effect.Effect<ReadonlyMap<string, ThreadId>, ProjectionStoreV2Error>;
   readonly getThreadWorktreePaths: (options?: {
     readonly includeArchived?: boolean;
   }) => Effect.Effect<
@@ -7368,6 +7371,31 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       return Object.fromEntries(rows.map((row) => [row.thread_id, row.title]));
     }, Effect.mapError(shellSnapshotReadError));
 
+    const getNativeThreadOwners = Effect.fn("ProjectionStore.getNativeThreadOwners")(function* (
+      nativeIds: ReadonlyArray<string>,
+    ) {
+      if (nativeIds.length === 0) return new Map<string, ThreadId>();
+      const rows = yield* sql<{ readonly native_id: string; readonly thread_id: string }>`
+        SELECT json_extract(p.payload_json, '$.nativeThreadRef.nativeId') AS native_id,
+          COALESCE(p.thread_id, n.thread_id) AS thread_id
+        FROM orchestration_v2_projection_provider_threads p
+        LEFT JOIN orchestration_v2_projection_nodes n ON n.node_id = p.owner_node_id
+        INNER JOIN orchestration_v2_projection_threads t
+          ON t.thread_id = COALESCE(p.thread_id, n.thread_id)
+        WHERE t.deleted_at IS NULL
+          AND json_extract(p.payload_json, '$.nativeThreadRef.nativeId') IN ${sql.in(nativeIds)}
+        GROUP BY native_id, COALESCE(p.thread_id, n.thread_id)
+      `;
+      const owners = new Map<string, ThreadId>();
+      const ambiguous = new Set<string>();
+      for (const row of rows) {
+        if (owners.has(row.native_id)) ambiguous.add(row.native_id);
+        owners.set(row.native_id, ThreadId.make(row.thread_id));
+      }
+      for (const nativeId of ambiguous) owners.delete(nativeId);
+      return owners;
+    }, Effect.mapError(shellSnapshotReadError));
+
     const findGuestShareThreadId = Effect.fn("ProjectionStore.findGuestShareThreadId")(function* (
       shareId: GuestShareId,
     ) {
@@ -7535,6 +7563,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getSettlementCandidates: readOnReader(getSettlementCandidates),
       getThreadsWithPullRequests: readOnReader(getThreadsWithPullRequests),
       getThreadTitles: readOnReader(getThreadTitles),
+      getNativeThreadOwners: readOnReader(getNativeThreadOwners),
       getThreadWorktreePaths: readOnReader(getThreadWorktreePaths),
       getOpenRemoteDelegatedTasks: getOpenRemoteDelegatedTasks.pipe(NodeSqliteClient.readOnly),
       getThreadProjection: readOnReader(getThreadProjection),

@@ -148,6 +148,28 @@ export const PreviewStreamHostSetup = Schema.Struct({
 export type PreviewStreamHostSetup = typeof PreviewStreamHostSetup.Type;
 export const PREVIEW_STREAM_HOST_SETUP_CLOSE_CODE = 4503;
 
+export const AgentBrowserLease = Schema.Struct({
+  leaseId: TrimmedNonEmptyString,
+  threadId: TrimmedNonEmptyString,
+  workerId: Schema.String,
+  profileId: Schema.String,
+  pages: Schema.Array(
+    Schema.Struct({ pageId: TrimmedNonEmptyString, title: Title, url: Schema.String }),
+  ),
+  viewOnly: Schema.Literal(true),
+});
+export type AgentBrowserLease = typeof AgentBrowserLease.Type;
+
+export const AgentBrowserLeaseList = Schema.Struct({
+  version: Schema.Literal(1),
+  machine: Schema.String,
+  leases: Schema.Array(AgentBrowserLease),
+});
+export type AgentBrowserLeaseList = typeof AgentBrowserLeaseList.Type;
+
+export const agentBrowserTabId = (leaseId: string, pageId: string): string =>
+  `agent-lease:${encodeURIComponent(leaseId)}:${encodeURIComponent(pageId)}`;
+
 export const PreviewSessionSnapshot = Schema.Struct({
   threadId: TrimmedNonEmptyString,
   tabId: PreviewTabId,

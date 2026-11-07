@@ -100,6 +100,7 @@ import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as PreviewAgentActivity from "./preview/PreviewAgentActivity.ts";
 import * as DesktopBrowserChannel from "./preview/DesktopBrowserChannel.ts";
 import * as ServerBrowserStream from "./preview/ServerBrowserStream.ts";
+import * as AgentBrowserObserver from "./preview/AgentBrowserObserver.ts";
 import * as PreviewBrowser from "./preview/PreviewBrowser.ts";
 import * as ProcessRunner from "./processRunner.ts";
 import * as GitManager from "./git/GitManager.ts";
@@ -845,6 +846,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ),
   ),
   Layer.provide(ChromeAutomation.layer),
+  Layer.provide(AgentBrowserObserver.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
   Layer.provide(CodexDesktopStore.layer),
   Layer.provide(PreviewBrowser.layer),
   // Links to other environments, shared by Settings (WebSocket) and agents (/mcp).

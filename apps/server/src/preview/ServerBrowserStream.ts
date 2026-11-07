@@ -23,6 +23,7 @@ import * as Socket from "effect/socket/Socket";
 import { authenticateMediaRequest } from "../auth/http.ts";
 import { assetResponseHeaders } from "../http.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
+import * as AgentBrowserObserver from "./AgentBrowserObserver.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
 import { requestUrl } from "../requestUrl.ts";
 
@@ -52,10 +53,25 @@ const parseMessage = (chunk: Uint8Array | string): unknown => {
 };
 
 // Request middleware owns tracing, including long-lived WebSocket sessions.
-const makeHandler = Effect.fnUntraced(function* (browser: ServerBrowser.ServerBrowser["Service"]) {
+const makeHandler = Effect.fnUntraced(function* (
+  browser: ServerBrowser.ServerBrowser["Service"],
+  observer: AgentBrowserObserver.AgentBrowserObserver["Service"],
+) {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const url = requestUrl(request);
   if (Option.isNone(url)) return HttpServerResponse.text("Bad Request", { status: 400 });
+  if (url.value.pathname === `${PREVIEW_STREAM_ROUTE_PREFIX}/leases`) {
+    yield* authenticateMediaRequest(AuthOrchestrationReadScope);
+    return yield* observer.list(url.value.searchParams.get("threadId") ?? undefined).pipe(
+      Effect.flatMap((result) =>
+        HttpServerResponse.json(result, { headers: { "cache-control": "no-store" } }),
+      ),
+      Effect.catchTags({
+        AgentBrowserObserverError: () =>
+          Effect.succeed(HttpServerResponse.text("Service Unavailable", { status: 503 })),
+      }),
+    );
+  }
   if (url.value.pathname === `${PREVIEW_STREAM_ROUTE_PREFIX}/download`) {
     return yield* serveDownload(browser, url.value.searchParams);
   }
@@ -72,36 +88,40 @@ const makeHandler = Effect.fnUntraced(function* (browser: ServerBrowser.ServerBr
   }
   const session = yield* authenticateMediaRequest(AuthOrchestrationReadScope);
   const params = url.value.searchParams;
-  const canOperate =
-    session.scopes.includes(AuthPreviewOperateScope) && params.get("interactive") !== "false";
   const threadId = params.get("threadId") ?? "";
   const tabId = params.get("tabId") ?? "";
+  const leasedPage = tabId.startsWith("agent-lease:");
+  const canOperate =
+    !leasedPage &&
+    session.scopes.includes(AuthPreviewOperateScope) &&
+    params.get("interactive") !== "false";
   if (threadId.length === 0 || tabId.length === 0) {
     return HttpServerResponse.text("Not Found", { status: 404 });
   }
   return yield* Effect.scoped(
     Effect.gen(function* () {
-      const attached = yield* browser
-        .attachViewer({
-          threadId,
-          tabId,
-          canOperate,
-          maxWidth: intParam(params, "maxWidth", 1280, 7680),
-          maxHeight: intParam(params, "maxHeight", 800, 4320),
-          quality: intParam(params, "quality", DEFAULT_QUALITY, 100),
-        })
-        .pipe(
-          Effect.map((viewer) => ({ _tag: "attached" as const, viewer })),
-          Effect.catchTags({
-            ServerBrowserTabNotFoundError: () => Effect.succeed({ _tag: "gone" as const }),
-            ServerBrowserLaunchError: (error) => {
-              const setup = hostSetup(error.cause);
-              return setup === undefined
-                ? Effect.fail(error)
-                : Effect.succeed({ _tag: "hostSetup" as const, reason: encodeHostSetup(setup) });
-            },
-          }),
-        );
+      const attachment = leasedPage
+        ? observer.attachViewer({ threadId, tabId })
+        : browser.attachViewer({
+            threadId,
+            tabId,
+            canOperate,
+            maxWidth: intParam(params, "maxWidth", 1280, 7680),
+            maxHeight: intParam(params, "maxHeight", 800, 4320),
+            quality: intParam(params, "quality", DEFAULT_QUALITY, 100),
+          });
+      const attached = yield* attachment.pipe(
+        Effect.map((viewer) => ({ _tag: "attached" as const, viewer })),
+        Effect.catchTags({
+          ServerBrowserTabNotFoundError: () => Effect.succeed({ _tag: "gone" as const }),
+          ServerBrowserLaunchError: (error) => {
+            const setup = hostSetup(error.cause);
+            return setup === undefined
+              ? Effect.fail(error)
+              : Effect.succeed({ _tag: "hostSetup" as const, reason: encodeHostSetup(setup) });
+          },
+        }),
+      );
       const incoming = NodeHttpServerRequest.toIncomingMessage(request);
       // JPEGs are already compressed. Disabling deflate also keeps all
       // pending writes in the socket buffer we bound below, not a zlib queue.
@@ -167,6 +187,9 @@ const makeHandler = Effect.fnUntraced(function* (browser: ServerBrowser.ServerBr
               const { _tag: type, ...data } = output;
               return write(JSON.stringify({ type, ...data }));
             }
+            case "suppressed":
+              pending = null;
+              return write(JSON.stringify({ type: "suppressed" }));
             case "gone":
               return gone.pipe(Effect.andThen(Effect.interrupt));
             case "reconnect":
@@ -203,9 +226,10 @@ const makeHandler = Effect.fnUntraced(function* (browser: ServerBrowser.ServerBr
   ).pipe(
     Effect.catchTags({
       ServerBrowserLaunchError: (error) =>
-        Effect.logWarning("server preview browser failed to start", { cause: error.cause }).pipe(
-          Effect.as(HttpServerResponse.text("Service Unavailable", { status: 503 })),
-        ),
+        (leasedPage
+          ? Effect.logWarning("agent browser observer unavailable")
+          : Effect.logWarning("server preview browser failed to start", { cause: error.cause })
+        ).pipe(Effect.as(HttpServerResponse.text("Service Unavailable", { status: 503 }))),
     }),
     Effect.orElseSucceed(() => HttpServerResponse.empty()),
   );
@@ -288,10 +312,11 @@ const receiveUpload = Effect.fnUntraced(
 export const routeLayer = HttpRouter.use((router) =>
   Effect.gen(function* () {
     const browser = yield* ServerBrowser.ServerBrowser;
+    const observer = yield* AgentBrowserObserver.AgentBrowserObserver;
     const platform = yield* Effect.context<
       HttpPlatform.HttpPlatform | FileSystem.FileSystem | Path.Path
     >();
-    const handler = makeHandler(browser).pipe(Effect.provideContext(platform));
+    const handler = makeHandler(browser, observer).pipe(Effect.provideContext(platform));
     yield* router.add("GET", `${PREVIEW_STREAM_ROUTE_PREFIX}/*`, handler);
     yield* router.add("POST", `${PREVIEW_STREAM_ROUTE_PREFIX}/upload`, handler);
   }),

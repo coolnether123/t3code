@@ -212,6 +212,7 @@ export type ServerBrowserViewerOutput =
       readonly sizeBytes: number;
     }
   | { readonly _tag: "gone" }
+  | { readonly _tag: "suppressed" }
   | { readonly _tag: "reconnect" };
 
 export interface ServerBrowserViewer {

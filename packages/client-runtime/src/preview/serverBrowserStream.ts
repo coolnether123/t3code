@@ -184,6 +184,7 @@ export interface PreviewStreamTarget {
 
 export interface PreviewStreamEvents {
   readonly onFrame: (jpeg: ArrayBuffer) => void;
+  readonly onSuppressed?: () => void;
   readonly onViewport: (viewport: PreviewStreamViewport) => void;
   readonly onProbe?: (probe: PreviewStreamProbe) => void;
   readonly onPointer?: (pointer: PreviewStreamPointer) => void;
@@ -279,7 +280,9 @@ export function createPreviewStreamClient(
         sequence,
         tabId,
       } = message as Record<string, unknown>;
-      if (
+      if (type === "suppressed") {
+        events.onSuppressed?.();
+      } else if (
         type === "fileChooser" &&
         typeof id === "string" &&
         typeof multiple === "boolean" &&
@@ -401,6 +404,7 @@ export function createPreviewStreamClient(
 
 export interface PreviewFramePainter {
   readonly paint: (jpeg: ArrayBuffer) => void;
+  readonly clear: () => void;
   readonly stop: () => void;
 }
 
@@ -412,12 +416,14 @@ export function createPreviewFramePainter(
   const context = canvas.getContext("2d");
   let stopped = false;
   let decoding = false;
+  let generation = 0;
   let waiting: ArrayBuffer | null = null;
   const draw = (jpeg: ArrayBuffer) => {
     decoding = true;
+    const frameGeneration = generation;
     void createImageBitmap(new Blob([jpeg], { type: "image/jpeg" }))
       .then((bitmap) => {
-        if (stopped || !context) {
+        if (stopped || !context || frameGeneration !== generation) {
           bitmap.close();
           return;
         }
@@ -442,6 +448,11 @@ export function createPreviewFramePainter(
       if (stopped) return;
       if (decoding) waiting = jpeg;
       else draw(jpeg);
+    },
+    clear: () => {
+      generation++;
+      waiting = null;
+      context?.clearRect(0, 0, canvas.width, canvas.height);
     },
     stop: () => {
       stopped = true;

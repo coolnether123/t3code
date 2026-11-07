@@ -2389,6 +2389,50 @@ it.effect("lists every thread in the shell snapshot past SQLite's bound variable
 );
 
 it.layer(layerTest)("ProjectionStoreV2", (it) => {
+  it.effect("resolves native browser owners without guessing reused provider identities", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const first = yield* addRolledBackRecoveryCandidate("browser-owner-first");
+      const second = yield* addRolledBackRecoveryCandidate("browser-owner-second");
+      for (const [id, appThreadId, nativeId] of [
+        ["first", first, "native-first"],
+        ["first-copy", first, "native-first"],
+        ["ambiguous-first", first, "native-reused"],
+        ["ambiguous-second", second, "native-reused"],
+      ] as const) {
+        yield* store.apply({
+          id: EventId.make(`event:browser-owner:${id}`),
+          type: "provider-thread.updated",
+          threadId: appThreadId,
+          occurredAt: now,
+          payload: {
+            id: ProviderThreadId.make(`provider-thread:browser-owner:${id}`),
+            appThreadId,
+            ownerNodeId: null,
+            driver,
+            providerInstanceId,
+            providerSessionId: null,
+            nativeThreadRef: { driver, nativeId, strength: "strong" },
+            nativeConversationHeadRef: null,
+            status: "active",
+            firstRunOrdinal: 1,
+            lastRunOrdinal: null,
+            handoffIds: [],
+            forkedFrom: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+      }
+      assert.deepEqual(
+        yield* store.getNativeThreadOwners(["native-first", "native-reused", "missing"]),
+        new Map([["native-first", first]]),
+      );
+      assert.deepEqual(yield* store.getNativeThreadOwners([]), new Map());
+    }),
+  );
+
   // regression: #21969 keep corrupt plan JSON in the typed read error
   it.effect("returns a typed read error for malformed stored plan JSON", () =>
     Effect.gen(function* () {
