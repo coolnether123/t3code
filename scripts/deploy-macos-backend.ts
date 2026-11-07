@@ -949,6 +949,10 @@ const probeHttp = async (port: number, expectedEnvironmentId?: string): Promise<
     signal: AbortSignal.timeout(5_000),
   });
   assertRootHttpStatus(root.status);
+  const health = await fetch(`http://127.0.0.1:${port}/api/health`, {
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (health.status !== 200) throw new Error(`health status ${health.status}`);
 };
 
 const waitForHttp = async (
@@ -1010,6 +1014,25 @@ const stopChild = async (child: NodeChildProcess.ChildProcess): Promise<void> =>
 };
 
 const runIsolatedSmoke = async (options: BackendDeployOptions): Promise<void> => {
+  const preflight = NodePath.join(
+    NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
+    "macos-release-preflight.py",
+  );
+  await requireCommandSuccess(
+    "/usr/bin/python3",
+    [
+      preflight,
+      "--backend",
+      await candidateEntryPath(options.candidate),
+      "--node",
+      options.nodePath,
+      "--home",
+      options.baseDir,
+      "--output",
+      options.smokeHome + "-real-state",
+    ],
+    "copied-state candidate preflight",
+  );
   await ensurePrivateDirectory(options.smokeHome, "smoke home", true);
   await assertPortFree(options.smokePort);
   const child = spawnServer(
@@ -1399,6 +1422,7 @@ const rollbackDeployment = async (input: {
       ["bootstrap", `gui/${input.uid}`, input.plist],
       "owned LaunchAgent rollback bootstrap",
     );
+    await waitForHttp(input.options.port, input.environmentId, 30_000);
   } else {
     const old = spawnServer(
       input.options.oldNodePath,
@@ -1426,10 +1450,8 @@ export const recoverFailedDeployment = async (input: {
   try {
     if (input.phase === "prepared") await input.restore();
     else {
-      if (input.phase === "candidate-start-attempted") {
-        // A bootstrap error can still leave a candidate running native work.
-        await requireExternalPreStopGuard();
-      } else if ((await input.listeners()).length !== 0) {
+      // The old listener fingerprint is invalid after stopping it; ownership remains checked by rollback.
+      if (input.phase !== "candidate-start-attempted" && (await input.listeners()).length !== 0) {
         fail("a listener appeared before candidate startup; refusing rollback mutation.");
       }
       await input.rollback();
@@ -1681,11 +1703,7 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
       ["bootstrap", `gui/${uid}`, plist],
       "candidate LaunchAgent bootstrap",
     );
-    if (firstCurrentStart)
-      await waitForHttp(options.port, environmentId, FIRST_START_HEALTH_MS, () =>
-        migrationProgress(NodePath.join(options.baseDir, "userdata")),
-      );
-    else await waitForHttp(options.port, environmentId, 90_000);
+    await waitForHttp(options.port, environmentId, 60_000);
     await assertInstalledBackendOwner(options, uid, destination);
     await verifyDatabaseBackup(NodePath.join(runDir, "state.sqlite"));
     await assertInstalledBackendOwner(options, uid, destination);

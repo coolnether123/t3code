@@ -17,6 +17,7 @@ const controls = [
   "macos-active-checkpoint.py",
   "macos-native-idle.mjs",
   "macos-storage.py",
+  "macos-release-preflight.py",
   "macos-rollback-archive.py",
   "macos-peer-handoff.py",
 ];

@@ -180,7 +180,7 @@ def deploy(host, name, folder, commit, app=None):
         args = ["/bin/bash", str(Path(host["sourceRoot"]) / "scripts/launch-t3-code-macos.sh"),
                 "--expected-branch", CONFIGURATION["branch"], "--expected-commit", commit,
                 "--backup-root", host["backupRoot"], "--artifact-dir", str(folder / "activation"),
-                "--skip-build", "--headless-rollback"]
+                "--skip-build"]
     else:
         args = backend_args(host, folder, commit) + ["--execute"]
     maintenance_hold = False

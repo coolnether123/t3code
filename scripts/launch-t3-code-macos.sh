@@ -9,7 +9,7 @@ T3_HOME="${T3CODE_HOME:-$HOME/.t3}"
 APP_SUPPORT_PATH="${T3CODE_APP_SUPPORT:-$HOME/Library/Application Support/t3code}"
 BACKUP_ROOT=""; ARTIFACT_DIR=""; EXPECTED_BRANCH="${T3CODE_EXPECTED_BRANCH:-feat/t3-workers-prototype}"
 EXPECTED_COMMIT="${T3CODE_EXPECTED_COMMIT:-}"; SERVER_PORT="${T3CODE_PORT:-3773}"
-ARCH="${T3CODE_DESKTOP_ARCH:-}"; WAIT_SECONDS=120
+ARCH="${T3CODE_DESKTOP_ARCH:-}"; WAIT_SECONDS=90
 DRY_RUN=0; PREPARE_ONLY=0; BUILD_ONLY=0; SKIP_BUILD=0
 HEADLESS_ROLLBACK=0
 RUN_ID=""; RUN_DIR=""; LOG_PATH=/dev/null; STATE_PATH=""; STAGED_APP=""; PREVIOUS_APP=""
@@ -17,6 +17,8 @@ EXPECTED_ENVIRONMENT_ID=""
 VP_PATH=""; declare -a OWNED_PIDS=()
 STORAGE_HELPER="$(dirname -- "${BASH_SOURCE[0]}")/macos-storage.py"
 RESTART_OLD_ON_FAILURE=0
+ROLLBACK_REQUIRED=0
+LIVE_HEALTH_DEADLINE=0
 # The first start on a new current database copies and migrates it before serving.
 FIRST_START_WAIT_SECONDS=1800; FIRST_START_STALL_SECONDS=600; FIRST_V2_START=0
 first_start_signature() {
@@ -55,7 +57,7 @@ Usage: launch-t3-code-macos.sh --expected-commit <full-sha> --backup-root <dir> 
   --artifact-dir <dir>      Artifact output (default: unique directory under /tmp).
   --arch <arm64|x64>        Package architecture (default: host architecture).
   --port <number>           Server loopback port (default: 3773).
-  --wait-seconds <15..600>  Health timeout (default: 120).
+  --wait-seconds <15..600>  Health timeout (default and live maximum: 90).
   --skip-build              Use existing desktop/server bundles.
   --headless-rollback       Recover the old backend without opening its desktop.
   --help                    Show this help.
@@ -205,7 +207,7 @@ capture_tree() {
 listeners() { lsof -nP -t -iTCP:"$SERVER_PORT" -sTCP:LISTEN 2>/dev/null | sort -u || true; }
 check_listeners() { local p; while read -r p; do [[ -z "$p" ]] || in_owned "$p" || fail "port $SERVER_PORT held by unrelated PID $p"; done < <(listeners); }
 stop_tree() {
-  if [[ -n "${T3CODE_PRESTOP_GUARD:-}" ]]; then /usr/bin/python3 "$T3CODE_PRESTOP_GUARD" --gate-only || fail "overnight idle gate changed"; fi
+  if [[ "${1:-}" != recovery && -n "${T3CODE_PRESTOP_GUARD:-}" ]]; then /usr/bin/python3 "$T3CODE_PRESTOP_GUARD" --gate-only || fail "overnight idle gate changed"; fi
   local p i live; [[ "${#OWNED_PIDS[@]}" -gt 0 ]] || return 0; plan "Stopping captured T3 PID ${OWNED_PIDS[0]} and its descendants."
   [[ "$DRY_RUN" -eq 1 ]] && return; kill -TERM "${OWNED_PIDS[0]}" 2>/dev/null || true
   for i in {1..10}; do live=0; for p in "${OWNED_PIDS[@]}"; do alive "$p" && live=1; done; [[ "$live" -eq 0 ]] && return; sleep 1; done
@@ -232,11 +234,13 @@ backup() {
       storage clone "$T3_HOME/userdata/statev2.sqlite" "$RUN_DIR/t3-home/userdata/statev2.sqlite" >>"$LOG_PATH" 2>&1 || fail "current SQLite APFS clone failed"
     fi
   fi
-  storage verify "$out" >>"$LOG_PATH" 2>&1 || fail "backup SQLite integrity_check failed"
+  if [[ "${T3CODE_DEPLOY_CODE_ONLY:-0}" != 1 && -d "$APP_SUPPORT_PATH" ]]; then plan "Backing up Electron support data with APFS clones."; storage clone "$APP_SUPPORT_PATH" "$RUN_DIR/application-support" >>"$LOG_PATH" 2>&1 || fail "Electron support APFS clone failed"; fi
+}
+verify_backup() {
+  storage verify "$RUN_DIR/t3-home/userdata/state.sqlite" >>"$LOG_PATH" 2>&1 || fail "backup SQLite integrity_check failed"
   if [[ -e "$RUN_DIR/t3-home/userdata/statev2.sqlite" ]]; then
     storage verify "$RUN_DIR/t3-home/userdata/statev2.sqlite" >>"$LOG_PATH" 2>&1 || fail "current backup SQLite integrity_check failed"
   fi
-  if [[ "${T3CODE_DEPLOY_CODE_ONLY:-0}" != 1 && -d "$APP_SUPPORT_PATH" ]]; then plan "Backing up Electron support data with APFS clones."; storage clone "$APP_SUPPORT_PATH" "$RUN_DIR/application-support" >>"$LOG_PATH" 2>&1 || fail "Electron support APFS clone failed"; fi
 }
 record_environment_identity() {
   local identity_path="$T3_HOME/userdata/environment-id"
@@ -413,9 +417,15 @@ recover() {
     storage retire "$r" "$p" --app "$APP_PATH" >>"$LOG_PATH" 2>&1 || fail "accepted rollback retirement remains held; app unchanged"
     rm -f "$STATE_PATH"; plan "Finished accepted rollback retirement; running app unchanged."; return
   fi
-  record_environment_identity; idle_gate
+  record_environment_identity
+  local current_run="$RUN_DIR" environment_body actual_environment_id
+  RUN_DIR="$r"
+  if [[ -d "$APP_PATH" ]] && verify_restored_app && curl --fail --silent --max-time 3 "http://127.0.0.1:$SERVER_PORT/api/health" >/dev/null && environment_body="$(curl --fail --silent --max-time 3 "http://127.0.0.1:$SERVER_PORT/.well-known/t3/environment")" && actual_environment_id="$(environment_id_from_json "$environment_body")" && [[ "$actual_environment_id" == "$EXPECTED_ENVIRONMENT_ID" ]]; then
+    RUN_DIR="$current_run"; rm -f "$STATE_PATH"; plan "Known-good backup is already restored and healthy; app unchanged."; return
+  fi
+  RUN_DIR="$current_run"
   if [[ -d "$APP_PATH" ]]; then exe="$(bundle_exec "$APP_PATH")"; else exe="$(bundle_exec "$p")"; fi
-  rt="$(root "$exe")"; if [[ -n "$rt" ]]; then capture_tree "$rt"; check_listeners; stop_tree; fi
+  rt="$(root "$exe")"; if [[ -n "$rt" ]]; then capture_tree "$rt"; check_listeners; stop_tree recovery; fi
   case "$phase" in
     ready-to-swap) if [[ ! -d "$APP_PATH" ]]; then [[ -d "$p" ]] || fail "target and previous app are missing"; mv "$p" "$APP_PATH"; fi;;
     old-moved|new-installed)
@@ -423,7 +433,8 @@ recover() {
       [[ -d "$p" ]] || fail "previous app missing"; mv "$p" "$APP_PATH";;
     rolled-back) [[ -d "$APP_PATH" ]] || { [[ -d "$p" ]] || fail "previous app missing"; mv "$p" "$APP_PATH"; };;
     *) fail "unknown deployment phase $phase";; esac
-  rm -f "$STATE_PATH"; plan "Recovered interrupted swap; previous app restored and live data untouched."
+  RUN_DIR="$r"; verify_restored_app || fail "restored backup checksum differs"; launch_previous || fail "interrupted swap recovery health verification failed"; RUN_DIR="$current_run"
+  rm -f "$STATE_PATH"; plan "Recovered interrupted swap; previous app restored and healthy."
 }
 extract_app() {
   local z="" p n=0 app="" apps=0; while read -r p; do [[ -z "$p" ]] || { z="$p"; n=$((n+1)); }; done < <(find "$ARTIFACT_DIR" -maxdepth 1 -type f -name '*.zip' -print)
@@ -446,18 +457,21 @@ environment_id_from_json() {
 }
 launch_verify() {
   local mode="${1:-}" limit="$WAIT_SECONDS" signature="" last_signature="" changed=0
-  [[ "$mode" == first-start ]] && { limit="$FIRST_START_WAIT_SECONDS"; last_signature="$(first_start_signature "$T3_HOME/userdata")"; }
+  (( limit <= 90 )) || limit=90
+  [[ "$mode" == first-start ]] && last_signature="$(first_start_signature "$T3_HOME/userdata")"
   local exe root_pid i log environment_body actual_environment_id session_body; exe="$(validate_app "$APP_PATH")"; log="$RUN_DIR/runtime-$(date -u +%Y%m%d-%H%M%S).log"; plan "Launching $exe with T3CODE_HOME=$T3_HOME and T3CODE_PORT=$SERVER_PORT."
   [[ "$DRY_RUN" -eq 1 ]] && return
   # Launch through LaunchServices so the app runs in the user's GUI session. A child of an SSH
   # shell cannot reach the login keychain, so Electron safeStorage fails to decrypt the saved
   # connection catalog and remote environments silently disappear until a manual relaunch.
-  open -g -n -a "$APP_PATH" --env "T3CODE_HOME=$T3_HOME" --env "T3CODE_PORT=$SERVER_PORT" --env "T3CODE_BACKGROUND_LAUNCH=1" --stdout "$log" --stderr "$log" || { printf 'LaunchServices could not open %s\n' "$APP_PATH" >&2; return 1; }
-  for ((i=0; i<limit; i++)); do root_pid="$(root "$exe")"
+  env -u ELECTRON_RUN_AS_NODE -u NODE_OPTIONS -u T3CODE_BOOTSTRAP_FD -u T3CODE_DESKTOP_BOOTSTRAP_FD -u T3CODE_PARENT_PID -u VITE_DEV_SERVER_URL -u VITE_HTTP_URL -u VITE_WS_URL open -g -n -a "$APP_PATH" --env "T3CODE_HOME=$T3_HOME" --env "T3CODE_PORT=$SERVER_PORT" --env "T3CODE_BACKGROUND_LAUNCH=1" --stdout "$log" --stderr "$log" || { printf 'LaunchServices could not open %s\n' "$APP_PATH" >&2; return 1; }
+  local deadline=$((SECONDS + limit))
+  if (( LIVE_HEALTH_DEADLINE > 0 && LIVE_HEALTH_DEADLINE < deadline )); then deadline="$LIVE_HEALTH_DEADLINE"; fi
+  for ((i=0; SECONDS<deadline; i++)); do root_pid="$(root "$exe")"
     if [[ -n "$root_pid" ]]; then
       capture_tree "$root_pid"; check_listeners
       if environment_body="$(curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:$SERVER_PORT/.well-known/t3/environment" 2>>"$log")" && actual_environment_id="$(environment_id_from_json "$environment_body")"; then
-        if [[ "$actual_environment_id" == "$EXPECTED_ENVIRONMENT_ID" ]] && session_body="$(curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:$SERVER_PORT/api/auth/session" 2>>"$log")" && [[ -n "$session_body" ]]; then
+        if [[ "$actual_environment_id" == "$EXPECTED_ENVIRONMENT_ID" ]] && session_body="$(curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:$SERVER_PORT/api/auth/session" 2>>"$log")" && [[ -n "$session_body" ]] && curl --fail --silent --max-time 5 "http://127.0.0.1:$SERVER_PORT/api/health" >/dev/null; then
           check_listeners; printf 'health passed: PID %s, environment identity and auth/session APIs on 127.0.0.1:%s\n' "$root_pid" "$SERVER_PORT"; return 0
         fi
       fi
@@ -473,6 +487,7 @@ launch_verify() {
   done; printf 'app did not pass API health within %s seconds; see %s\n' "$limit" "$log" >&2; return 1
 }
 launch_previous() {
+  LIVE_HEALTH_DEADLINE=0
   if [[ "$HEADLESS_ROLLBACK" -eq 1 ]]; then
     local exe; exe="$(validate_app "$APP_PATH")"
     /usr/bin/python3 "$SOURCE_ROOT/scripts/macos-headless-backend.py" --executable "$exe" \
@@ -483,8 +498,16 @@ launch_previous() {
     launch_verify
   fi
 }
+verify_restored_app() {
+  local expected actual
+  expected="$(awk '{print $1}' "$RUN_DIR/installed-app/app.asar.sha256")"
+  actual="$(shasum -a 256 "$APP_PATH/Contents/Resources/app.asar" | awk '{print $1}')"
+  [[ -n "$expected" && "$actual" == "$expected" ]]
+}
 rollback() {
-  local exe rt failed aside_failed=0; idle_gate; exe="$(bundle_exec "$APP_PATH")"; rt="$(root "$exe")"; if [[ -n "$rt" ]]; then capture_tree "$rt"; check_listeners; stop_tree; fi
+  # The old listener is already stopped. Its admission fingerprint cannot gate recovery.
+  local exe rt failed aside_failed=0; WAIT_SECONDS=30; LIVE_HEALTH_DEADLINE=0
+  if [[ -d "$APP_PATH" ]]; then exe="$(bundle_exec "$APP_PATH")"; rt="$(root "$exe")"; if [[ -n "$rt" ]]; then capture_tree "$rt"; check_listeners; stop_tree recovery; fi; fi
   # The old app keeps writing state.sqlite, so a later first start must copy it afresh.
   if [[ "$FIRST_V2_START" == 1 ]]; then
     local moved
@@ -492,19 +515,40 @@ rollback() {
       printf 'set aside failed first-start database: %s\n' "$moved" >>"$LOG_PATH"
     else aside_failed=1; fi
   fi
-  failed="$RUN_DIR/failed-candidate-$(basename "$APP_PATH")"; [[ ! -e "$failed" ]] || fail "rollback destination exists"; [[ -d "$APP_PATH" ]] && mv "$APP_PATH" "$failed"; [[ -d "$PREVIOUS_APP" ]] || fail "previous app unavailable"; mv "$PREVIOUS_APP" "$APP_PATH"; write_state rolled-back; rm -f "$STATE_PATH"; launch_previous || fail "rollback health verification failed"; printf 'rollback passed; failed candidate retained at %s\n' "$failed"
+  failed="$RUN_DIR/failed-candidate-$(basename "$APP_PATH")"; [[ ! -e "$failed" ]] || fail "rollback destination exists"
+  if [[ -d "$PREVIOUS_APP" ]]; then
+    [[ ! -d "$APP_PATH" ]] || mv "$APP_PATH" "$failed"
+    mv "$PREVIOUS_APP" "$APP_PATH"
+  elif ! verify_restored_app; then
+    [[ ! -d "$APP_PATH" ]] || mv "$APP_PATH" "$failed"
+    ditto "$RUN_DIR/installed-app/$(basename "$APP_PATH")" "$APP_PATH" || fail "backup app restoration failed"
+  fi
+  verify_restored_app || fail "restored app checksum differs from known-good backup"
+  write_state rolled-back; launch_previous || fail "rollback health verification failed"; rm -f "$STATE_PATH"; ROLLBACK_REQUIRED=0; printf 'rollback passed; failed candidate retained at %s\n' "$failed"
   [[ "$aside_failed" == 0 ]] || fail "could not set aside the failed first-start database; reconcile $T3_HOME/userdata"
+}
+deployment_exit() {
+  local status=$?
+  trap - EXIT
+  if [[ "$ROLLBACK_REQUIRED" == 1 ]]; then
+    rollback >>"$LOG_PATH" 2>&1 || { printf 'backup recovery failed; see %s\n' "$LOG_PATH" >&2; return 1; }
+  elif [[ "$RESTART_OLD_ON_FAILURE" == 1 ]]; then
+    launch_previous >>"$LOG_PATH" 2>&1 || { printf 'old backend recovery failed; see %s\n' "$LOG_PATH" >&2; return 1; }
+  fi
+  return "$status"
 }
 deploy() {
   [[ -d "$APP_PATH" ]] || fail "installed app missing; refusing deployment"; local old new app_parent app_name
   storage startup "$T3_HOME/userdata" >>"$LOG_PATH" 2>&1 || fail "first-launch database copy would cross the 20 GiB floor"
-  old="$(validate_app "$APP_PATH")"; record_environment_identity; space_gate "$T3_HOME"; idle_gate; backup_app; idle_gate
-  trap 'if [[ "$RESTART_OLD_ON_FAILURE" == 1 ]]; then if ! launch_previous >>"$LOG_PATH" 2>&1; then printf "old backend recovery failed; reconcile %s\n" "$LOG_PATH" >&2; fi; fi' EXIT
+  old="$(validate_app "$APP_PATH")"; record_environment_identity; space_gate "$T3_HOME"
+  /usr/bin/python3 "$SOURCE_ROOT/scripts/macos-release-preflight.py" --app "$STAGED_APP" --home "$T3_HOME" --output "$RUN_DIR/preflight" || fail "candidate preflight failed; live app unchanged"
+  idle_gate; backup_app; idle_gate
+  trap deployment_exit EXIT
   storage startup "$T3_HOME/userdata" >>"$LOG_PATH" 2>&1 || fail "first-launch database copy would cross the 20 GiB floor"
   if [[ -n "${T3CODE_GUARD_MANIFEST:-}" ]]; then
     /usr/bin/python3 "$SOURCE_ROOT/scripts/macos-active-checkpoint.py" --prepare >>"$LOG_PATH" 2>&1 || fail "active checkpoint preparation failed"
   fi
-  stop_existing "$old"; RESTART_OLD_ON_FAILURE=1
+  LIVE_HEALTH_DEADLINE=$((SECONDS + 90)); RESTART_OLD_ON_FAILURE=1; stop_existing "$old"
   storage checkpoint "$T3_HOME/userdata/state.sqlite" >>"$LOG_PATH" 2>&1 || fail "quiescent SQLite checkpoint failed"
   if [[ -e "$T3_HOME/userdata/statev2.sqlite" ]]; then
     storage checkpoint "$T3_HOME/userdata/statev2.sqlite" >>"$LOG_PATH" 2>&1 || fail "current quiescent SQLite checkpoint failed"
@@ -513,12 +557,13 @@ deploy() {
   app_parent="$(dirname "$APP_PATH")"; app_name="$(basename "$APP_PATH" .app)"
   PREVIOUS_APP="$app_parent/.$app_name.previous.$RUN_ID.app"; new="$app_parent/.$app_name.new.$RUN_ID.app"
   [[ ! -e "$PREVIOUS_APP" && ! -e "$new" ]] || fail "app staging path exists"; storage clone "$STAGED_APP" "$new" >>"$LOG_PATH" 2>&1 || fail "candidate staging APFS clone failed"; validate_app "$new" 1 >/dev/null; STAGED_APP="$new"; write_state ready-to-swap
-  RESTART_OLD_ON_FAILURE=0
+  RESTART_OLD_ON_FAILURE=0; ROLLBACK_REQUIRED=1
   [[ -e "$T3_HOME/userdata/statev2.sqlite" ]] || FIRST_V2_START=1
   mv "$APP_PATH" "$PREVIOUS_APP"; write_state old-moved; mv "$STAGED_APP" "$APP_PATH"; write_state new-installed
   local first_mode=""; [[ "$FIRST_V2_START" == 1 ]] && first_mode=first-start
-  if ! launch_verify "$first_mode"; then printf 'new app health failed; rolling back\n' >&2; rollback; fail "deployment rolled back"; fi
-  write_state accepted
+  if ! launch_verify "$first_mode"; then printf 'new app health failed; rolling back\n' >&2; fail "candidate health failed; restoring backup"; fi
+  write_state accepted; ROLLBACK_REQUIRED=0
+  verify_backup
   storage retire "$RUN_DIR" "$PREVIOUS_APP" --app "$APP_PATH" >>"$LOG_PATH" 2>&1 || fail "accepted rollback retirement failed; current rollback retained"
   rm -f "$STATE_PATH"; printf 'deployment ready: %s\nbackup: %s\nprevious app retained: %s\n' "$APP_PATH" "$RUN_DIR" "$PREVIOUS_APP"
 }

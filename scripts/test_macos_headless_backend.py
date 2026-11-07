@@ -31,7 +31,7 @@ class HeadlessBackendTests(unittest.TestCase):
         self.assertEqual(env["ELECTRON_RUN_AS_NODE"], "1")
         self.assertEqual(env["T3CODE_TAILSCALE_SERVE"], "false")
 
-    def run_launch(self, descriptor, addresses="n127.0.0.1:3773\n", pid="123"):
+    def run_launch(self, descriptor, addresses="n127.0.0.1:3773\n", pid="123", health_status=200):
         clock = [0]
         def advance(seconds):
             clock[0] += seconds
@@ -42,8 +42,12 @@ class HeadlessBackendTests(unittest.TestCase):
              patch.object(backend.time, "sleep", side_effect=advance), contextlib.redirect_stdout(io.StringIO()) as output:
             start.return_value.pid = 123
             start.return_value.poll.return_value = None
-            opener.return_value.open.side_effect = lambda url, **kwargs: Response(
-                json.dumps(descriptor).encode() if url.endswith('/environment') else b'{"private":"not-for-logs"}')
+            def response(url, **kwargs):
+                value = Response(json.dumps(descriptor).encode() if url.endswith('/environment') else b'{"private":"not-for-logs"}')
+                if url.endswith('/api/health'):
+                    value.status = health_status
+                return value
+            opener.return_value.open.side_effect = response
             result = backend.launch(Path("/Applications/Old.app/Contents/MacOS/Old"),
                                     Path("/Applications/Old.app/Contents/Resources/app.asar/server.mjs"),
                                     Path("/Users/test/.t3"), 3773, "expected", 15)
@@ -52,7 +56,7 @@ class HeadlessBackendTests(unittest.TestCase):
     def test_recovers_only_the_expected_loopback_environment_without_a_window(self):
         result, call, output, requests, stopped = self.run_launch({"environmentId": "expected"})
         self.assertEqual(result, 0)
-        self.assertEqual(requests, 2)
+        self.assertEqual(requests, 3)
         self.assertFalse(stopped)
         self.assertTrue(call.kwargs["start_new_session"])
         self.assertEqual(call.kwargs["stdout"], subprocess.DEVNULL)
@@ -60,6 +64,13 @@ class HeadlessBackendTests(unittest.TestCase):
         self.assertIn("--no-browser", call.args[0])
         self.assertNotIn("not-for-logs", output)
         self.assertEqual(json.loads(output.splitlines()[-1])["status"], "healthy")
+
+    def test_recovery_is_not_healthy_until_api_health_returns_200(self):
+        result, _, output, requests, stopped = self.run_launch({"environmentId": "expected"}, health_status=503)
+        self.assertEqual(result, 1)
+        self.assertGreater(requests, 0)
+        self.assertTrue(stopped)
+        self.assertEqual(json.loads(output.splitlines()[-1])["status"], "unhealthy")
 
     def test_wrong_environment_never_passes_health_or_opens_the_desktop(self):
         result, _, output, requests, stopped = self.run_launch({"environmentId": "different"})

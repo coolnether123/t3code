@@ -16,6 +16,88 @@ const source = NodeFS.readFileSync(scriptPath, "utf8");
 const bash = NodeOS.type() === "Windows_NT" ? "C:/Program Files/Git/bin/bash.exe" : "/bin/bash";
 
 describe("launch-t3-code-macos", () => {
+  it("does not pass the agent harness Node mode into the desktop launch", () => {
+    const launch = source.match(/launch_verify\(\) \{[\s\S]*?\n\}(?=\nlaunch_previous\(\))/)?.[0];
+    assert.isString(launch);
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-desktop-env-"));
+    try {
+      const open = NodePath.join(directory, "open");
+      NodeFS.writeFileSync(
+        open,
+        '#!/bin/sh\n[ -z "${ELECTRON_RUN_AS_NODE+x}" ] && [ -z "${NODE_OPTIONS+x}" ] && [ -z "${T3CODE_BOOTSTRAP_FD+x}" ] && [ -z "${T3CODE_PARENT_PID+x}" ]\n',
+        { mode: 0o700 },
+      );
+      const program = [
+        "set -euo pipefail",
+        `export PATH='${directory}':"$PATH" ELECTRON_RUN_AS_NODE=1 NODE_OPTIONS=--inspect=0 T3CODE_BOOTSTRAP_FD=3 T3CODE_PARENT_PID=10`,
+        `WAIT_SECONDS=15; LIVE_HEALTH_DEADLINE=0; APP_PATH=unused; RUN_DIR='${directory}'; T3_HOME='${directory}'; SERVER_PORT=3773; DRY_RUN=0; EXPECTED_ENVIRONMENT_ID=expected`,
+        'validate_app() { printf unused; }; plan() { :; }; root() { printf 100; }; capture_tree() { :; }; check_listeners() { :; }; curl() { printf \'{"environmentId":"expected"}\'; }',
+        source.match(/environment_id_from_json\(\) \{[\s\S]*?\n\}/)?.[0] ?? "",
+        launch,
+        "launch_verify",
+      ].join("\n");
+      const result = NodeChildProcess.spawnSync(bash, ["-c", program], { encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      assert.include(result.stdout, "health passed");
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+  it("restores the exact backup and serves it even when the stopped listener guard refuses", () => {
+    const rollback = source.match(/rollback\(\) \{[\s\S]*?\n\}(?=\ndeploy\(\))/)?.[0];
+    assert.isString(rollback);
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-failed-release-"));
+    const app = NodePath.join(directory, "T3.app");
+    const previous = NodePath.join(directory, "previous.app");
+    const run = NodePath.join(directory, "run");
+    for (const path of [app, previous]) {
+      NodeFS.mkdirSync(NodePath.join(path, "Contents/Resources"), { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(path, "Contents/Resources/app.asar"),
+        path === app ? "failed-candidate" : "known-good",
+      );
+    }
+    NodeFS.mkdirSync(NodePath.join(run, "installed-app"), { recursive: true });
+    const fixture = NodePath.join(directory, "serve.cjs");
+    const fifo = NodePath.join(directory, "ready");
+    NodeFS.writeFileSync(
+      fixture,
+      `const fs=require('node:fs');const server=require('node:http').createServer((req,res)=>res.end(fs.readFileSync(process.argv[2])));server.listen(0,'127.0.0.1',()=>fs.writeFileSync(process.argv[3],String(server.address().port)+'\\n'));`,
+    );
+    let serverPid: number | undefined;
+    try {
+      const program = [
+        "set -euo pipefail",
+        `APP_PATH='${app}'; PREVIOUS_APP='${previous}'; RUN_DIR='${run}'; STATE_PATH='${directory}/state'; FIRST_V2_START=0; LOG_PATH=/dev/null`,
+        `shasum -a 256 '${previous}/Contents/Resources/app.asar' > '${run}/installed-app/app.asar.sha256'`,
+        `mkfifo '${fifo}'`,
+        "idle_gate() { exit 88; }; bundle_exec() { printf fixture; }; root() { :; }; write_state() { :; }; fail() { printf '%s\\n' \"$*\" >&2; exit 5; }",
+        `launch_previous() { '${process.execPath}' '${fixture}' "$APP_PATH/Contents/Resources/app.asar" '${fifo}' >/dev/null 2>&1 & echo $! > '${directory}/server.pid'; read -r port < '${fifo}'; curl --fail --silent "http://127.0.0.1:$port/api/health"; }`,
+        source.match(/verify_restored_app\(\) \{[\s\S]*?\n\}/)?.[0] ?? "",
+        rollback,
+        "rollback",
+      ].join("\n");
+      const result = NodeChildProcess.spawnSync(bash, ["-c", program], { encoding: "utf8" });
+      const pidPath = NodePath.join(directory, "server.pid");
+      if (NodeFS.existsSync(pidPath)) serverPid = Number(NodeFS.readFileSync(pidPath, "utf8"));
+      assert.equal(result.status, 0, result.stderr);
+      assert.include(result.stdout, "known-good");
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(app, "Contents/Resources/app.asar"), "utf8"),
+        "known-good",
+      );
+      assert.equal(
+        NodeFS.readFileSync(
+          NodePath.join(run, "failed-candidate-T3.app/Contents/Resources/app.asar"),
+          "utf8",
+        ),
+        "failed-candidate",
+      );
+    } finally {
+      if (serverPid !== undefined) process.kill(serverPid, "SIGTERM");
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
   it("finishes accepted retirement without stopping or rolling back the installed app", () => {
     const recover = source.match(/recover\(\) \{[\s\S]*?\n\}(?=\nextract_app\(\))/)?.[0];
     assert.isString(recover);
@@ -108,7 +190,7 @@ describe("launch-t3-code-macos", () => {
     assert.include(source, "lsof -nP -t -iTCP:");
     assert.notInclude(source, "VACUUM INTO");
     assert.include(source, 'storage checkpoint "$T3_HOME/userdata/state.sqlite"');
-    assert.include(source, 'storage verify "$out"');
+    assert.include(source, 'storage verify "$RUN_DIR/t3-home/userdata/state.sqlite"');
     assert.include(source, 'storage clone "$db" "$out"');
     assert.include(source, "T3_HOME");
     assert.include(source, "APP_SUPPORT_PATH");
@@ -208,12 +290,17 @@ describe("launch-t3-code-macos", () => {
     }
   });
 
-  it("waits longer only for a first start and rolls that database aside", () => {
+  it("bounds live downtime even for a first start and rolls that database aside", () => {
     assert.include(source, '[[ -e "$T3_HOME/userdata/statev2.sqlite" ]] || FIRST_V2_START=1');
     assert.include(source, 'if ! launch_verify "$first_mode"; then');
-    assert.include(source, '[[ "$mode" == first-start ]] && { limit="$FIRST_START_WAIT_SECONDS"');
+    assert.include(source, "(( limit <= 90 )) || limit=90");
+    assert.include(source, "local deadline=$((SECONDS + limit))");
     assert.include(source, '"$RUN_DIR/failed-first-start-database"');
     assert.match(source, /launch_previous\(\) \{[\s\S]*?\n    launch_verify\n/);
+    assert.isBelow(
+      source.indexOf('macos-release-preflight.py" --app'),
+      source.indexOf('RESTART_OLD_ON_FAILURE=1; stop_existing "$old"'),
+    );
   });
 
   it("launches through LaunchServices so saved connections stay readable", () => {

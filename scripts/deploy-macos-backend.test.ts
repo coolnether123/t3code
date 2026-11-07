@@ -471,7 +471,7 @@ describe("deploy-macos-backend guards", () => {
     expect(actions).toEqual(["rollback", "restore"]);
   });
 
-  it("preserves the candidate when the external rollback idle guard rejects", async () => {
+  it("restores the old deployment without reusing the stopped listener's idle guard", async () => {
     await withTempDirectory(async (root) => {
       const guard = NodePath.join(root, "idle-guard.py");
       const invoked = NodePath.join(root, "invoked");
@@ -500,27 +500,24 @@ describe("deploy-macos-backend guards", () => {
             rollback,
             listeners: async () => (pid === undefined ? [] : [{ pid, name: "127.0.0.1:3773" }]),
           });
-        const rejected = await recover("candidate-start-attempted").catch(
-          (failure: unknown) => failure,
-        );
-        expect(rejected).toBeInstanceOf(AggregateError);
-        expect((rejected as AggregateError).errors[0]).toBe(error);
-        expect((rejected as AggregateError).errors[1].message).toContain("overnight idle gate");
-        expect((rejected as AggregateError).message).toContain("candidate health failed");
-        expect((rejected as AggregateError).message).toContain("overnight idle gate");
-        expect(await NodeFSP.readFile(invoked, "utf8")).toBe("checked");
-        expect(actions).toEqual([]);
+        await expect(recover("candidate-start-attempted")).rejects.toBe(error);
+        await expect(NodeFSP.stat(invoked)).rejects.toMatchObject({ code: "ENOENT" });
+        expect(actions).toEqual(["stop candidate and restore old deployment"]);
         await expect(recover("prepared")).rejects.toBe(error);
-        expect(actions).toEqual(["restore"]);
+        expect(actions).toEqual(["stop candidate and restore old deployment", "restore"]);
         await expect(recover("stopped", 43)).rejects.toThrow("listener appeared before candidate");
-        expect(actions).toEqual(["restore"]);
-        await NodeFSP.rm(invoked);
+        expect(actions).toEqual(["stop candidate and restore old deployment", "restore"]);
         await expect(recover("stopped")).rejects.toBe(error);
         await expect(NodeFSP.stat(invoked)).rejects.toMatchObject({ code: "ENOENT" });
-        expect(actions).toEqual(["restore", "stop candidate and restore old deployment"]);
+        expect(actions).toEqual([
+          "stop candidate and restore old deployment",
+          "restore",
+          "stop candidate and restore old deployment",
+        ]);
         await NodeFSP.writeFile(guard, "import sys\nassert sys.argv[1:] == ['--gate-only']\n");
         await expect(recover("candidate-start-attempted")).rejects.toBe(error);
         expect(actions).toEqual([
+          "stop candidate and restore old deployment",
           "restore",
           "stop candidate and restore old deployment",
           "stop candidate and restore old deployment",

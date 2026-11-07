@@ -49,6 +49,9 @@ def launch(executable, entry, home, port, environment_id, wait_seconds):
             with opener.open("http://127.0.0.1:" + str(port) + "/api/auth/session", timeout=5) as response:
                 if response.status != 200 or not response.read(65536):
                     raise ValueError("session endpoint unavailable")
+            with opener.open("http://127.0.0.1:" + str(port) + "/api/health", timeout=5) as response:
+                if response.status != 200:
+                    raise ValueError("health endpoint unavailable")
             print(json.dumps({**receipt, "status": "healthy",
                               "commandSha256": hashlib.sha256(json.dumps(argv).encode()).hexdigest()}), flush=True)
             return 0
