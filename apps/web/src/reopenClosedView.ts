@@ -122,7 +122,7 @@ export async function reopenClosedView(
     return false;
   switch (surface.kind) {
     case "agent-browser":
-      panels.openAgentBrowser(ref, surface.resourceId);
+      panels.openAgentBrowser(surface.threadRef, surface.resourceId);
       break;
     case "preview":
       if (surface.resourceId !== null) return false;

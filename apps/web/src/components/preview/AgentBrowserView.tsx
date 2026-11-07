@@ -1,6 +1,6 @@
 import { agentBrowserTabId, type ScopedThreadRef } from "@t3tools/contracts";
 import { PictureInPicture2Icon } from "lucide-react";
-import { useRef } from "react";
+import { useRef, useSyncExternalStore } from "react";
 
 import { useAgentBrowserLeases } from "~/browser/agentBrowserLeases";
 import { ServerBrowserSurface, type ServerBrowserHandle } from "~/browser/ServerBrowserSurface";
@@ -16,12 +16,19 @@ import { Button } from "../ui/button";
 import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
+const subscribeVisibility = (changed: () => void) => {
+  document.addEventListener("visibilitychange", changed);
+  return () => document.removeEventListener("visibilitychange", changed);
+};
+const documentVisible = () => !document.hidden;
+
 export function AgentBrowserView(props: {
   readonly threadRef: ScopedThreadRef;
   readonly tabId: string;
   readonly visible: boolean;
 }) {
   const leases = useAgentBrowserLeases(props.threadRef.environmentId);
+  const visible = useSyncExternalStore(subscribeVisibility, documentVisible, () => false);
   const pages = leases
     .filter((lease) => lease.threadId === props.threadRef.threadId)
     .flatMap((lease) =>
@@ -99,7 +106,7 @@ export function AgentBrowserView(props: {
           environmentId={props.threadRef.environmentId}
           threadId={props.threadRef.threadId}
           tabId={tabId}
-          visible={props.visible}
+          visible={props.visible && visible}
           readOnly
           followSize={false}
           className="min-h-0 flex-1"

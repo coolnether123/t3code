@@ -86,7 +86,11 @@ export function RightPanelSurfaceContent(props: {
   switch (surface.kind) {
     case "agent-browser":
       return (
-        <AgentBrowserView threadRef={threadRef} tabId={surface.resourceId} visible={visible} />
+        <AgentBrowserView
+          threadRef={surface.threadRef}
+          tabId={surface.resourceId}
+          visible={visible}
+        />
       );
     case "preview":
       return (

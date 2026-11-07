@@ -67,7 +67,7 @@ const isClosedViewEntry = (entry: unknown): entry is ClosedViewEntry => {
     case "preview":
       return surface.resourceId === null || typeof surface.resourceId === "string";
     case "agent-browser":
-      return typeof surface.resourceId === "string";
+      return typeof surface.resourceId === "string" && isThreadRef(surface.threadRef);
     case "file":
       return (
         typeof surface.relativePath === "string" &&

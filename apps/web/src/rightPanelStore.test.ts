@@ -50,6 +50,13 @@ describe("rightPanelStore", () => {
     expect(
       selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refB).surfaces,
     ).toEqual([]);
+    store.openAgentBrowser(refB, "agent-lease:side-chat:page");
+    expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      id: "agent-browser:agent-lease:side-chat:page",
+      kind: "agent-browser",
+      resourceId: "agent-lease:side-chat:page",
+      threadRef: refB,
+    });
     unhost();
     store.openFile(refB, "src/app.ts");
     expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refB)?.id).toBe(

@@ -36,7 +36,12 @@ export interface DeviceTabTarget {
 }
 
 export type RightPanelSurface =
-  | { id: `agent-browser:${string}`; kind: "agent-browser"; resourceId: string }
+  | {
+      id: `agent-browser:${string}`;
+      kind: "agent-browser";
+      resourceId: string;
+      threadRef: ScopedThreadRef;
+    }
   | { id: `browser:${string}`; kind: "preview"; resourceId: string }
   | { id: "browser:new"; kind: "preview"; resourceId: null }
   | { id: "device" | `device:${string}`; kind: "device"; target?: DeviceTabTarget; title?: string }
@@ -745,6 +750,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               id: `agent-browser:${tabId}`,
               kind: "agent-browser",
               resourceId: tabId,
+              threadRef: ref,
             }),
           ),
         ),
