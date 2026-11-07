@@ -9,6 +9,18 @@ import type { ThreadActionMenuId } from "../threadActionMenu.logic";
 
 export type { ProjectSection } from "@t3tools/contracts";
 
+function orderedProjectSections(sections: readonly ProjectSection[]) {
+  const roots = sections.filter((section) => !section.parentSectionId);
+  const ordered = roots.flatMap((section) => [
+    section,
+    ...sections.filter((child) => child.parentSectionId === section.id),
+  ]);
+  return [
+    ...ordered,
+    ...sections.filter((section) => !ordered.some((entry) => entry.id === section.id)),
+  ];
+}
+
 export function groupThreadsIntoSections<T extends { readonly sectionId?: string | null }>(
   sections: readonly ProjectSection[],
   threads: readonly T[],
@@ -20,7 +32,10 @@ export function groupThreadsIntoSections<T extends { readonly sectionId?: string
     (bySection.get(thread.sectionId ?? "") ?? unsorted).push(thread);
   }
   return [
-    ...sections.map((section) => ({ ...section, threads: bySection.get(section.id)! })),
+    ...orderedProjectSections(sections).map((section) => ({
+      ...section,
+      threads: bySection.get(section.id)!,
+    })),
     { id: null, name: "Unsorted", collapsed: unsortedCollapsed, threads: unsorted },
   ];
 }
@@ -30,9 +45,14 @@ export function reorderProjectSection(
   id: string,
   direction: -1 | 1,
 ): readonly ProjectSection[] {
-  const index = sections.findIndex((section) => section.id === id);
-  const nextIndex = index + direction;
-  if (index < 0 || nextIndex < 0 || nextIndex >= sections.length) return sections;
+  const section = sections.find((entry) => entry.id === id);
+  if (!section) return sections;
+  const siblings = sections.filter((entry) => entry.parentSectionId === section.parentSectionId);
+  const siblingIndex = siblings.findIndex((entry) => entry.id === id);
+  const neighbor = siblings[siblingIndex + direction];
+  if (!neighbor) return sections;
+  const index = sections.indexOf(section);
+  const nextIndex = sections.indexOf(neighbor);
   const next = [...sections];
   [next[index], next[nextIndex]] = [next[nextIndex]!, next[index]!];
   return next;
@@ -74,9 +94,11 @@ export function buildMoveToSectionMenuItem(
     label: "Move to section",
     icon: "folder",
     children: [
-      ...sections.map((section) => ({
+      ...orderedProjectSections(sections).map((section) => ({
         id: `move-to-section:${section.id}` as const,
-        label: section.name,
+        label: section.parentSectionId
+          ? `${sections.find((entry) => entry.id === section.parentSectionId)?.name ?? "Section"} › ${section.name}`
+          : section.name,
         checked: section.id === selected,
       })),
       { id: "move-to-unsorted", label: "Unsorted", checked: selected === null },

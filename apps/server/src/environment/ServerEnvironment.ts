@@ -220,6 +220,7 @@ export const make = Effect.gen(function* () {
     ...(databaseMigration === undefined ? {} : { databaseMigration }),
     capabilities: {
       projectSections: true,
+      projectSectionRules: true,
       repositoryIdentity: true,
       connectionProbe: true,
       attachmentUploads: true,

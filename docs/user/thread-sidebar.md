@@ -77,9 +77,20 @@ only its filing, not its pinned, working, snoozed, or settled state. Unfiled cha
 **Unsorted** at the bottom of the project.
 
 Use a section's menu to rename, reorder, or delete it. Deleting a section moves its chats to
-Unsorted and never deletes conversations. Each section, including Unsorted, can be collapsed.
+Unsorted and never deletes conversations. Its child sections become top-level sections.
+Use the arrow to collapse a section, including Unsorted.
 Names, order, collapse choices, and chat assignments are saved on the environment's server,
 so the desktop app and browsers connected to that environment share the layout.
+
+Click a section's name or info icon, or its chip in a chat header, to open its rules panel.
+Edit its rules, prompt and client details, then save. The panel also shows the standing safety
+guide, parent and child rules, edit history and chats. Workspace instructions still apply.
+Create a child section from a parent's menu, or choose a parent in the panel. Only one child
+level is supported. Parent client details cannot be replaced by a child's conflicting details.
+Saved edits and moves apply on the next turn, without interrupting running work. Moving between
+clients does not carry over the old client's approvals. Section rules currently require Codex;
+other providers cannot start a turn in a sectioned chat yet. Older servers must be updated before
+rules or nesting can be edited.
 
 When a launcher supplies a client name, new chats use its matching section or create one.
 Automatic filing never overrides a chat you have moved yourself, even if you chose Unsorted.

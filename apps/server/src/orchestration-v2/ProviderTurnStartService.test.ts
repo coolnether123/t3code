@@ -21,6 +21,7 @@ import {
   ProjectId,
   type OrchestrationV2ThreadProjection,
   OrchestrationV2DomainEvent,
+  type ProjectSection,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -269,6 +270,7 @@ it.each([
 
 function makeLocalCommandHarness(input: {
   readonly text: string;
+  readonly sections?: readonly ProjectSection[];
   readonly worktreePath?: string;
   readonly worktreesDir?: string;
   readonly workspaceRoot?: string;
@@ -957,6 +959,7 @@ function makeLocalCommandHarness(input: {
           getById: () =>
             Effect.succeedSome({
               workspaceRoot: input.workspaceRoot ?? "/tmp/native-account-project",
+              sections: input.sections ?? [],
             } as never),
         }),
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
@@ -1041,6 +1044,58 @@ function makeLocalCommandHarness(input: {
     }).pipe(Effect.provide(layer)),
   };
 }
+
+effectIt.effect.each(["codex", "antigravity"] as const)(
+  "attaches section context only through supported provider context (%s)",
+  (driver) =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "Continue.",
+        failReadsAfterRunning: true,
+        sections: [
+          {
+            id: "acme",
+            name: "Acme",
+            collapsed: false,
+            rules: "Review source invoices.",
+            scope: { clientName: "Acme" },
+          },
+        ],
+      });
+      const initial = harness.projection();
+      harness.setProjection({
+        ...initial,
+        thread: { ...initial.thread, sectionId: "acme" },
+        providerThreads: initial.providerThreads.map((thread) => ({
+          ...thread,
+          driver: ProviderDriverKind.make(driver),
+        })),
+      });
+      yield* harness.start;
+      if (driver !== "codex") {
+        expect(harness.startRootRun).not.toHaveBeenCalled();
+        expect(harness.open).not.toHaveBeenCalled();
+        expect(harness.events).toContainEqual(
+          expect.objectContaining({
+            type: "turn-item.updated",
+            payload: expect.objectContaining({
+              type: "error",
+              title: "Section rules require Codex",
+            }),
+          }),
+        );
+        return;
+      }
+      const input = harness.startRootRun.mock.calls[0]![0];
+      expect(input.sectionContext).toContain("Review source invoices.");
+      expect(input.message.text).toBe("Continue.");
+      expect(input.run.sectionContext?.sectionId).toBe("acme");
+      expect(
+        harness.projection().messages.find((message) => message.id === input.message.messageId)
+          ?.text,
+      ).toBe("Continue.");
+    }),
+);
 
 effectIt.effect(
   "recovers the local or pushed thread tip, else the current branch, remote default, or detached HEAD",

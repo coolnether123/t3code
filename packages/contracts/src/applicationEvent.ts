@@ -14,7 +14,12 @@ import {
 import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import type { OrchestrationV2StoredEvent } from "./orchestrationV2.ts";
-import { ProjectScript, ProjectSections, StoredProjectIcon } from "./project.ts";
+import {
+  ProjectScript,
+  ProjectSections,
+  ProjectSectionHistory,
+  StoredProjectIcon,
+} from "./project.ts";
 
 export const OrchestrationClientOrigin = Schema.Struct({
   surface: Schema.optional(ClientSurface),
@@ -50,6 +55,7 @@ export type ApplicationProjectCreatedPayload = typeof ApplicationProjectCreatedP
 
 export const ApplicationProjectMetaUpdatedPayload = Schema.Struct({
   sections: Schema.optional(ProjectSections),
+  sectionHistory: Schema.optional(ProjectSectionHistory),
   unsortedSectionCollapsed: Schema.optional(Schema.Boolean),
   projectId: ProjectId,
   title: Schema.optional(TrimmedNonEmptyString),

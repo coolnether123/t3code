@@ -1,4 +1,5 @@
 import { SubagentBackend } from "./model.ts";
+import { ProjectSectionScope } from "./project.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
 import * as DateTime from "effect/DateTime";
@@ -443,6 +444,16 @@ const LenientThreadOpens = Schema.NullOr(OrchestrationV2ThreadOpens).pipe(
 );
 
 export const OrchestrationV2AppThread = Schema.Struct({
+  sectionMove: Schema.optional(
+    Schema.Struct({
+      id: CommandId,
+      fromSectionId: Schema.NullOr(Schema.String),
+      fromSectionName: Schema.String,
+      toSectionId: Schema.NullOr(Schema.String),
+      toSectionName: Schema.String,
+      previousClientScope: ProjectSectionScope,
+    }),
+  ),
   sectionId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -716,6 +727,16 @@ export const OrchestrationV2Run = Schema.Struct({
   workspacePreparation: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
   /** Starts a new provider conversation; earlier runs stay visible but never reach the provider. */
   freshContext: Schema.optional(Schema.Boolean),
+  sectionContext: Schema.optional(
+    Schema.Struct({
+      moveId: Schema.optional(CommandId),
+      sectionId: Schema.NullOr(Schema.String),
+      sectionName: Schema.String,
+      scope: ProjectSectionScope,
+      taskScope: ProjectSectionScope,
+      text: Schema.String,
+    }),
+  ),
 });
 export type OrchestrationV2Run = typeof OrchestrationV2Run.Type;
 

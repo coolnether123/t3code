@@ -16,6 +16,7 @@ import {
   ProjectSearchContentsError,
   ProjectSearchEntriesError,
   ProjectWriteFileError,
+  resolveProjectSectionContext,
 } from "./project.ts";
 
 const decodeProjectCreatePayload = Schema.decodeUnknownSync(ProjectCreatePayload);
@@ -94,6 +95,59 @@ describe("project RPC errors", () => {
 });
 
 describe("shared project payloads", () => {
+  it("stacks parent and child scope while keeping rules out of editable history", () => {
+    const parent = {
+      id: "ita",
+      name: "IT Ally",
+      collapsed: false,
+      rules: "Client rules",
+      scope: {
+        clientName: "IT Ally",
+        qboRealm: "9130349943358106",
+        standingDecisions: ["Invoice review first"],
+      },
+    };
+    const child = {
+      id: "ap",
+      name: "Payables",
+      collapsed: false,
+      parentSectionId: "ita",
+      rules: "Workflow rules",
+      prompt: "Review the bill",
+      scope: {
+        mailbox: "ap@example.test",
+        standingDecisions: ["Keep drafts", "Invoice review first"],
+      },
+    };
+    const update = decodeProjectUpdatePayload({
+      sections: [{ ...parent, actor: "forged", sectionHistory: [] }, child],
+      sectionHistory: [{ actor: "forged" }],
+    });
+    expect(update).not.toHaveProperty("sectionHistory");
+    expect(update.sections?.[0]).not.toHaveProperty("actor");
+    expect(update.sections?.[0]).not.toHaveProperty("sectionHistory");
+    expect(resolveProjectSectionContext(update.sections ?? [], "ap")).toEqual({
+      sections: [parent, child],
+      scope: {
+        ...parent.scope,
+        ...child.scope,
+        standingDecisions: ["Invoice review first", "Keep drafts"],
+      },
+    });
+    expect(resolveProjectSectionContext([parent, child], null)).toEqual({
+      sections: [],
+      scope: {},
+    });
+    expect(resolveProjectSectionContext([parent, child], "missing")).toEqual({
+      sections: [],
+      scope: {},
+    });
+    expect(
+      decodeProjectUpdatePayload({ sections: [{ id: "old", name: "Legacy", collapsed: false }] })
+        .sections,
+    ).toEqual([{ id: "old", name: "Legacy", collapsed: false }]);
+  });
+
   it("preserves omitted, false, and null values through RPC envelopes", () => {
     const create = decodeProjectCreatePayload({
       title: " Example ",

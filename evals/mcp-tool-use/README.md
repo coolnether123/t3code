@@ -22,6 +22,8 @@ pnpm mcp-tool-use --model claude-opus-5-5 --out runs/opus
 
 ## Add a case
 
+`cases/section-rules.ndjson` covers cross-client save authority, section prompts that try to loosen safety, and a same-client workflow control. These Codex-only cases render the current server's per-turn section context from synthetic sections into developer context, separately from conversation messages. They test model behavior, not a business tool's save guard or a real provider session. Run with `--cases mcp-tool-use/cases/section-rules.ndjson`; a dry run needs no model credentials.
+
 Cases are JSON lines in `cases/`, one file per area. The case schema in `run.ts` (`McpToolUseCase`) documents every field.
 
 - `kind`: `bad` reproduces a mistake, `guard` protects correct behavior, `control` is ordinary work.

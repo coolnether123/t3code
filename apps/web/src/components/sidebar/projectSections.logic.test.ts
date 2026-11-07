@@ -39,6 +39,21 @@ describe("project sections", () => {
     expect(reorderProjectSection(sections, "a", -1)).toEqual([sections[1], sections[0]]);
     expect(reorderProjectSection(sections, "b", -1)).toBe(sections);
     expect(reorderProjectSection(sections, "missing", 1)).toBe(sections);
+    const nested = [
+      ...sections,
+      { id: "child", name: "Payables", collapsed: false, parentSectionId: "b" },
+      { id: "other-child", name: "Receivables", collapsed: false, parentSectionId: "b" },
+    ];
+    expect(reorderProjectSection(nested, "child", -1)).toBe(nested);
+    const reordered = reorderProjectSection(nested, "child", 1);
+    expect(reordered.map((section) => section.id)).toEqual(["b", "a", "other-child", "child"]);
+    expect(groupThreadsIntoSections(reordered, []).map((group) => group.id)).toEqual([
+      "b",
+      "other-child",
+      "child",
+      "a",
+      null,
+    ]);
   });
 
   it("accepts moves only within the same project and environment, including Unsorted", () => {

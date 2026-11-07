@@ -46,14 +46,129 @@ export const ProjectScript = Schema.Struct({
 });
 export type ProjectScript = typeof ProjectScript.Type;
 
+const SectionScopeValue = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
+export const ProjectSectionScope = Schema.Struct({
+  clientName: Schema.optional(SectionScopeValue),
+  qboRealm: Schema.optional(SectionScopeValue),
+  microsoftProfileCode: Schema.optional(SectionScopeValue),
+  mailbox: Schema.optional(SectionScopeValue),
+  doubleClientId: Schema.optional(SectionScopeValue),
+  standingDecisions: Schema.optional(
+    Schema.Array(Schema.String.check(Schema.isMaxLength(4000))).check(Schema.isMaxLength(100)),
+  ),
+});
+export type ProjectSectionScope = typeof ProjectSectionScope.Type;
+
 export const ProjectSection = Schema.Struct({
   id: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
   collapsed: Schema.Boolean,
+  parentSectionId: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
+  rules: Schema.optional(Schema.String.check(Schema.isMaxLength(32000))),
+  prompt: Schema.optional(Schema.String.check(Schema.isMaxLength(32000))),
+  scope: Schema.optional(ProjectSectionScope),
 });
 export type ProjectSection = typeof ProjectSection.Type;
 
 export const ProjectSections = Schema.Array(ProjectSection).check(Schema.isMaxLength(500));
+
+export const ProjectSectionHistory = Schema.Array(
+  Schema.Struct({
+    id: TrimmedNonEmptyString,
+    sectionId: TrimmedNonEmptyString,
+    actor: TrimmedNonEmptyString,
+    createdAt: IsoDateTime,
+    changes: Schema.Array(
+      Schema.Struct({
+        field: TrimmedNonEmptyString,
+        before: Schema.optional(Schema.String),
+        after: Schema.optional(Schema.String),
+      }),
+    ),
+  }),
+);
+export type ProjectSectionHistory = typeof ProjectSectionHistory.Type;
+
+const normalizeSectionClient = (name: string) =>
+  name.trim().toLocaleLowerCase().replace(/\s+/g, " ");
+
+export function validateProjectSections(sections: readonly ProjectSection[]): string | undefined {
+  if (sections.length > 500) return "Projects support at most 500 sections.";
+  const ids = new Set<string>();
+  const names = new Set<string>();
+  for (const section of sections) {
+    const normalizedName = section.name
+      .trim()
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim();
+    const name = JSON.stringify([section.parentSectionId ?? null, normalizedName]);
+    if (!section.id.trim() || !normalizedName || ids.has(section.id) || names.has(name)) {
+      return "Sections need unique ids and non-empty, unique names within their parent.";
+    }
+    ids.add(section.id);
+    names.add(name);
+  }
+  for (const section of sections) {
+    if (section.parentSectionId === undefined) continue;
+    const parent = sections.find((candidate) => candidate.id === section.parentSectionId);
+    if (parent === undefined || parent.id === section.id || parent.parentSectionId !== undefined) {
+      return "Sections can nest one level under an existing top-level section, without cycles.";
+    }
+    if (
+      parent.scope?.clientName !== undefined &&
+      section.scope?.clientName !== undefined &&
+      normalizeSectionClient(parent.scope.clientName) !==
+        normalizeSectionClient(section.scope.clientName)
+    ) {
+      return "A child section cannot change its parent's client.";
+    }
+    for (const field of [
+      "qboRealm",
+      "microsoftProfileCode",
+      "mailbox",
+      "doubleClientId",
+    ] as const) {
+      if (
+        parent.scope?.[field] !== undefined &&
+        section.scope?.[field] !== undefined &&
+        parent.scope[field] !== section.scope[field]
+      ) {
+        return "A child section cannot change its parent's client account details.";
+      }
+    }
+  }
+  return undefined;
+}
+
+export function resolveProjectSectionContext(
+  sections: readonly ProjectSection[],
+  sectionId: string | null | undefined,
+): { readonly sections: readonly ProjectSection[]; readonly scope: ProjectSectionScope } {
+  const section = sections.find((candidate) => candidate.id === sectionId);
+  if (section === undefined) return { sections: [], scope: {} };
+  const parent =
+    section.parentSectionId === undefined
+      ? undefined
+      : sections.find((candidate) => candidate.id === section.parentSectionId);
+  const chain = parent === undefined ? [section] : [parent, section];
+  const scope: ProjectSectionScope = {
+    ...parent?.scope,
+    ...section.scope,
+    ...(parent?.scope?.standingDecisions === undefined &&
+    section.scope?.standingDecisions === undefined
+      ? {}
+      : {
+          standingDecisions: [
+            ...new Set([
+              ...(parent?.scope?.standingDecisions ?? []),
+              ...(section.scope?.standingDecisions ?? []),
+            ]),
+          ],
+        }),
+  };
+  return { sections: chain, scope };
+}
 
 export const ProjectIconColor = Schema.Literals([
   "gray",
@@ -173,6 +288,9 @@ export const Project = Schema.Struct({
   autoPull: Schema.optional(Schema.Boolean),
   scripts: Schema.Array(ProjectScript),
   sections: Schema.optional(ProjectSections).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  sectionHistory: Schema.optional(ProjectSectionHistory).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   unsortedSectionCollapsed: Schema.optional(Schema.Boolean).pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
@@ -201,6 +319,7 @@ export type ProjectCreatePayload = typeof ProjectCreatePayload.Type;
 
 export const ProjectUpdatePayload = Schema.Struct({
   sections: Schema.optional(ProjectSections),
+  expectedSections: Schema.optional(ProjectSections),
   unsortedSectionCollapsed: Schema.optional(Schema.Boolean),
   title: Schema.optional(TrimmedNonEmptyString),
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),

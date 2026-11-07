@@ -853,6 +853,7 @@ it.effect("passes the thread's MCP app context to the provider under a safe key"
 
     yield* runExecution.startRootRun({
       commandId: CommandId.make("command:run-execution-app-context"),
+      sectionContext: "Standing safety rules. Current section: Acme.",
       appThread: rootAppThread(threadId),
       providerSessionId: ProviderSessionId.make("session:run-execution-app-context"),
       session,
@@ -890,6 +891,8 @@ it.effect("passes the thread's MCP app context to the provider under a safe key"
     assert.deepEqual(input.appContext, [
       { key: "mcp_app_turn-item_provider_codex_native-item_call-1", text: "2 overdue" },
     ]);
+    assert.equal(input.sectionContext, "Standing safety rules. Current section: Acme.");
+    assert.equal(input.message.text, "What is on my list?");
   }).pipe(
     Effect.provide(
       RunExecutionService.layer.pipe(

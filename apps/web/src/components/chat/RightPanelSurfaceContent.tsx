@@ -12,6 +12,7 @@ import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { lazy, Suspense } from "react";
 import SideChatPane from "./SideChatPane";
 import { AgentBrowserView } from "../preview/AgentBrowserView";
+import { SectionPanel } from "../sections/SectionPanel";
 import type { ComposerImageAttachment, DraftId } from "../../composerDraftStore";
 import type { ShortcutMatchContext } from "../../keybindings";
 import type { SideChatParentPanel } from "../../lib/sideChatPane";
@@ -91,6 +92,10 @@ export function RightPanelSurfaceContent(props: {
           tabId={surface.resourceId}
           visible={visible}
         />
+      );
+    case "section":
+      return (
+        <SectionPanel key={surface.id} projectRef={surface.project} sectionId={surface.sectionId} />
       );
     case "preview":
       return (

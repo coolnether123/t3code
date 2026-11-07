@@ -1,5 +1,11 @@
 import { assert, describe, it } from "@effect/vitest";
-import { CommandId, EventId, ProjectId, type ProjectScript } from "@t3tools/contracts";
+import {
+  CommandId,
+  EventId,
+  ProjectId,
+  type ProjectScript,
+  type ProjectSection,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
 
@@ -59,6 +65,87 @@ const failureOf = (result: ReturnType<typeof plan>) => {
 };
 
 describe("planProjectCommand", () => {
+  it("allows one parent level, inherits client scope, and audits changes without trusting submitted history", () => {
+    const parent: ProjectSection = {
+      id: "ita",
+      name: "IT Ally",
+      collapsed: false,
+      scope: { clientName: "IT Ally", qboRealm: "9130349943358106" },
+    };
+    const child: ProjectSection = {
+      id: "ap",
+      name: "Payables",
+      collapsed: false,
+      parentSectionId: "ita",
+      rules: "Review invoices first.",
+    };
+    const update = (sections: readonly ProjectSection[]) =>
+      plan(
+        {
+          type: "project.meta.update",
+          commandId: CommandId.make("section-rules"),
+          projectId,
+          sections,
+          expectedSections: [parent],
+        },
+        { project: row({ sections: [parent] }) },
+      );
+    const payload = payloadOf(update([parent, child]));
+    assert.deepEqual(payload.sections, [parent, child]);
+    const otherParent = { id: "gazelle", name: "Gazelle", collapsed: false };
+    assert.deepEqual(
+      payloadOf(
+        update([
+          parent,
+          child,
+          otherParent,
+          { ...child, id: "gazelle-ap", parentSectionId: "gazelle" },
+        ]),
+      ).sections,
+      [parent, child, otherParent, { ...child, id: "gazelle-ap", parentSectionId: "gazelle" }],
+    );
+    assert.deepInclude((payload.sectionHistory as readonly Record<string, unknown>[])[0], {
+      sectionId: "ap",
+      actor: "server",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    const oldClient = plan(
+      {
+        type: "project.meta.update",
+        commandId: CommandId.make("old-client"),
+        projectId,
+        sections: [{ id: parent.id, name: parent.name, collapsed: true }],
+      },
+      { project: row({ sections: [parent] }) },
+    );
+    assert.include(failureOf(oldClient).message, "include expectedSections");
+    for (const sections of [
+      [parent, { ...child, parentSectionId: "missing" }],
+      [parent, { ...child, parentSectionId: "ap" }],
+      [{ ...parent, parentSectionId: "ap" }, child],
+      [parent, child, { ...child, id: "deep", name: "Deep", parentSectionId: "ap" }],
+      [parent, { ...child, scope: { clientName: "Gazelle" } }],
+      [parent, { ...child, scope: { clientName: "IT Ally", qboRealm: "9130348821693276" } }],
+      [
+        { ...parent, scope: { qboRealm: "9130349943358106" } },
+        { ...child, scope: { qboRealm: "9130348821693276" } },
+      ],
+      [
+        { ...parent, scope: { microsoftProfileCode: "ITA" } },
+        { ...child, scope: { microsoftProfileCode: "GAZ" } },
+      ],
+      [
+        { ...parent, scope: { mailbox: "ita@example.test" } },
+        { ...child, scope: { mailbox: "gazelle@example.test" } },
+      ],
+      [
+        { ...parent, scope: { doubleClientId: "ita" } },
+        { ...child, scope: { doubleClientId: "gazelle" } },
+      ],
+    ])
+      assert.equal(failureOf(update(sections))._tag, "ProjectCommandInvariantError");
+  });
+
   it("keeps named sections ordered and validates identities before persisting", () => {
     const ita = { id: "ita", name: "HT ITA IT Ally", collapsed: false };
     const amorso = { id: "amorso", name: "HT AHS Amorso", collapsed: true };

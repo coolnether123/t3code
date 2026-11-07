@@ -142,6 +142,7 @@ describe("V2 environment commands", () => {
       yield* updateProject({
         projectId: ProjectId.make("project"),
         sections,
+        expectedSections: [],
         unsortedSectionCollapsed: true,
       }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
       yield* updateThreadMetadata({ threadId: v2ThreadId, sectionId: "client" }).pipe(
@@ -153,6 +154,7 @@ describe("V2 environment commands", () => {
       expect(projects[0]).toMatchObject({
         type: "project.update",
         sections,
+        expectedSections: [],
         unsortedSectionCollapsed: true,
       });
       expect(commands).toMatchObject([

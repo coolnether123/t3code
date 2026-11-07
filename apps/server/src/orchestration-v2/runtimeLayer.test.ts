@@ -2538,6 +2538,14 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       });
       const manuallyMoved = yield* projectionStore.getThread(threadId);
       assert.isTrue(manuallyMoved.sectionManualOverride);
+      assert.deepEqual(manuallyMoved.sectionMove, {
+        id: CommandId.make("section-manual"),
+        fromSectionId: "ita",
+        fromSectionName: "IT Ally",
+        toSectionId: "amorso",
+        toSectionName: "Amorso",
+        previousClientScope: {},
+      });
       yield* orchestrator.dispatch({
         type: "thread.metadata.update",
         commandId: CommandId.make("section-reauto"),

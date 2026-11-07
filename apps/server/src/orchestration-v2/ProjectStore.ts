@@ -7,6 +7,7 @@ import {
   ProjectId,
   ProjectScript,
   ProjectSections,
+  ProjectSectionHistory,
   ThreadEnvMode,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -41,6 +42,7 @@ export const ProjectRow = Schema.Struct({
   projectIcon: Schema.NullOr(StoredProjectIcon),
   scripts: Schema.Array(ProjectScript),
   sections: Schema.optional(ProjectSections),
+  sectionHistory: Schema.optional(ProjectSectionHistory),
   unsortedSectionCollapsed: Schema.optional(Schema.Boolean),
   pinnedAt: Schema.NullOr(IsoDateTime),
   archivedAt: Schema.NullOr(IsoDateTime),
@@ -57,6 +59,7 @@ const ProjectDbRow = Schema.Struct({
   projectIcon: Schema.NullOr(Schema.fromJsonString(StoredProjectIcon)),
   scripts: Schema.fromJsonString(Schema.Array(ProjectScript)),
   sections: Schema.fromJsonString(ProjectSections),
+  sectionHistory: Schema.fromJsonString(ProjectSectionHistory),
   unsortedSectionCollapsed: Schema.BooleanFromBit,
 });
 
@@ -73,6 +76,7 @@ function toShell(row: ProjectRow): OrchestrationProjectShell {
     projectIcon: row.projectIcon,
     scripts: row.scripts,
     sections: row.sections ?? [],
+    sectionHistory: row.sectionHistory ?? [],
     unsortedSectionCollapsed: row.unsortedSectionCollapsed ?? false,
     pinnedAt: row.pinnedAt,
     archivedAt: row.archivedAt,
@@ -132,6 +136,7 @@ export const make = Effect.gen(function* () {
         project_icon_json AS "projectIcon",
         scripts_json AS "scripts",
         sections_json AS "sections",
+        section_history_json AS "sectionHistory",
         unsorted_section_collapsed AS "unsortedSectionCollapsed",
         pinned_at AS "pinnedAt",
         archived_at AS "archivedAt",
@@ -155,6 +160,7 @@ export const make = Effect.gen(function* () {
     encodeRow({
       ...row,
       sections: row.sections ?? [],
+      sectionHistory: row.sectionHistory ?? [],
       unsortedSectionCollapsed: row.unsortedSectionCollapsed ?? false,
     }).pipe(
       Effect.flatMap(
@@ -170,6 +176,7 @@ export const make = Effect.gen(function* () {
             project_icon_json,
             scripts_json,
             sections_json,
+            section_history_json,
             unsorted_section_collapsed,
             pinned_at,
             archived_at,
@@ -188,6 +195,7 @@ export const make = Effect.gen(function* () {
             ${encoded.projectIcon},
             ${encoded.scripts},
             ${encoded.sections},
+            ${encoded.sectionHistory},
             ${encoded.unsortedSectionCollapsed},
             ${encoded.pinnedAt},
             ${encoded.archivedAt},
@@ -206,6 +214,7 @@ export const make = Effect.gen(function* () {
             project_icon_json = excluded.project_icon_json,
             scripts_json = excluded.scripts_json,
             sections_json = excluded.sections_json,
+            section_history_json = excluded.section_history_json,
             unsorted_section_collapsed = excluded.unsorted_section_collapsed,
             pinned_at = excluded.pinned_at,
             archived_at = excluded.archived_at,
@@ -258,6 +267,7 @@ export const make = Effect.gen(function* () {
           projectIcon: payload.projectIcon ?? null,
           scripts: payload.scripts,
           sections: [],
+          sectionHistory: [],
           unsortedSectionCollapsed: false,
           pinnedAt: null,
           archivedAt: null,
@@ -292,6 +302,9 @@ export const make = Effect.gen(function* () {
         ...(payload.projectIcon === undefined ? {} : { projectIcon: payload.projectIcon }),
         ...(payload.scripts === undefined ? {} : { scripts: payload.scripts }),
         ...(payload.sections === undefined ? {} : { sections: payload.sections }),
+        ...(payload.sectionHistory === undefined
+          ? {}
+          : { sectionHistory: [...(row.sectionHistory ?? []), ...payload.sectionHistory] }),
         ...(payload.unsortedSectionCollapsed === undefined
           ? {}
           : { unsortedSectionCollapsed: payload.unsortedSectionCollapsed }),

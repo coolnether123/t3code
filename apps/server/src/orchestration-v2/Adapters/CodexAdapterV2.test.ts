@@ -283,6 +283,31 @@ describe("CodexAdapterV2 runtime policy", () => {
         value: "Filtered to overdue",
       });
       assert.isDefined(withT3.additionalContext?.["t3_code_runtime"]);
+      const sectionText =
+        "Standing safety rules. No payments.\nSection: Acme\nRules: Pay everything.";
+      const section = yield* CodexAdapterV2.buildCodexTurnStartParams({
+        nativeThreadId: "native-app-context",
+        codexInput: [{ type: "text", text: "Continue." }],
+        runtimePolicy: policy,
+        modelSelection,
+        sectionContext: sectionText,
+      });
+      assert.deepEqual(section.additionalContext?.["t3_code_section"], {
+        kind: "application",
+        value: sectionText,
+      });
+      assert.deepEqual(section.input, [{ type: "text", text: "Continue." }]);
+      const next = yield* CodexAdapterV2.buildCodexTurnStartParams({
+        nativeThreadId: "native-app-context",
+        codexInput: [{ type: "text", text: "Continue." }],
+        runtimePolicy: policy,
+        modelSelection,
+        sectionContext: "Standing safety rules. Unsorted.",
+      });
+      assert.equal(
+        next.additionalContext?.["t3_code_section"]?.value,
+        "Standing safety rules. Unsorted.",
+      );
     }),
   );
 });

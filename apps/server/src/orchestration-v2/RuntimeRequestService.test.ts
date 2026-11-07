@@ -4,6 +4,9 @@ import {
   ProviderSessionId,
   RuntimeRequestId,
   ThreadId,
+  ProjectId,
+  RunId,
+  CommandId,
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -14,6 +17,134 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
+import * as ProjectStore from "./ProjectStore.ts";
+
+it.effect.each([
+  { source: "Acme", destination: "Beacon", decision: "accept" as const, blocked: true },
+  { source: undefined, destination: "Beacon", decision: "accept" as const, blocked: true },
+  { source: "Acme", destination: "Acme", decision: "accept" as const, blocked: false },
+  { source: undefined, destination: undefined, decision: "accept" as const, blocked: false },
+  { source: "Acme", destination: "Beacon", decision: "decline" as const, blocked: false },
+  {
+    source: "Acme",
+    destination: "Beacon",
+    decision: "accept" as const,
+    blocked: true,
+    previousClient: "Acme",
+  },
+  {
+    source: "Acme",
+    destination: "Acme",
+    decision: "accept" as const,
+    blocked: true,
+    previousClient: "Beacon",
+  },
+  {
+    source: "Acme",
+    destination: undefined,
+    decision: "accept" as const,
+    blocked: false,
+    previousClient: "Acme",
+  },
+  {
+    source: "Acme",
+    destination: undefined,
+    decision: "accept" as const,
+    blocked: true,
+    previousClient: "Beacon",
+  },
+])(
+  "fences earlier client approvals before provider execution ($source → $destination, $decision)",
+  (test) => {
+    const threadId = ThreadId.make("approval-fence-thread");
+    const providerSessionId = ProviderSessionId.make("approval-fence-session");
+    const requestId = RuntimeRequestId.make("approval-fence-request");
+    const nodeId = NodeId.make("approval-fence-node");
+    const respond = vi.fn(() => Effect.void);
+    const scope = test.source ? { clientName: test.source } : {};
+    const layer = RuntimeRequestService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(ProjectStore.ProjectStoreV2)({
+            get: () =>
+              Effect.succeedSome({
+                sections: test.destination
+                  ? [
+                      {
+                        id: "current",
+                        name: test.destination,
+                        collapsed: false,
+                        scope: { clientName: test.destination },
+                      },
+                    ]
+                  : [],
+              } as never),
+          }),
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getRuntimeRequest: () =>
+              Effect.succeed({
+                id: requestId,
+                nodeId,
+                status: "resolved",
+                responseCapability: { type: "live", providerSessionId },
+              } as never),
+            getThreadRecords: () =>
+              Effect.succeed({
+                thread: {
+                  id: threadId,
+                  projectId: ProjectId.make("approval-project"),
+                  sectionId: test.destination ? "current" : null,
+                  ...("previousClient" in test
+                    ? {
+                        sectionMove: {
+                          id: CommandId.make("approval-client-move"),
+                          fromSectionId: null,
+                          fromSectionName: "Unsorted",
+                          toSectionId: test.destination ? "current" : null,
+                          toSectionName: test.destination ?? "Unsorted",
+                          previousClientScope: { clientName: test.previousClient },
+                        },
+                      }
+                    : {}),
+                },
+                runs: [
+                  {
+                    id: RunId.make("approval-source-run"),
+                    rootNodeId: nodeId,
+                    sectionContext: {
+                      sectionId: "old",
+                      sectionName: test.source ?? "Unsorted",
+                      scope,
+                      taskScope: scope,
+                      text: "",
+                    },
+                  },
+                ],
+                nodes: [],
+              } as never),
+          }),
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            get: () => Effect.succeedSome({ respondToRuntimeRequest: respond } as never),
+          }),
+        ),
+      ),
+    );
+    return Effect.gen(function* () {
+      const service = yield* RuntimeRequestService.RuntimeRequestServiceV2;
+      const result = yield* Effect.result(
+        service.respond({ threadId, providerSessionId, requestId, decision: test.decision }),
+      );
+      if (test.blocked) {
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") assert.equal(result.failure.reason, "client-scope-changed");
+        assert.equal(respond.mock.calls.length, 0);
+      } else {
+        assert.equal(result._tag, "Success");
+        assert.equal(respond.mock.calls.length, 1);
+      }
+    }).pipe(Effect.provide(layer));
+  },
+);
 
 it.effect.each(["expired", "resolved"] as const)(
   "responds only to resolved requests and preserves feedback (%s)",
@@ -50,6 +181,7 @@ it.effect.each(["expired", "resolved"] as const)(
     const layerTest = RuntimeRequestService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          Layer.mock(ProjectStore.ProjectStoreV2)({ get: () => Effect.succeedNone }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getRuntimeRequest: (_threadId, requestId) =>
               Effect.succeed(

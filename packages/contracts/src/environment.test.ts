@@ -17,6 +17,13 @@ describe("ExecutionEnvironmentDescriptor", () => {
   it("decodes old, recognized and future manual installation descriptors", () => {
     expect(decodeDescriptor(descriptor).capabilities.serverInstallation).toBeUndefined();
     expect(decodeDescriptor(descriptor).capabilities.projectSections).toBeUndefined();
+    expect(decodeDescriptor(descriptor).capabilities.projectSectionRules).toBe(false);
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, projectSectionRules: true },
+      }).capabilities.projectSectionRules,
+    ).toBe(true);
     for (const installation of [{ kind: "npx" }, { kind: "npm-global", prefix: "/opt/node" }]) {
       expect(
         decodeDescriptor({

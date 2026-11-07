@@ -76,6 +76,9 @@ export type ServerSelfUpdateCapability = typeof ServerSelfUpdateCapability.Type;
 
 export const ExecutionEnvironmentCapabilities = Schema.Struct({
   projectSections: Schema.optionalKey(Schema.Boolean),
+  projectSectionRules: Schema.optionalKey(Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   repositoryIdentity: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   connectionProbe: Schema.optionalKey(Schema.Boolean),
   attachmentUploads: Schema.optionalKey(Schema.Boolean),

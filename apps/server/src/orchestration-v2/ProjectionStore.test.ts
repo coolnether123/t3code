@@ -1242,6 +1242,22 @@ const restartCancelledWorkSurvivesStaleRunUpdate = Effect.gen(function* () {
   const run = (yield* store.getThreadProjection(threadId)).runs[0]!;
   const now = yield* DateTime.now;
   const work = [{ kind: "subagent" as const, label: "Background subagent test" }];
+  const sectionContext = {
+    sectionId: "acme",
+    sectionName: "Acme",
+    scope: { clientName: "Acme" },
+    taskScope: { clientName: "Acme" },
+    text: "Context, not conversation history.",
+  };
+  yield* store.apply({
+    id: EventId.make("event:restart-cancelled-work-stale-update:section-context"),
+    type: "run.updated",
+    threadId,
+    runId: run.id,
+    providerInstanceId,
+    occurredAt: now,
+    payload: { ...run, sectionContext },
+  });
   yield* store.apply({
     id: EventId.make("event:restart-cancelled-work-stale-update:recorded"),
     type: "run.background-work-cancelled",
@@ -1263,6 +1279,7 @@ const restartCancelledWorkSurvivesStaleRunUpdate = Effect.gen(function* () {
   const updated = (yield* store.getThreadProjection(threadId)).runs[0];
   assert.equal(updated?.status, "completed");
   assert.deepEqual(updated?.restartCancelledBackgroundWork, work);
+  assert.deepEqual(updated?.sectionContext, sectionContext);
 });
 
 const threadWorktreePathsIncludeArchivedOnRequest = Effect.gen(function* () {

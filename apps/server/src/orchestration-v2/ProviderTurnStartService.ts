@@ -57,6 +57,7 @@ import {
 } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import { sectionTurnContext } from "./sectionTurnContext.ts";
 import {
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
@@ -349,6 +350,20 @@ export const layer: Layer.Layer<
       if (run.status !== "starting") {
         return;
       }
+      const sectionProject = yield* projects.getById(projection.thread.projectId);
+      const previousSectionRun = projection.runs
+        .filter(
+          (candidate) => candidate.ordinal < run.ordinal && candidate.sectionContext !== undefined,
+        )
+        .at(-1);
+      const turnSection =
+        run.sectionContext ??
+        sectionTurnContext({
+          sections: Option.isSome(sectionProject) ? (sectionProject.value.sections ?? []) : [],
+          sectionId: projection.thread.sectionId,
+          previous: previousSectionRun?.sectionContext,
+          move: projection.thread.sectionMove,
+        });
       const rootNode = projection.nodes.find((candidate) => candidate.id === run.rootNodeId);
       const attempt = projection.attempts.find((candidate) => candidate.id === run.activeAttemptId);
       const providerThread = projection.providerThreads.find(
@@ -632,6 +647,16 @@ export const layer: Layer.Layer<
           });
           return;
         }
+      }
+      if (turnSection.sectionId !== null && providerThread.driver !== "codex") {
+        yield* settleStartFailure({
+          signal: "section-context-unsupported",
+          title: "Section rules require Codex",
+          error: new Error("This provider cannot receive section context separately from history."),
+          message:
+            "Section rules require Codex. Switch this chat to Codex to continue; other providers do not support section context yet.",
+        });
+        return;
       }
       const { worktreePath, branch } = projection.thread;
       if (worktreePath !== null && branch !== null) {
@@ -1444,6 +1469,7 @@ export const layer: Layer.Layer<
       };
       const runningRun: OrchestrationV2Run = {
         ...run,
+        sectionContext: turnSection,
         status: "running",
         startedAt: now,
       };
@@ -1720,6 +1746,11 @@ export const layer: Layer.Layer<
         },
         modelSelection: run.modelSelection,
         runtimePolicy: resolvedRuntimePolicy,
+        ...(turnSection.sectionId !== null ||
+        turnSection.moveId !== undefined ||
+        Object.keys(turnSection.taskScope).length > 0
+          ? { sectionContext: turnSection.text }
+          : {}),
       });
     });
 

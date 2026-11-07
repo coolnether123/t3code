@@ -285,6 +285,9 @@ import {
   SidebarSectionPlaceholder,
 } from "./sidebar/SidebarListMarkers";
 import { SidebarProjectSections } from "./sidebar/SidebarProjectSections";
+import { SectionPanel } from "./sections/SectionPanel";
+import { Sheet, SheetPopup, SheetHeader, SheetTitle } from "./ui/sheet";
+import { useRightPanelStore } from "../rightPanelStore";
 import {
   buildMoveToSectionMenuItem,
   groupThreadsIntoSections,
@@ -1032,11 +1035,16 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     sections: readonly ProjectSection[],
     unsortedSectionCollapsed?: boolean,
   ) => {
+    const current = projects.find(
+      (candidate) =>
+        candidate.environmentId === project.environmentId && candidate.id === project.projectId,
+    );
     const result = await updateProject({
       environmentId: project.environmentId,
       input: {
         projectId: project.projectId,
         sections,
+        expectedSections: current?.sections ?? [],
         ...(unsortedSectionCollapsed === undefined ? {} : { unsortedSectionCollapsed }),
       },
     });
@@ -1142,6 +1150,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const [optimisticDrop, setOptimisticDrop] = useState<SidebarOptimisticDrop | null>(null);
   const threadSearchInputRef = useRef<HTMLInputElement>(null);
   const [threadSearchQuery, setThreadSearchQuery] = useState("");
+  const [sectionPanel, setSectionPanel] = useState<{
+    project: ScopedProjectRef;
+    sectionId: string;
+    name: string;
+  } | null>(null);
   const [searchHighlightKey, setSearchHighlightKey] = useState<string | null>(null);
   const connectedEnvironmentIds = useConnectedEnvironmentIds().filter(
     (environmentId) => selectedEnvironmentId === null || environmentId === selectedEnvironmentId,
@@ -1501,7 +1514,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               thread.environmentId === project.environmentId && thread.projectId === project.id,
           ),
           project.unsortedSectionCollapsed ?? false,
-        ).flatMap((group) => (group.collapsed ? [] : group.threads.map(threadShellKey))),
+        ).flatMap((group) =>
+          group.collapsed ||
+          ("parentSectionId" in group &&
+            project.sections?.some(
+              (section) => section.id === group.parentSectionId && section.collapsed,
+            ))
+            ? []
+            : group.threads.map(threadShellKey),
+        ),
       )
     : shelfOrderedThreadKeys;
 
@@ -2209,12 +2230,23 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       return (args: Parameters<typeof pointerWithin>[0]) => {
         const source = threadByKey.get(String(args.active.id));
         if (!source) return [];
-        return pointerWithin({
+        const collisions = pointerWithin({
           ...args,
           droppableContainers: args.droppableContainers.filter(
             (container) => resolveProjectSectionDrop(String(container.id), source) !== null,
           ),
         });
+        const sections =
+          projectByKey.get(`${source.environmentId}:${source.projectId}`)?.sections ?? [];
+        const isChild = (id: string | number) => {
+          const target = resolveProjectSectionDrop(String(id), source);
+          return sections.some(
+            (section) => section.id === target?.sectionId && section.parentSectionId,
+          );
+        };
+        return collisions.sort(
+          (left, right) => Number(isChild(right.id)) - Number(isChild(left.id)),
+        );
       };
     }
     if (draggedThreadKey === undefined || draggedFromSection === undefined)
@@ -3689,6 +3721,23 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             threads={searchableThreads}
                             canUpdate={canUpdateSections}
                             onUpdate={updateProjectSections}
+                            canNest={(project) =>
+                              serverConfigs.get(project.environmentId)?.environment.capabilities
+                                .projectSectionRules === true
+                            }
+                            onOpenSection={(project, section) => {
+                              if (routeThreadRef) {
+                                useRightPanelStore
+                                  .getState()
+                                  .openSection(routeThreadRef, project, section.id, section.name);
+                                if (isMobile) setOpenMobile(false);
+                              } else
+                                setSectionPanel({
+                                  project,
+                                  sectionId: section.id,
+                                  name: section.name,
+                                });
+                            }}
                             renderThread={(thread, parent) =>
                               renderThreadRow(
                                 thread,
@@ -3930,6 +3979,25 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         </SidebarGroup>
       </SidebarContent>
       <SidebarChromeFooter />
+      <Sheet
+        open={sectionPanel !== null}
+        onOpenChange={(open) => {
+          if (!open) setSectionPanel(null);
+        }}
+      >
+        <SheetPopup side="right">
+          <SheetHeader>
+            <SheetTitle>Section: {sectionPanel?.name}</SheetTitle>
+          </SheetHeader>
+          {sectionPanel ? (
+            <SectionPanel
+              key={`${sectionPanel.project.environmentId}:${sectionPanel.project.projectId}:${sectionPanel.sectionId}`}
+              projectRef={sectionPanel.project}
+              sectionId={sectionPanel.sectionId}
+            />
+          ) : null}
+        </SheetPopup>
+      </Sheet>
     </>
   );
 }

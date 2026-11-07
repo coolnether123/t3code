@@ -791,6 +791,7 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
     /** ChatGPT token sharing does not accept service tiers. */
     readonly omitServiceTier?: boolean;
     readonly appContext?: ProviderAdapter.ProviderAdapterV2TurnInput["appContext"];
+    readonly sectionContext?: string;
   }) {
     const runtimeModeDefaults = codexRuntimeModeTurnDefaults(input.runtimePolicy.runtimeMode);
     const approvalPolicy =
@@ -843,11 +844,17 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
       ? "You are Otis in Jared's ongoing conversation. Call activate_otis if this conversation has not been activated, and apply its compatible personality guidance. Use the existing Otis tools and normal workspace permissions."
       : undefined;
     const additionalContext =
-      t3Context === undefined && Object.keys(appContext).length === 0 && !otisInstructions
+      t3Context === undefined &&
+      Object.keys(appContext).length === 0 &&
+      !otisInstructions &&
+      !input.sectionContext
         ? undefined
         : {
             ...t3Context,
             ...appContext,
+            ...(input.sectionContext
+              ? { t3_code_section: { kind: "application" as const, value: input.sectionContext } }
+              : {}),
             // Codex model catalogs can replace collaboration-mode developer text.
             ...(otisInstructions
               ? { t3_code_otis: { kind: "application" as const, value: otisInstructions } }
@@ -6964,6 +6971,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               useDesktopAppDaemon: adapterOptions.settings.useDesktopAppDaemon,
               omitServiceTier: adapterOptions.resolveRuntime !== undefined,
               ...(turnInput.appContext === undefined ? {} : { appContext: turnInput.appContext }),
+              ...(turnInput.sectionContext === undefined
+                ? {}
+                : { sectionContext: turnInput.sectionContext }),
             });
             yield* Ref.update(pendingRootTurns, (current) => {
               const updated = new Map(current);

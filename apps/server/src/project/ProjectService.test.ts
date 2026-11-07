@@ -242,7 +242,13 @@ it.effect(
       assert.deepEqual(created.sections, []);
       assert.isFalse(created.unsortedSectionCollapsed);
       const sections = [
-        { id: "ita", name: "HT ITA IT Ally", collapsed: true },
+        {
+          id: "ita",
+          name: "HT ITA IT Ally",
+          collapsed: true,
+          scope: { clientName: "IT Ally", qboRealm: "9130349943358106" },
+          rules: "Review invoices first.",
+        },
         { id: "amorso", name: "HT AHS Amorso", collapsed: false },
       ];
       yield* projectMutationOperation(service, {
@@ -279,8 +285,81 @@ it.effect(
         commandId: CommandId.make("sections:reorder"),
         projectId,
         sections: reordered,
+        expectedSections: Option.getOrThrow(yield* service.getById(projectId)).sections ?? [],
       });
       assert.deepEqual(Option.getOrThrow(yield* service.getById(projectId)).sections, reordered);
+      const beforeEdit = Option.getOrThrow(yield* service.getById(projectId)).sectionHistory ?? [];
+      const withChild = [
+        ...reordered,
+        {
+          id: "ap",
+          name: "Payables",
+          collapsed: false,
+          parentSectionId: "ita",
+          prompt: "Review due bills.",
+        },
+      ];
+      yield* service
+        .update({
+          commandId: CommandId.make("sections:child"),
+          projectId,
+          sections: withChild,
+          expectedSections: reordered,
+        })
+        .pipe(Effect.provideService(ProjectService.SectionEditActor, "agent:otis"));
+      const history = Option.getOrThrow(yield* service.getShell(projectId)).sectionHistory ?? [];
+      assert.deepEqual(history.slice(0, beforeEdit.length), beforeEdit);
+      assert.deepInclude(history.at(-1), { sectionId: "ap", actor: "agent:otis" });
+      assert.includeDeepMembers(
+        [...(history.at(-1)?.changes ?? [])],
+        [
+          { field: "parentSectionId", after: '"ita"' },
+          { field: "prompt", after: '"Review due bills."' },
+        ],
+      );
+      yield* service.update({
+        commandId: CommandId.make("sections:child"),
+        projectId,
+        sections: withChild,
+      });
+      assert.deepEqual(
+        Option.getOrThrow(yield* service.getById(projectId)).sectionHistory,
+        history,
+      );
+      const stripped = yield* service
+        .update({
+          commandId: CommandId.make("sections:legacy-strip"),
+          projectId,
+          sections: withChild.map(({ id, name, collapsed }) => ({ id, name, collapsed })),
+        })
+        .pipe(Effect.flip);
+      assert.equal(stripped._tag, "ProjectInvalidError");
+      assert.deepEqual(Option.getOrThrow(yield* service.getById(projectId)).sections, withChild);
+      const stale = yield* projectMutationOperation(service, {
+        type: "project.update",
+        commandId: CommandId.make("sections:stale"),
+        projectId,
+        expectedSections: reordered,
+        sections: [],
+      }).pipe(Effect.flip);
+      assert.equal(stale._tag, "ProjectInvalidError");
+      assert.deepEqual(Option.getOrThrow(yield* service.getById(projectId)).sections, withChild);
+      assert.deepEqual(
+        Option.getOrThrow(yield* service.getById(projectId)).sectionHistory,
+        history,
+      );
+      const invalid = yield* service
+        .update({
+          commandId: CommandId.make("sections:wrong-client"),
+          projectId,
+          sections: [...reordered, { ...withChild.at(-1)!, scope: { clientName: "Gazelle" } }],
+        })
+        .pipe(Effect.flip);
+      assert.equal(invalid._tag, "ProjectInvalidError");
+      assert.deepEqual(
+        Option.getOrThrow(yield* service.getById(projectId)).sectionHistory,
+        history,
+      );
     }).pipe(Effect.provide(layerTest)),
 );
 

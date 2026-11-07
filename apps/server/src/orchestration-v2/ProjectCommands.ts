@@ -7,6 +7,9 @@ import {
   ProjectId,
   type ProjectScript,
   type ProjectSection,
+  type ProjectSectionHistory,
+  ProjectSections,
+  validateProjectSections,
   SCRIPT_RUN_COMMAND_PATTERN,
   type ThreadEnvMode,
 } from "@t3tools/contracts";
@@ -28,6 +31,7 @@ export interface ProjectCreateCommand {
 
 export interface ProjectMetaUpdateCommand {
   readonly sections?: ReadonlyArray<ProjectSection>;
+  readonly expectedSections?: ReadonlyArray<ProjectSection>;
   readonly unsortedSectionCollapsed?: boolean;
   readonly ensureSection?: ProjectSection;
   readonly type: "project.meta.update";
@@ -109,6 +113,7 @@ export interface ProjectCommandState {
 
 const monogramSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const isScriptRunCommand = Schema.is(SCRIPT_RUN_COMMAND_PATTERN);
+const encodeSections = Schema.encodeSync(ProjectSections);
 
 const normalizedSectionName = (value: string) =>
   value
@@ -119,9 +124,16 @@ const normalizedSectionName = (value: string) =>
 
 export function findClientSection(sections: ReadonlyArray<ProjectSection>, clientName: string) {
   const client = normalizedSectionName(clientName);
-  const exact = sections.find((section) => normalizedSectionName(section.name) === client);
+  const roots = sections.filter((section) => section.parentSectionId === undefined);
+  const scoped = roots.find(
+    (section) =>
+      section.scope?.clientName !== undefined &&
+      normalizedSectionName(section.scope.clientName) === client,
+  );
+  if (scoped !== undefined) return scoped;
+  const exact = roots.find((section) => normalizedSectionName(section.name) === client);
   if (exact !== undefined) return exact;
-  const matches = sections.filter((section) =>
+  const matches = roots.filter((section) =>
     ` ${normalizedSectionName(section.name)} `.includes(` ${client} `),
   );
   return matches.length === 1 ? matches[0] : undefined;
@@ -133,6 +145,7 @@ export function planProjectCommand(input: {
   readonly state: ProjectCommandState;
   readonly eventId: EventId;
   readonly now: DateTime.Utc;
+  readonly actor?: string;
 }): Result.Result<UnsequencedProjectEvent, ProjectCommandRejection> {
   const { command, state } = input;
   const invariant = (detail: string) =>
@@ -193,6 +206,29 @@ export function planProjectCommand(input: {
     case "project.meta.update": {
       const project = activeProject;
       if (project === undefined) return missingProject();
+      if (
+        command.sections !== undefined &&
+        command.ensureSection === undefined &&
+        command.expectedSections === undefined &&
+        (project.sections ?? []).some(
+          (section) =>
+            section.parentSectionId !== undefined ||
+            section.rules !== undefined ||
+            section.prompt !== undefined ||
+            section.scope !== undefined,
+        )
+      ) {
+        return invariant(
+          "Read the current sections and include expectedSections before saving section rules.",
+        );
+      }
+      if (
+        command.expectedSections !== undefined &&
+        JSON.stringify(encodeSections(command.expectedSections)) !==
+          JSON.stringify(encodeSections(project.sections ?? []))
+      ) {
+        return invariant("Sections changed since they were read. Read them again before saving.");
+      }
       const ensured = command.ensureSection;
       const sections =
         ensured === undefined
@@ -201,16 +237,57 @@ export function planProjectCommand(input: {
             ? (project.sections ?? [])
             : [...(project.sections ?? []), ensured];
       if (sections !== undefined) {
-        if (sections.length > 500) return invariant("Projects support at most 500 sections.");
-        const ids = new Set<string>();
-        const names = new Set<string>();
-        for (const section of sections) {
-          const name = normalizedSectionName(section.name);
-          if (!section.id.trim() || !name || ids.has(section.id) || names.has(name)) {
-            return invariant("Sections need unique ids and non-empty, unique names.");
+        const invalid = validateProjectSections(sections);
+        if (invalid !== undefined) return invariant(invalid);
+      }
+      const sectionHistory: ProjectSectionHistory[number][] = [];
+      if (sections !== undefined) {
+        const previous = new Map((project.sections ?? []).map((section) => [section.id, section]));
+        const next = new Map(sections.map((section) => [section.id, section]));
+        for (const id of new Set([...previous.keys(), ...next.keys()])) {
+          const before = previous.get(id);
+          const after = next.get(id);
+          const fields = [
+            "name",
+            "collapsed",
+            "parentSectionId",
+            "rules",
+            "prompt",
+            "scope",
+          ] as const;
+          const changes: Array<ProjectSectionHistory[number]["changes"][number]> = fields.flatMap(
+            (field) => {
+              const oldValue = JSON.stringify(before?.[field]);
+              const newValue = JSON.stringify(after?.[field]);
+              return oldValue === newValue
+                ? []
+                : [
+                    {
+                      field,
+                      ...(oldValue === undefined ? {} : { before: oldValue }),
+                      ...(newValue === undefined ? {} : { after: newValue }),
+                    },
+                  ];
+            },
+          );
+          if (before !== undefined && after !== undefined && previous.size === next.size) {
+            const oldIndex = (project.sections ?? []).findIndex((section) => section.id === id);
+            const newIndex = sections.findIndex((section) => section.id === id);
+            if (oldIndex !== newIndex)
+              changes.push({
+                field: "position",
+                before: String(oldIndex),
+                after: String(newIndex),
+              });
           }
-          ids.add(section.id);
-          names.add(name);
+          if (changes.length > 0)
+            sectionHistory.push({
+              id: `${input.eventId}:${id}`,
+              sectionId: id,
+              actor: input.actor ?? "server",
+              createdAt: occurredAt,
+              changes,
+            });
         }
       }
       if (
@@ -240,6 +317,7 @@ export function planProjectCommand(input: {
         payload: {
           projectId: command.projectId,
           ...(sections === undefined ? {} : { sections }),
+          ...(sectionHistory.length === 0 ? {} : { sectionHistory }),
           ...(command.unsortedSectionCollapsed === undefined
             ? {}
             : { unsortedSectionCollapsed: command.unsortedSectionCollapsed }),

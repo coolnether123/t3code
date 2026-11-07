@@ -44,6 +44,9 @@ export const projectMutationOperation = Effect.fn("projectMutationOperation")(fu
         ...(mutation.scripts === undefined ? {} : { scripts: mutation.scripts }),
         ...(mutation.pinned === undefined ? {} : { pinned: mutation.pinned }),
         ...(mutation.sections === undefined ? {} : { sections: mutation.sections }),
+        ...(mutation.expectedSections === undefined
+          ? {}
+          : { expectedSections: mutation.expectedSections }),
         ...(mutation.unsortedSectionCollapsed === undefined
           ? {}
           : { unsortedSectionCollapsed: mutation.unsortedSectionCollapsed }),

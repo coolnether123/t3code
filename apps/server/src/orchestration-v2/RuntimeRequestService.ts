@@ -4,6 +4,8 @@ import {
   ProviderUserInputAnswers,
   RuntimeRequestId,
   ThreadId,
+  resolveProjectSectionContext,
+  projectSectionClientsDiffer,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -12,6 +14,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 
 export class RuntimeRequestResponseExecutionError extends Schema.TaggedError<RuntimeRequestResponseExecutionError>()(
@@ -22,6 +25,7 @@ export class RuntimeRequestResponseExecutionError extends Schema.TaggedError<Run
       "request-not-ready",
       "request-not-resumable",
       "provider-session-not-active",
+      "client-scope-changed",
       "unexpected-failure",
     ]),
     threadId: ThreadId,
@@ -42,6 +46,8 @@ export class RuntimeRequestResponseExecutionError extends Schema.TaggedError<Run
         return `Provider session ${this.providerSessionId} is not active for runtime request ${this.requestId} on thread ${this.threadId}.`;
       case "unexpected-failure":
         return `Failed to respond to runtime request ${this.requestId} on thread ${this.threadId} via provider session ${this.providerSessionId}.`;
+      case "client-scope-changed":
+        return "This approval belongs to an earlier client section. Re-read the task and verify its company before continuing.";
     }
   }
 }
@@ -67,12 +73,15 @@ export class RuntimeRequestServiceV2 extends Context.Service<
 export const layer: Layer.Layer<
   RuntimeRequestServiceV2,
   never,
-  ProjectionStore.ProjectionStoreV2 | ProviderSessionManager.ProviderSessionManagerV2
+  | ProjectionStore.ProjectionStoreV2
+  | ProviderSessionManager.ProviderSessionManagerV2
+  | ProjectStore.ProjectStoreV2
 > = Layer.effect(
   RuntimeRequestServiceV2,
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const projects = yield* ProjectStore.ProjectStoreV2;
 
     return RuntimeRequestServiceV2.of({
       respond: Effect.fn("RuntimeRequestService.respond")(
@@ -105,6 +114,44 @@ export const layer: Layer.Layer<
               providerSessionId: input.providerSessionId,
               requestId: input.requestId,
             });
+          }
+          if (input.decision?.startsWith("accept") || input.answers !== undefined) {
+            const records = yield* projections.getThreadRecords(input.threadId, ["runs", "nodes"]);
+            const project = yield* projects.get(records.thread.projectId);
+            const resolvedScope = resolveProjectSectionContext(
+              Option.isSome(project) ? (project.value.sections ?? []) : [],
+              records.thread.sectionId,
+            ).scope;
+            const requestRunId = records.nodes.find((node) => node.id === request.nodeId)?.runId;
+            const source = records.runs.find(
+              (run) => run.id === requestRunId || run.rootNodeId === request.nodeId,
+            )?.sectionContext;
+            const move = records.thread.sectionMove;
+            const currentScope =
+              records.thread.sectionId == null
+                ? (move?.previousClientScope ?? resolvedScope)
+                : resolvedScope;
+            const currentHasClient = !!currentScope.clientName || !!currentScope.qboRealm;
+            const sourceHasClient = !!source?.scope.clientName || !!source?.scope.qboRealm;
+            const sameIdentity =
+              (!currentHasClient && !sourceHasClient) ||
+              (!!source?.scope.qboRealm && source.scope.qboRealm === currentScope.qboRealm) ||
+              (!!source?.scope.clientName &&
+                source.scope.clientName.trim().toLowerCase() ===
+                  currentScope.clientName?.trim().toLowerCase());
+            if (
+              !sameIdentity ||
+              projectSectionClientsDiffer(source?.scope ?? {}, currentScope) ||
+              (move?.id !== source?.moveId &&
+                projectSectionClientsDiffer(move?.previousClientScope ?? {}, currentScope))
+            ) {
+              return yield* new RuntimeRequestResponseExecutionError({
+                reason: "client-scope-changed",
+                threadId: input.threadId,
+                providerSessionId: input.providerSessionId,
+                requestId: input.requestId,
+              });
+            }
           }
           const session = yield* sessions.get(input.providerSessionId);
           if (Option.isNone(session)) {

@@ -1,6 +1,9 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { expect, it, vi } from "vite-plus/test";
-import { userEvent } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
+import { selectActiveRightPanelSurface, useRightPanelStore } from "../../rightPanelStore";
+import "../../index.css";
 
 const persisted = vi.hoisted(() => ({ title: "" }));
 vi.mock(import("../../state/session"), async (importOriginal) => ({
@@ -22,6 +25,62 @@ vi.mock(import("~/hooks/useThreadActionMenu"), () => ({
 
 import { render } from "../../../test/render";
 import { ChatHeader } from "./ChatHeader";
+
+it("opens the chat's nested section as a right-panel tab from its chip at phone width", async () => {
+  using stack = new DisposableStack();
+  const previous = useRightPanelStore.getState();
+  stack.defer(() => useRightPanelStore.setState(previous));
+  const environmentId = EnvironmentId.make("section-environment");
+  const threadId = ThreadId.make("section-thread");
+  await page.viewport(390, 844);
+  await using screen = await render(
+    <ChatHeader
+      activeThreadEnvironmentId={environmentId}
+      activeThreadId={threadId}
+      activeThreadTitle="Invoice review"
+      activeThreadSectionId="payables"
+      isServerThread
+      activeProject={{
+        id: ProjectId.make("section-project"),
+        environmentId,
+        title: "Client work",
+        workspaceRoot: "/workroom",
+        repositoryIdentity: null,
+        defaultModelSelection: null,
+        scripts: [],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        sections: [
+          { id: "client", name: "Client A", collapsed: false },
+          {
+            id: "payables",
+            name: "Payables and invoice review",
+            parentSectionId: "client",
+            collapsed: false,
+          },
+        ],
+      }}
+      parentThreadLink={null}
+      onOpenThread={() => {}}
+      rightPanelOpen={false}
+      onNewThreadInProject={() => {}}
+    />,
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Open Payables and invoice review section" }),
+  );
+  expect(
+    selectActiveRightPanelSurface(
+      useRightPanelStore.getState().byThreadKey,
+      scopeThreadRef(environmentId, threadId),
+    ),
+  ).toMatchObject({
+    kind: "section",
+    sectionId: "payables",
+    project: { environmentId, projectId: "section-project" },
+  });
+  expect(screen.container.scrollWidth).toBeLessThanOrEqual(390);
+});
 
 function header(title: string) {
   return (

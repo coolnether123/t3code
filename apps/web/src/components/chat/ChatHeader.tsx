@@ -4,7 +4,7 @@ import {
   type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopeThreadRef, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
   isAtomCommandInterrupted,
@@ -45,6 +45,7 @@ import { useClientSettings } from "../../hooks/useSettings";
 import { ComputerBadge } from "../ComputerBadge";
 import { AgentBrowserBadge } from "../AgentBrowserBadge";
 import { GuestShareIndicator } from "./GuestShareControls";
+import { useRightPanelStore } from "../../rightPanelStore";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -52,6 +53,7 @@ interface ChatHeaderProps {
   activeThreadTitle: string;
   activeThreadPaused?: boolean;
   activeThreadLinkOrigin?: string | null | undefined;
+  activeThreadSectionId?: string | null | undefined;
   isServerThread: boolean;
   activeProject: EnvironmentProject | null;
   parentThreadLink: { threadId: ThreadId; title: string } | null;
@@ -80,6 +82,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadTitle,
   activeThreadPaused = false,
   activeThreadLinkOrigin,
+  activeThreadSectionId,
   isServerThread,
   activeProject,
   parentThreadLink,
@@ -91,6 +94,12 @@ export const ChatHeader = memo(function ChatHeader({
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.isScratch ? "No project" : activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
+  const activeSection = activeProject?.sections?.find(
+    (section) => section.id === activeThreadSectionId,
+  );
+  const parentSection = activeProject?.sections?.find(
+    (section) => section.id === activeSection?.parentSectionId,
+  );
   const interfaceFont = useClientSettings((settings) => settings.fontFamilySans);
   const breadcrumbContainerRef = useRef<HTMLDivElement>(null);
   const [collapseParentTitle, setCollapseParentTitle] = useState(false);
@@ -437,6 +446,31 @@ export const ChatHeader = memo(function ChatHeader({
           ) : null}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
+      {activeProject && activeSection ? (
+        <div className="w-24 min-w-0 shrink sm:w-auto sm:max-w-48">
+          <Button
+            variant="outline"
+            size="xs"
+            className="max-w-full"
+            aria-label={`Open ${activeSection.name} section`}
+            onClick={() =>
+              useRightPanelStore
+                .getState()
+                .openSection(
+                  activeThreadRef,
+                  scopeProjectRef(activeThreadEnvironmentId, activeProject.id),
+                  activeSection.id,
+                  activeSection.name,
+                )
+            }
+          >
+            <span className="truncate">
+              {parentSection ? `${parentSection.name} › ` : ""}
+              {activeSection.name}
+            </span>
+          </Button>
+        </div>
+      ) : null}
       {isServerThread && canOperateThread ? (
         <Button
           variant="ghost"

@@ -67,6 +67,7 @@ import {
   isRuntimeModeAbove,
   resolveProviderInstanceEnabled,
   resolveProjectProviderInstanceEnabled,
+  resolveProjectSectionContext,
   type ProviderSessionId,
   RunId,
   RuntimeMode,
@@ -3290,21 +3291,39 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }),
       ),
     );
+    let sectionMove: OrchestrationV2AppThread["sectionMove"];
     if (
       command.type === "thread.metadata.update" &&
-      command.sectionId != null &&
+      command.sectionId !== undefined &&
       !(command.sectionAssignment === "auto" && thread.sectionManualOverride === true)
     ) {
       const project = yield* projects.get(thread.projectId).pipe(mapDispatchError(command));
       if (
         Option.isNone(project) ||
-        !project.value.sections?.some((section) => section.id === command.sectionId)
+        (command.sectionId !== null &&
+          !project.value.sections?.some((section) => section.id === command.sectionId))
       ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
           cause: "Section does not belong to this project.",
         });
+      }
+      if (thread.sectionId !== command.sectionId && Option.isSome(project)) {
+        const sections = project.value.sections ?? [];
+        const before = resolveProjectSectionContext(sections, thread.sectionId);
+        const after = resolveProjectSectionContext(sections, command.sectionId);
+        sectionMove = {
+          id: command.commandId,
+          fromSectionId: thread.sectionId ?? null,
+          fromSectionName: before.sections.map((section) => section.name).join(" › ") || "Unsorted",
+          toSectionId: command.sectionId,
+          toSectionName: after.sections.map((section) => section.name).join(" › ") || "Unsorted",
+          previousClientScope:
+            before.scope.clientName || before.scope.qboRealm
+              ? before.scope
+              : (thread.sectionMove?.previousClientScope ?? {}),
+        };
       }
     }
     if (thread.deletedAt !== null) {
@@ -3884,6 +3903,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ? {}
               : {
                   sectionId: command.sectionId,
+                  ...(sectionMove === undefined ? {} : { sectionMove }),
                   sectionManualOverride:
                     command.sectionAssignment !== "auto" || thread.sectionManualOverride === true,
                 }),

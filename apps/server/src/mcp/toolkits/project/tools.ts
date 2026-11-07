@@ -66,7 +66,8 @@ const ProjectListTool = Tool.make("t3_project_list", {
   .annotate(Tool.Destructive, false);
 const ProjectReadTool = Tool.make("t3_project_read", {
   ...shared,
-  description: "Read one project: workspace and saved scripts.",
+  description:
+    "Read one project: workspace, saved scripts, sections, rules and server-owned section edit history.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     projectId: ProjectId,
@@ -88,7 +89,8 @@ const ProjectCreateTool = Tool.make("t3_project_create", {
 }).annotate(Tool.Destructive, true);
 const ProjectUpdateTool = Tool.make("t3_project_update", {
   ...shared,
-  description: "Update one project's settings. Omitted fields are unchanged.",
+  description:
+    "Update project settings. Omitted fields stay unchanged. sections replaces the full list: read first, preserve other sections, and pass the read list as expectedSections to refuse stale edits. Sections support rules, prompt, scope and one-level parentSectionId; history and actor are server-owned.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     projectId: ProjectId,

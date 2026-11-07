@@ -573,6 +573,8 @@ function surfaceTitle(
   terminalLabelsById: ReadonlyMap<string, string>,
 ): string {
   switch (surface.kind) {
+    case "section":
+      return `Section: ${surface.title}`;
     case "diff":
       return "Diff";
     case "files":
@@ -657,6 +659,8 @@ function SurfaceIcon({
   pullRequestStatusSeed: PullRequestTabStatusSeed | undefined;
 }) {
   switch (surface.kind) {
+    case "section":
+      return <Files className="size-3 shrink-0" />;
     case "preview":
       return <PreviewFavicon capturedUrl={previewCapturedUrl} url={previewUrl} />;
     case "agent-browser":

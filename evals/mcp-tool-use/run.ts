@@ -49,6 +49,7 @@ import { projectComposerContextForProvider } from "@t3tools/shared/composerConte
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import { buildCodexAdditionalContext } from "../../apps/server/src/provider/CodexDeveloperInstructions.ts";
 import { makeSideChatContext } from "../../apps/server/src/orchestration-v2/ContextHandoffService.ts";
+import { sectionTurnContext } from "../../apps/server/src/orchestration-v2/sectionTurnContext.ts";
 import { withInlineContext } from "../../apps/server/src/orchestration-v2/ContextHandoffDelivery.ts";
 import { AttachmentToolkit } from "../../apps/server/src/mcp/toolkits/attachment/tools.ts";
 import { DeviceToolkit } from "../../apps/server/src/mcp/toolkits/device/tools.ts";
@@ -290,6 +291,13 @@ export const McpToolUseCase = Schema.Struct({
     /** delegate_task `role` for a delegated child. T3 builds the child's first message from it. */
     delegateRole: Schema.optional(OrchestratorMcpTaskRole),
     context: Schema.optional(Schema.String),
+    sectionContext: Schema.optional(
+      Schema.Struct({
+        sections: Contracts.ProjectSections,
+        sectionId: Schema.NullOr(Schema.String),
+        previousSectionId: Schema.optional(Schema.NullOr(Schema.String)),
+      }),
+    ),
     priorTurns: Schema.optional(
       Schema.Array(
         Schema.Struct({
@@ -2414,7 +2422,39 @@ const main = Effect.gen(function* () {
     ];
     bases.set(key, yield* buildFor(role, access === "true", links === "true"));
   }
-  const baseFor = (testCase: McpToolUseCase) => bases.get(baseKey(testCase)) ?? base;
+  const baseFor = (testCase: McpToolUseCase) => {
+    const built = bases.get(baseKey(testCase)) ?? base;
+    const section = testCase.setup.sectionContext;
+    if (section === undefined || built.codex === undefined) return built;
+    const previous =
+      section.previousSectionId === undefined
+        ? undefined
+        : sectionTurnContext({
+            sections: section.sections,
+            sectionId: section.previousSectionId,
+          });
+    const context = sectionTurnContext({
+      sections: section.sections,
+      sectionId: section.sectionId,
+      previous,
+    });
+    return {
+      ...built,
+      codex: {
+        ...built.codex,
+        input: [
+          ...built.codex.input,
+          {
+            type: "message",
+            role: "developer",
+            content: [
+              { type: "input_text", text: `<t3_code_section>${context.text}</t3_code_section>` },
+            ],
+          },
+        ],
+      },
+    };
+  };
   const effort = flags.effort ?? base.codex?.reasoning.effort ?? "high";
   if (flags["dry-run"]) {
     // One JSON line per case. Without --case this also checks that every case builds.

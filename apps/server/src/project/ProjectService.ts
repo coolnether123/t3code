@@ -49,6 +49,10 @@ export interface ProjectUpdateInput extends ProjectUpdatePayload {
 
 export interface ProjectBootstrapInput extends ProjectCreateInput {}
 
+export class SectionEditActor extends Context.Reference<string>("t3/project/SectionEditActor", {
+  defaultValue: () => "server",
+}) {}
+
 export interface ProjectDeleteInput {
   readonly commandId: CommandId;
   readonly projectId: ProjectId;
@@ -198,6 +202,7 @@ export const make = Effect.gen(function* () {
     projectIcon: row.projectIcon,
     scripts: row.scripts,
     sections: row.sections ?? [],
+    sectionHistory: row.sectionHistory ?? [],
     unsortedSectionCollapsed: row.unsortedSectionCollapsed ?? false,
     pinnedAt: row.pinnedAt,
     archivedAt: row.archivedAt,
@@ -268,6 +273,7 @@ export const make = Effect.gen(function* () {
         state: { project, workspaceOwner },
         eventId,
         now,
+        actor: yield* SectionEditActor,
       });
       if (Result.isSuccess(planned)) {
         const { receipt } = yield* eventSink.commitProjectCommand({
@@ -412,6 +418,9 @@ export const make = Effect.gen(function* () {
         ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
         ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
         ...(input.sections === undefined ? {} : { sections: input.sections }),
+        ...(input.expectedSections === undefined
+          ? {}
+          : { expectedSections: input.expectedSections }),
         ...(input.unsortedSectionCollapsed === undefined
           ? {}
           : { unsortedSectionCollapsed: input.unsortedSectionCollapsed }),

@@ -1,5 +1,5 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { type EnvironmentId, RunId, ThreadId } from "@t3tools/contracts";
+import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { type EnvironmentId, ProjectId, RunId, ThreadId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { useClosedViewStore } from "./closedViewStore";
@@ -40,6 +40,44 @@ async function reloadRightPanelStore() {
 }
 
 describe("rightPanelStore", () => {
+  it("keeps section tabs scoped by destination and restores a closed section beside existing tabs", async () => {
+    const store = useRightPanelStore.getState();
+    const project = scopeProjectRef(refA.environmentId, ProjectId.make("project-a"));
+    store.openFile(refA, "src/app.ts");
+    store.openSection(refA, project, "payables", "Payables");
+    store.openSection(refA, project, "payables", "Payables renamed");
+    const selected = selectActiveRightPanelSurface(
+      useRightPanelStore.getState().byThreadKey,
+      refA,
+    )!;
+    expect(selected).toMatchObject({
+      kind: "section",
+      project,
+      sectionId: "payables",
+      title: "Payables renamed",
+    });
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).surfaces,
+    ).toHaveLength(2);
+    store.closeSurface(refA, selected.id);
+    expect(
+      selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA)?.kind,
+    ).toBe("file");
+    const closed = useClosedViewStore.getState().entries[0]!;
+    await reopenClosedView(closed, {
+      workspaceAvailable: true,
+      openPreview: () => {
+        throw new Error("Section tabs do not open browser sessions");
+      },
+    });
+    expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA)).toEqual(
+      selected,
+    );
+    await reloadRightPanelStore();
+    expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA)).toEqual(
+      selected,
+    );
+  });
   it("opens a hosted side chat's panel actions in its parent's panel until unhosted", () => {
     const store = useRightPanelStore.getState();
     const unhost = hostRightPanel(refB, refA);

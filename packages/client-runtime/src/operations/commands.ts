@@ -64,6 +64,7 @@ export interface UpdateProjectInput extends CommandMetadata {
   readonly pinned?: boolean;
   readonly archived?: boolean;
   readonly sections?: ReadonlyArray<ProjectSection>;
+  readonly expectedSections?: ReadonlyArray<ProjectSection>;
   readonly unsortedSectionCollapsed?: boolean;
 }
 
@@ -388,6 +389,7 @@ export const updateProject = Effect.fn("EnvironmentCommands.updateProject")(func
     ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
     ...(input.archived === undefined ? {} : { archived: input.archived }),
     ...(input.sections === undefined ? {} : { sections: input.sections }),
+    ...(input.expectedSections === undefined ? {} : { expectedSections: input.expectedSections }),
     ...(input.unsortedSectionCollapsed === undefined
       ? {}
       : { unsortedSectionCollapsed: input.unsortedSectionCollapsed }),

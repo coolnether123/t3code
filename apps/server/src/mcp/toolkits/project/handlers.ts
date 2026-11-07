@@ -359,9 +359,18 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   t3_project_update: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const projects = yield* Project.ProjectService;
+      const scope = yield* McpInvocationContext.McpInvocationContext;
       return yield* projects
         .update({ ...input, commandId: yield* newCommandId() })
-        .pipe(Effect.mapError(projectFailure));
+        .pipe(
+          Effect.provideService(
+            Project.SectionEditActor,
+            scope.thread === undefined
+              ? `mcp:${scope.client?.label ?? "client"}:${scope.client?.sessionId ?? "unknown"}`
+              : `agent:${scope.thread.threadId}`,
+          ),
+          Effect.mapError(projectFailure),
+        );
     }),
   ),
   t3_project_delete: McpToolAccess.writesEnvironment((input) =>

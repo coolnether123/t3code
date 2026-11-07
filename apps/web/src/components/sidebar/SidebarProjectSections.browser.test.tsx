@@ -11,11 +11,15 @@ import type { ProjectSection } from "./projectSections.logic";
 
 function Harness({
   record,
+  open = () => {},
+  initialSections = [],
 }: {
   readonly record: (
     sections: readonly ProjectSection[],
     unsortedSectionCollapsed?: boolean,
   ) => void;
+  readonly open?: (project: ScopedProjectRef, section: ProjectSection) => void;
+  readonly initialSections?: readonly ProjectSection[];
 }) {
   const [project, setProject] = useState<EnvironmentProject>({
     id: ProjectId.make("project-test"),
@@ -27,7 +31,7 @@ function Harness({
     scripts: [],
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
-    sections: [],
+    sections: initialSections,
     unsortedSectionCollapsed: false,
   });
   const thread = makeThreadFixture({ title: "Client work", sectionId: "deleted-section" });
@@ -48,6 +52,8 @@ function Harness({
           threads={[thread]}
           canUpdate={() => true}
           onUpdate={update}
+          onOpenSection={open}
+          canNest={() => true}
           renderThread={(thread) => <li key={thread.id}>{thread.title}</li>}
         />
       </ul>
@@ -82,7 +88,9 @@ describe("project section management", () => {
     await expect
       .element(screen.getByRole("button", { name: "Client C section", exact: true }))
       .toBeVisible();
-    await userEvent.click(screen.getByRole("button", { name: "Client A section", exact: true }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Collapse Client A section", exact: true }),
+    );
     expect(
       record.mock.lastCall?.[0].find((section: ProjectSection) => section.name === "Client A")
         ?.collapsed,
@@ -95,7 +103,11 @@ describe("project section management", () => {
     await userEvent.click(screen.getByRole("button", { name: "Manage Client C section" }));
     await userEvent.click(page.getByRole("menuitem", { name: "Delete section" }));
     await expect
-      .element(page.getByText("Chats in Client C will move to Unsorted. No chats will be deleted."))
+      .element(
+        page.getByText(
+          "Chats in Client C will move to Unsorted. Child sections become top-level sections. No chats will be deleted.",
+        ),
+      )
       .toBeVisible();
     page.getByRole("button", { name: "Delete section", exact: true }).element().focus();
     await userEvent.keyboard("{Enter}");
@@ -106,5 +118,46 @@ describe("project section management", () => {
     expect(record.mock.lastCall?.[0].map((section: ProjectSection) => section.name)).toEqual([
       "Client A",
     ]);
+  });
+
+  it("opens section details without collapsing, creates one child level and keeps children inside parent collapse", async () => {
+    const record = vi.fn();
+    const open = vi.fn();
+    await using screen = await render(
+      <Harness
+        record={record}
+        open={open}
+        initialSections={[{ id: "client", name: "Client", collapsed: false }]}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Client section", exact: true }));
+    expect(open).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "project-test" }),
+      expect.objectContaining({ id: "client" }),
+    );
+    expect(record).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Manage Client section" }));
+    await userEvent.click(page.getByRole("menuitem", { name: "Create child section" }));
+    await userEvent.type(page.getByRole("textbox", { name: "Section name" }), "Payables");
+    await userEvent.keyboard("{Enter}");
+    await expect
+      .element(screen.getByRole("button", { name: "Payables section", exact: true }))
+      .toBeVisible();
+    expect(record.mock.lastCall?.[0]).toContainEqual(
+      expect.objectContaining({ name: "Payables", parentSectionId: "client" }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Manage Payables section" }));
+    await expect
+      .element(page.getByRole("menuitem", { name: "Create child section" }))
+      .not.toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(screen.getByRole("button", { name: "Collapse Client section" }));
+    await expect
+      .element(screen.getByRole("button", { name: "Payables section", exact: true }))
+      .not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Expand Client section" }));
+    await expect
+      .element(screen.getByRole("button", { name: "Payables section", exact: true }))
+      .toBeVisible();
   });
 });

@@ -3,7 +3,13 @@ import {
   scopedThreadKey,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import { EnvironmentId, RunId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  RunId,
+  ThreadId,
+  type ScopedProjectRef,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
@@ -23,6 +29,7 @@ const RIGHT_PANEL_KINDS = [
   "pull-request",
   "pull-requests",
   "side-chat",
+  "section",
 ] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
@@ -83,6 +90,13 @@ export type RightPanelSurface =
       detailTab?: PullRequestDetailTab;
     }
   | { id: "pull-requests"; kind: "pull-requests" }
+  | {
+      id: `section:${string}`;
+      kind: "section";
+      project: ScopedProjectRef;
+      sectionId: string;
+      title: string;
+    }
   | { id: `side-chat:${string}`; kind: "side-chat"; threadId: ThreadId };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
@@ -132,8 +146,14 @@ interface RightPanelStoreState {
     ref: ScopedThreadRef,
     kind: Exclude<
       RightPanelKind,
-      "file" | "terminal" | "pull-request" | "side-chat" | "agent-browser"
+      "file" | "terminal" | "pull-request" | "side-chat" | "agent-browser" | "section"
     >,
+  ) => void;
+  openSection: (
+    ref: ScopedThreadRef,
+    project: ScopedProjectRef,
+    sectionId: string,
+    title: string,
   ) => void;
   openSideChat: (ref: ScopedThreadRef, threadId: ThreadId) => void;
   openDevice: (ref: ScopedThreadRef, target: DeviceTabTarget, automatic?: boolean) => void;
@@ -198,7 +218,7 @@ interface RightPanelStoreState {
     ref: ScopedThreadRef,
     kind: Exclude<
       RightPanelKind,
-      "file" | "terminal" | "pull-request" | "side-chat" | "agent-browser"
+      "file" | "terminal" | "pull-request" | "side-chat" | "agent-browser" | "section"
     >,
   ) => void;
   setThreadPanelOpen: (
@@ -224,7 +244,7 @@ const DEFAULT_THREAD_PANEL_VISIBILITY: ThreadPanelVisibility = {
 const singletonSurface = (
   kind: Exclude<
     RightPanelKind,
-    "file" | "preview" | "terminal" | "pull-request" | "side-chat" | "agent-browser"
+    "file" | "preview" | "terminal" | "pull-request" | "side-chat" | "agent-browser" | "section"
   >,
 ): RightPanelSurface => {
   switch (kind) {
@@ -712,6 +732,27 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               return upsertSurface(current, existing ?? browserSurface(null));
             }
             return upsertSurface(current, singletonSurface(kind));
+          }),
+        ),
+      openSection: (ref, project, sectionId, title) =>
+        set((state) =>
+          userAction(state, scopedThreadKey(ref), (current) => {
+            const surface: RightPanelSurface = {
+              id: `section:${JSON.stringify([project.environmentId, project.projectId, sectionId])}`,
+              kind: "section",
+              project,
+              sectionId,
+              title,
+            };
+            return upsertSurface(
+              {
+                ...current,
+                surfaces: current.surfaces.map((entry) =>
+                  entry.id === surface.id ? surface : entry,
+                ),
+              },
+              surface,
+            );
           }),
         ),
       openDevice: (ref, target, automatic = false) =>

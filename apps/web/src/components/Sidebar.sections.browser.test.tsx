@@ -19,6 +19,7 @@ import { makeThreadFixture } from "../test-fixtures";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import Sidebar from "./Sidebar";
 import { SidebarProvider } from "./ui/sidebar";
+import "../index.css";
 
 vi.mock("../state/entities", { spy: true });
 vi.mock("../state/use-orchestration-command", { spy: true });
@@ -59,6 +60,7 @@ describe("sidebar project sections", () => {
       sections: [
         { id: "client-a", name: "Client A", collapsed: false },
         { id: "client-b", name: "Client B", collapsed: false },
+        { id: "payables", name: "Payables", parentSectionId: "client-b", collapsed: false },
       ],
     };
     let thread = makeThreadFixture({
@@ -117,7 +119,9 @@ describe("sidebar project sections", () => {
     vi.mocked(useOrchestrationCommand).mockReturnValue(move);
     const ui = () => (
       <SidebarProvider>
-        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+        <aside className="flex h-screen w-72 flex-col">
+          <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+        </aside>
       </SidebarProvider>
     );
     await page.viewport(1024, 900);
@@ -133,7 +137,7 @@ describe("sidebar project sections", () => {
       `[data-thread-item="${scopedThreadKey(scopeThreadRef(environmentId, thread.id))}"] [data-sidebar-row]`,
     )!;
     expect(source).not.toBeNull();
-    const target = screen.getByRole("button", { name: "Client B section", exact: true }).element();
+    const target = screen.getByRole("button", { name: "Payables section", exact: true }).element();
     const sourceRect = source.getBoundingClientRect();
     const targetRect = target.getBoundingClientRect();
     const pointer = {
@@ -186,18 +190,18 @@ describe("sidebar project sections", () => {
       expect(move).toHaveBeenCalledWith(
         expect.objectContaining({
           environmentId,
-          input: expect.objectContaining({ sectionId: "client-b", sectionAssignment: "manual" }),
+          input: expect.objectContaining({ sectionId: "payables", sectionAssignment: "manual" }),
         }),
       ),
     );
     vi.mocked(useQuietThreadShells).mockReturnValue([thread, ...otherThreads]);
     await screen.rerender(ui());
     expect(
-      screen.container.querySelector('[data-project-section="client-b"] [data-thread-item]'),
+      screen.container.querySelector('[data-project-section="payables"] [data-thread-item]'),
     ).not.toBeNull();
 
     const row = screen.container.querySelector<HTMLElement>(
-      '[data-project-section="client-b"] [data-thread-item] [data-sidebar-row]',
+      '[data-project-section="payables"] [data-thread-item] [data-sidebar-row]',
     )!;
     await userEvent.click(row, { button: "right" });
     await userEvent.hover(page.getByRole("menuitem", { name: "Move to section", exact: true }));
