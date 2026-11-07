@@ -21,7 +21,7 @@ vi.mock(import("@t3tools/client-runtime/preview/server-browser-stream"), async (
   createPreviewStreamClient: mocks.createClient as never,
   createPreviewFramePainter: (_canvas, onPainted) => {
     mocks.painted = onPainted ?? null;
-    return { paint: () => undefined, stop: () => undefined };
+    return { paint: () => undefined, clear: () => undefined, stop: () => undefined };
   },
 }));
 
@@ -41,7 +41,7 @@ function setup() {
   }));
 }
 
-async function renderSurface(controller: PreviewStreamControl["controller"]) {
+async function renderSurface(controller: PreviewStreamControl["controller"], readOnly = false) {
   const container = document.createElement("div");
   container.style.cssText = "width: 400px; height: 300px; display: flex;";
   await using stack = new AsyncDisposableStack();
@@ -52,7 +52,8 @@ async function renderSurface(controller: PreviewStreamControl["controller"]) {
         threadId="thread-copy"
         tabId="tab-copy"
         visible
-        followSize={false}
+        readOnly={readOnly}
+        followSize={readOnly}
         className="flex-1"
       />,
       { container },
@@ -158,6 +159,27 @@ const mouseUp = (canvas: HTMLCanvasElement, button: number) => {
 };
 
 describe("ServerBrowserSurface history", () => {
+  it("keeps a leased page view-only even if a control message claims this viewer owns it", async () => {
+    setup();
+    const { screen, input, canvas } = await renderSurface("you", true);
+    await using _screen = screen;
+    expect(mocks.createClient.mock.calls.at(-1)![0]).toMatchObject({ interactive: false });
+    expect(input.disabled).toBe(true);
+    await expect
+      .element(screen.getByRole("button", { name: "Release control" }))
+      .not.toBeInTheDocument();
+    await act(() => {
+      mocks.painted?.();
+      const handlers = mocks.createClient.mock.calls.at(-1)![1];
+      handlers.onViewport({ width: 400, height: 300 });
+      mouseUp(canvas, 3);
+      canvas.dispatchEvent(new WheelEvent("wheel", { deltaY: 10, bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+      input.dispatchEvent(new CompositionEvent("compositionend", { data: "hello", bubbles: true }));
+    });
+    expect(mocks.sent).toEqual([]);
+  });
+
   it("routes mouse thumb buttons to the preview's history instead of the app", async () => {
     setup();
     const { screen, input } = await renderSurface("you");

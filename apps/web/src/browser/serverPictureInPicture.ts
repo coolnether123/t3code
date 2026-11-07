@@ -119,6 +119,7 @@ export async function openServerPictureInPicture(input: {
           refusals = 0;
           painter.paint(jpeg);
         },
+        onSuppressed: () => painter.clear(),
         onViewport: () => undefined,
         onConnectedChange: () => undefined,
         onUnauthorized: () => {

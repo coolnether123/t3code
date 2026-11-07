@@ -1215,6 +1215,19 @@ describe("rightPanelStore", () => {
     expect(
       selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
     ).toMatchObject({ isOpen: true, activeSurfaceId: "diff" });
+
+    store.openAgentBrowser(refA, "agent-lease:lease-a:page-a");
+    store.reconcileBrowserSurfaces(refA, []);
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
+    ).toMatchObject({
+      isOpen: true,
+      activeSurfaceId: "agent-browser:agent-lease:lease-a:page-a",
+      surfaces: [
+        { kind: "diff" },
+        { kind: "agent-browser", resourceId: "agent-lease:lease-a:page-a" },
+      ],
+    });
   });
 
   it("moves a surface to a new index and keeps it there through browser reconciliation", () => {

@@ -43,6 +43,7 @@ import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
 import { useClientSettings } from "../../hooks/useSettings";
 import { ComputerBadge } from "../ComputerBadge";
+import { AgentBrowserBadge } from "../AgentBrowserBadge";
 import { GuestShareIndicator } from "./GuestShareControls";
 
 interface ChatHeaderProps {
@@ -293,6 +294,7 @@ export const ChatHeader = memo(function ChatHeader({
       onContextMenu={handleHeaderContextMenu}
     >
       <ComputerBadge environmentId={activeThreadEnvironmentId} className="max-w-36 shrink-0" />
+      <AgentBrowserBadge threadRef={activeThreadRef} />
       <WorkspaceBreadcrumb
         ariaLabel="Thread breadcrumb"
         className="flex-1 overflow-clip [overflow-clip-margin:2px]"

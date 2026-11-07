@@ -11,6 +11,7 @@ import type {
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { lazy, Suspense } from "react";
 import SideChatPane from "./SideChatPane";
+import { AgentBrowserView } from "../preview/AgentBrowserView";
 import type { ComposerImageAttachment, DraftId } from "../../composerDraftStore";
 import type { ShortcutMatchContext } from "../../keybindings";
 import type { SideChatParentPanel } from "../../lib/sideChatPane";
@@ -83,6 +84,10 @@ export function RightPanelSurfaceContent(props: {
   const { surface, threadRef, visible, onCloseSurface } = props;
   if (surface === null) return null;
   switch (surface.kind) {
+    case "agent-browser":
+      return (
+        <AgentBrowserView threadRef={threadRef} tabId={surface.resourceId} visible={visible} />
+      );
     case "preview":
       return (
         <Suspense fallback={null}>

@@ -66,6 +66,8 @@ const isClosedViewEntry = (entry: unknown): entry is ClosedViewEntry => {
       return surface.id === surface.kind;
     case "preview":
       return surface.resourceId === null || typeof surface.resourceId === "string";
+    case "agent-browser":
+      return typeof surface.resourceId === "string";
     case "file":
       return (
         typeof surface.relativePath === "string" &&

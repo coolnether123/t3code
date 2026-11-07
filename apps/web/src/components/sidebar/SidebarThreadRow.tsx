@@ -115,6 +115,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { MiddleTruncate } from "../ui/middle-truncate";
 import { useThreadHasUnsentDraft } from "../../composerDraftStore";
 import { ComputerBadge } from "../ComputerBadge";
+import { AgentBrowserBadge } from "../AgentBrowserBadge";
 
 // The fields thread rows show. Provider status pushes refresh `checkedAt`,
 // status and auth on every provider; leaving those out keeps each
@@ -1257,6 +1258,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               )}
               {draftIndicator}
               {title}
+              <AgentBrowserBadge threadRef={threadRef} onOpen={() => onThreadActivate(threadRef)} />
               {multiline ? titleLineIcons : null}
               {pinIndicator}
               {multiline ? null : terminalStatusIcon}
@@ -1582,6 +1584,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             </div>
             <div className="mt-1 flex min-w-0 items-center gap-1.5">
               {title}
+              <AgentBrowserBadge threadRef={threadRef} onOpen={() => onThreadActivate(threadRef)} />
               {isRegeneratingTitle ? (
                 <span role="status" className="sr-only">
                   Regenerating title

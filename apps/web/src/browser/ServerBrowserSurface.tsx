@@ -144,6 +144,7 @@ export function ServerBrowserSurface(props: {
   readonly threadId: string;
   readonly tabId: string;
   readonly visible: boolean;
+  readonly readOnly?: boolean;
   readonly followSize?: boolean;
   readonly controlPosition?: "top" | "bottom";
   readonly onFirstFrame?: () => void;
@@ -159,6 +160,7 @@ export function ServerBrowserSurface(props: {
     threadId,
     tabId,
     visible,
+    readOnly: requestedReadOnly = false,
     followSize = true,
     controlPosition = "top",
     onFirstFrame,
@@ -169,6 +171,7 @@ export function ServerBrowserSurface(props: {
     pdfUrl = null,
     ref,
   } = props;
+  const readOnly = requestedReadOnly || tabId.startsWith("agent-lease:");
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const keySentRef = useRef(false);
@@ -223,7 +226,7 @@ export function ServerBrowserSurface(props: {
 
   // Keep clearInput stable: a new identity reconnects the stream.
   const send = (input: PreviewStreamInput) => {
-    clientRef.current?.send(input);
+    if (!readOnly) clientRef.current?.send(input);
   };
 
   const clearInput = () => {
@@ -347,7 +350,7 @@ export function ServerBrowserSurface(props: {
       const previous = sizeRef.current;
       if (previous?.width === size.width && previous.height === size.height) return;
       sizeRef.current = size;
-      if (followSize) clientRef.current?.send({ type: "resize", ...size });
+      if (followSize && !readOnly) clientRef.current?.send({ type: "resize", ...size });
       // Growing the cap reconnects the stream; wait until resizing settles.
       if (capTimer !== null) clearTimeout(capTimer);
       capTimer = setTimeout(growCap, previous === null ? 0 : RESIZE_THROTTLE_MS * 2);
@@ -361,7 +364,7 @@ export function ServerBrowserSurface(props: {
       if (timer !== null) clearTimeout(timer);
       if (capTimer !== null) clearTimeout(capTimer);
     };
-  }, [followSize]);
+  }, [followSize, readOnly]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- opens the preview stream client and paints its frames onto the canvas while visible
   useEffect(() => {
@@ -374,12 +377,20 @@ export function ServerBrowserSurface(props: {
       firstFrame();
     });
     const client = createPreviewStreamClient(
-      { access, threadId, tabId, maxWidth: cap.width, maxHeight: cap.height },
+      {
+        access,
+        threadId,
+        tabId,
+        maxWidth: cap.width,
+        maxHeight: cap.height,
+        interactive: !readOnly,
+      },
       {
         onFrame: (jpeg) => {
           unauthorizedRef.current = 0;
           painter.paint(jpeg);
         },
+        onSuppressed: () => painter.clear(),
         onProbe: (result) => {
           if (controlRef.current?.controller !== "you") return;
           lastProbeRef.current = { ...result, at: performance.now() };
@@ -418,11 +429,12 @@ export function ServerBrowserSurface(props: {
             clearInput();
           } else if (previous?.controller !== "you") {
             const size = sizeRef.current;
-            if (followSize && size) client.send({ type: "resize", ...size });
+            if (followSize && !readOnly && size) client.send({ type: "resize", ...size });
           }
         },
         onConnectedChange: (connected) => {
           if (connected) return;
+          if (readOnly) painter.clear();
           setFileChooser(null);
           controlRef.current = null;
           setControl(null);
@@ -463,6 +475,7 @@ export function ServerBrowserSurface(props: {
     environmentId,
     followSize,
     hostSetup,
+    readOnly,
     tabId,
     threadId,
     visible,
@@ -753,9 +766,9 @@ export function ServerBrowserSurface(props: {
         )}
       >
         <span role="status" className="text-xs text-muted-foreground">
-          {previewStreamControlLabel(control)}
+          {readOnly ? "View only" : previewStreamControlLabel(control)}
         </span>
-        {control?.canOperate ? (
+        {!readOnly && control?.canOperate ? (
           <Button
             variant="outline"
             size="xs"
@@ -802,7 +815,7 @@ export function ServerBrowserSurface(props: {
           autoComplete="off"
           autoCorrect="off"
           spellCheck={false}
-          disabled={pdfUrl !== null || control?.controller !== "you"}
+          disabled={readOnly || pdfUrl !== null || control?.controller !== "you"}
           defaultValue={INPUT_SENTINEL}
           onFocus={(event) => resetInput(event.currentTarget)}
           className="sr-only top-0 left-0 text-base"
@@ -822,7 +835,7 @@ export function ServerBrowserSurface(props: {
             if (text) send({ type: "text", text });
           }}
         />
-        {fileChooser && control?.controller === "you" ? (
+        {!readOnly && fileChooser && control?.controller === "you" ? (
           <div
             className="absolute inset-x-2 top-2 z-10 flex flex-col gap-2 rounded-lg border border-border bg-background p-3 shadow-lg"
             role="dialog"
@@ -860,7 +873,7 @@ export function ServerBrowserSurface(props: {
             aria-label="Browser dialog"
           >
             <p className="break-words text-sm">{control.dialog.message}</p>
-            {control.controller === "you" ? (
+            {!readOnly && control.controller === "you" ? (
               <>
                 {control.dialog.type === "prompt" ? (
                   <Input
@@ -892,7 +905,9 @@ export function ServerBrowserSurface(props: {
                 </div>
               </>
             ) : (
-              <p className="text-xs text-muted-foreground">Take control to respond.</p>
+              <p className="text-xs text-muted-foreground">
+                {readOnly ? "The agent handles this dialog." : "Take control to respond."}
+              </p>
             )}
           </div>
         ) : null}
