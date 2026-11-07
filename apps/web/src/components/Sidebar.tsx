@@ -75,6 +75,7 @@ import {
   SettingsIcon,
 } from "lucide-react";
 import {
+  Fragment,
   useEffect,
   useLayoutEffect,
   useReducer,
@@ -191,6 +192,8 @@ import {
 import {
   applySidebarThreadDrop,
   filterSidebarV2VisibleThreads,
+  buildSidebarThreadTree,
+  flattenSidebarThreadTree,
   groupSidebarThreadsByProject,
   sidebarFolderExpansionKeys,
   buildBulkTitleRegenerationContextMenuItem,
@@ -565,15 +568,18 @@ function useSidebarThreads(input: {
               : EMPTY_THREADS,
           };
         });
-  const orderedThreads = [
-    ...pinnedThreads,
-    ...(projectFolders === null
-      ? activeThreads
-      : projectFolders.flatMap((folder) => folder.threads)),
-    ...visibleWorkingThreads,
-    ...visibleSnoozedThreads,
-    ...renderedSettledThreads,
-  ];
+  const orderedThreads = flattenSidebarThreadTree(
+    [
+      ...pinnedThreads,
+      ...(projectFolders === null
+        ? activeThreads
+        : projectFolders.flatMap((folder) => folder.threads)),
+      ...visibleWorkingThreads,
+      ...visibleSnoozedThreads,
+      ...renderedSettledThreads,
+    ],
+    partition.childrenByParentKey,
+  );
   const sectionByThreadKey = new Map<string, SidebarSection>();
   for (const [list, section] of [
     [pinnedThreads, "pinned"],
@@ -648,6 +654,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     sortActiveBySend,
   } = input;
   const preciseNow = new Date().toISOString();
+  const { childrenByParentKey } = buildSidebarThreadTree(threads);
   const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys, delegatedUnderParent);
   const inboxObservation = inboxReturns.observe(workingShelfEnabled ? threads : null);
   const pinned: EnvironmentThreadShell[] = [];
@@ -709,6 +716,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
       ? sortInboxThreadsByReturn(active, inboxObservation.returnedAt)
       : sortThreadsForSidebar(active);
   return {
+    childrenByParentKey,
     pinnedThreads:
       optimisticDrop?.section !== "pinned" || optimisticDrop.order === null
         ? sortedPinned
@@ -1483,6 +1491,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     activeKeys,
     pinnedKeysById,
     activeKeysById,
+    childrenByParentKey,
   } = useSidebarThreads({
     sectionLayoutEnabled,
     projectScopeKey,
@@ -1503,7 +1512,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       scopedProjectGroups.length > 0 || (group.pinned && !group.archived),
   });
   const threadByKey = sectionLayoutEnabled
-    ? new Map(searchableThreads.map((thread) => [threadShellKey(thread), thread]))
+    ? new Map(
+        flattenSidebarThreadTree(searchableThreads, childrenByParentKey).map((thread) => [
+          threadShellKey(thread),
+          thread,
+        ]),
+      )
     : shelfThreadByKey;
   const orderedThreadKeys = sectionLayoutEnabled
     ? sectionProjects.flatMap((project) =>
@@ -1521,7 +1535,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               (section) => section.id === group.parentSectionId && section.collapsed,
             ))
             ? []
-            : group.threads.map(threadShellKey),
+            : flattenSidebarThreadTree(group.threads, childrenByParentKey).map(threadShellKey),
         ),
       )
     : shelfOrderedThreadKeys;
@@ -3582,35 +3596,53 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                         section: SidebarSection,
                         // The tree row of the project folder this row sits in.
                         folderRow?: string,
-                      ) => {
+                        nested = false,
+                      ): ReactNode => {
                         const threadKey = scopedThreadKey(
                           scopeThreadRef(thread.environmentId, thread.id),
                         );
                         const isCard =
                           section === "active" || section === "pinned" || section === "working";
-                        const rowVariant = folderRow
-                          ? folderRowsMultiline
-                            ? "folder-multiline"
-                            : "folder"
-                          : isCard
-                            ? "card"
-                            : "slim";
-                        return (
+                        const children = childrenByParentKey.get(threadKey) ?? [];
+                        const rowVariant = nested
+                          ? "slim"
+                          : folderRow
+                            ? folderRowsMultiline
+                              ? "folder-multiline"
+                              : "folder"
+                            : isCard
+                              ? "card"
+                              : "slim";
+                        const row = (
                           <SortableThreadRow
                             key={threadKey}
                             sortableId={threadKey}
                             contextDrag={isContextDrag}
                             sortableDisabled={
-                              sectionLayoutEnabled
+                              nested ||
+                              (sectionLayoutEnabled
                                 ? !canUpdateSections(
                                     scopeProjectRef(thread.environmentId, thread.projectId),
                                   ) || renamingThreadKey === threadKey
                                 : projectFolders !== null ||
                                   renamingThreadKey === threadKey ||
                                   !draggableThreadKeys.has(threadKey) ||
-                                  optimisticDrop !== null
+                                  optimisticDrop !== null)
                             }
                             thread={thread}
+                            childThread={nested}
+                            childCount={children.length}
+                            onToggleChildren={() => {
+                              void updateThreadMetadata({
+                                environmentId: thread.environmentId,
+                                input: {
+                                  threadId: thread.id,
+                                  childrenExpanded: !thread.childrenExpanded,
+                                },
+                              }).then((result) =>
+                                reportProjectFailure("Failed to update child chats", result),
+                              );
+                            }}
                             variant={rowVariant}
                             navigationParent={
                               folderRow ??
@@ -3699,6 +3731,23 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             onAcknowledgeWoke={acknowledgeWoke}
                             onFileDropThreads={handleThreadFileDrop}
                           />
+                        );
+                        return children.length > 0 && thread.childrenExpanded ? (
+                          <Fragment key={threadKey}>
+                            {row}
+                            <li role="presentation" className="min-w-0 list-none ps-3">
+                              <ul
+                                aria-label={`Children of ${thread.title}`}
+                                className="min-w-0 border-s border-border/60 ps-1"
+                              >
+                                {children.map((child) =>
+                                  renderThreadRow(child, section, threadKey, true),
+                                )}
+                              </ul>
+                            </li>
+                          </Fragment>
+                        ) : (
+                          row
                         );
                       };
                       const from = isContextDrag ? null : (dragState?.activeSection ?? null);

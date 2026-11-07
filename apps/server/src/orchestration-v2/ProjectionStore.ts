@@ -851,7 +851,6 @@ export function applyToProjection(
     case "thread.pinned":
     case "thread.unpinned":
     case "thread.pin-reordered":
-    case "thread.metadata-updated":
     case "thread.runtime-mode-updated":
     case "thread.interaction-mode-updated":
     case "thread.model-selection-updated":
@@ -861,7 +860,8 @@ export function applyToProjection(
         ...base,
         thread: event.payload,
       };
-    // Reordering and PR refreshes preserve the orchestrator's activity timestamp.
+    // View preferences, reordering and PR refreshes preserve the orchestrator's activity timestamp.
+    case "thread.metadata-updated":
     case "thread.active-reordered":
     case "thread.tags-updated":
     case "thread.pull-request-synced":
@@ -1698,6 +1698,7 @@ export function threadShellFromProjection(
 
     autoSettleDisabledAt: projection.thread.autoSettleDisabledAt ?? null,
     paused: projection.thread.paused ?? false,
+    childrenExpanded: projection.thread.childrenExpanded ?? false,
     sectionId: projection.thread.sectionId ?? null,
     sectionManualOverride: projection.thread.sectionManualOverride ?? false,
     pinOrderKey: projection.thread.pinOrderKey ?? null,
@@ -1967,6 +1968,7 @@ function shellFromState(input: {
 
     autoSettleDisabledAt: input.state.thread.autoSettleDisabledAt ?? null,
     paused: input.state.thread.paused ?? false,
+    childrenExpanded: input.state.thread.childrenExpanded ?? false,
     sectionId: input.state.thread.sectionId ?? null,
     sectionManualOverride: input.state.thread.sectionManualOverride ?? false,
     pinOrderKey: input.state.thread.pinOrderKey ?? null,

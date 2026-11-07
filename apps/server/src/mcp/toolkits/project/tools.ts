@@ -4,6 +4,8 @@ import {
   ModelSelection,
   TrimmedNonEmptyString,
   ThreadId,
+  EnvironmentId,
+  ProviderInstanceId,
   RunId,
   OrchestrationV2DelegatedFrom,
   OrchestrationV2RunStatus,
@@ -126,10 +128,20 @@ const ProjectCloneTool = Tool.make("t3_project_clone", {
 const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   ...shared,
   description:
-    "Create one new top-level thread, bound to its workspace before the agent starts. Task in `message`. Omit `projectId`, model and modes to inherit yours (outside a thread, pass `projectId` or `scratch`); modes cannot exceed yours. After an error or lost reply, retry with the same `clientRequestId`. Follow it with `t3_thread_read` or `t3_thread_wait`. Mention it with its `link`.",
+    "Create one new independent thread, bound to its workspace before the agent starts. The starting thread is recorded as its parent. Task in `message`. Omit `projectId`, model and modes to inherit yours (outside a thread, pass `projectId` or `scratch`); modes cannot exceed yours. After an error or lost reply, retry with the same `clientRequestId`. Follow it with `t3_thread_read` or `t3_thread_wait`. Mention it with its `link`.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     projectId: Schema.optional(ProjectId),
+    parent: Schema.optional(
+      Schema.Struct({
+        threadId: ThreadId,
+        environmentId: EnvironmentId,
+        providerInstanceId: ProviderInstanceId,
+      }).annotate({
+        description:
+          "Local CLI parent identity. Thread callers cannot override their own parent; mismatched or missing parents are refused.",
+      }),
+    ),
     scratch: Schema.optional(
       Schema.Boolean.annotate({
         description:

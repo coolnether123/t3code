@@ -1487,6 +1487,13 @@ function codexThreadRuntimeParams(input: {
       ...(input.threadId === null
         ? {}
         : { [`shell_environment_policy.set.${PortScanner.AGENT_THREAD_ENV}`]: input.threadId }),
+      ...(mcpSession === undefined
+        ? {}
+        : {
+            "shell_environment_policy.set.T3CODE_ENVIRONMENT_ID": mcpSession.environmentId,
+            "shell_environment_policy.set.T3CODE_PROVIDER_INSTANCE_ID":
+              mcpSession.providerInstanceId,
+          }),
       ...(t3Server === undefined
         ? {}
         : {

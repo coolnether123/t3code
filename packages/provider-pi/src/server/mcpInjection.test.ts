@@ -59,6 +59,9 @@ describe("pi T3 MCP injection", () => {
     assert.equal(launch.env[T3_MCP_BEARER_ENV], "secret-pi-token");
     assert.equal(launch.env[T3_PI_RUNTIME_MODE_ENV], "approval-required");
     assert.equal(launch.env[T3_PI_MCP_EXTENSION_PATH_ENV], "/tmp/cache/pi-t3-mcp-extension.ts");
+    assert.equal(launch.env.T3CODE_THREAD_ID, threadId);
+    assert.equal(launch.env.T3CODE_ENVIRONMENT_ID, mcpSession.environmentId);
+    assert.equal(launch.env.T3CODE_PROVIDER_INSTANCE_ID, mcpSession.providerInstanceId);
 
     const permissionOnly = buildPiRpcLaunch({
       launchArgs: [],
@@ -66,6 +69,9 @@ describe("pi T3 MCP injection", () => {
         [T3_MCP_URL_ENV]: "http://127.0.0.1:9999/stale",
         [T3_MCP_BEARER_ENV]: "stale-token",
         [T3_PI_MCP_EXTENSION_PATH_ENV]: "/stale/extension.ts",
+        T3CODE_THREAD_ID: "stale-parent",
+        T3CODE_ENVIRONMENT_ID: "stale-environment",
+        T3CODE_PROVIDER_INSTANCE_ID: "stale-provider",
       },
       mcpSession: undefined,
       extensionPath: "/tmp/cache/pi-t3-mcp-extension.ts",
@@ -79,6 +85,9 @@ describe("pi T3 MCP injection", () => {
     ]);
     assert.isUndefined(permissionOnly.env[T3_MCP_URL_ENV]);
     assert.isUndefined(permissionOnly.env[T3_MCP_BEARER_ENV]);
+    assert.isUndefined(permissionOnly.env.T3CODE_THREAD_ID);
+    assert.isUndefined(permissionOnly.env.T3CODE_ENVIRONMENT_ID);
+    assert.isUndefined(permissionOnly.env.T3CODE_PROVIDER_INSTANCE_ID);
     assert.equal(permissionOnly.env[T3_PI_RUNTIME_MODE_ENV], "auto-accept-edits");
     assert.equal(
       permissionOnly.env[T3_PI_MCP_EXTENSION_PATH_ENV],

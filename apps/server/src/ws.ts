@@ -2238,6 +2238,9 @@ export const layerWsRpc = (
               startup
                 .enqueueCommand(
                   ThreadMessageIntake.launchThread({
+                    ...(input.parentThreadId === undefined
+                      ? {}
+                      : { parentThreadId: input.parentThreadId }),
                     commandId: input.commandId,
                     ...(input.clientName === undefined ? {} : { clientName: input.clientName }),
                     ...(input.sectionId === undefined ? {} : { sectionId: input.sectionId }),

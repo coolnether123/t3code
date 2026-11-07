@@ -134,6 +134,7 @@ export interface UpdateThreadMetadataInput extends ThreadCommandInput {
   readonly sectionId?: string | null;
   readonly sectionAssignment?: "manual" | "auto";
   readonly paused?: boolean;
+  readonly childrenExpanded?: boolean;
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecoveryUpdate | null;
   readonly title?: string;
   readonly modelSelection?: ModelSelection;
@@ -626,6 +627,7 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
     let result = null;
     if (
       input.paused !== undefined ||
+      input.childrenExpanded !== undefined ||
       input.title !== undefined ||
       input.branch !== undefined ||
       input.worktreePath !== undefined ||
@@ -640,6 +642,9 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
           ? {}
           : { sectionId: input.sectionId, sectionAssignment: input.sectionAssignment ?? "manual" }),
         ...(input.paused === undefined ? {} : { paused: input.paused }),
+        ...(input.childrenExpanded === undefined
+          ? {}
+          : { childrenExpanded: input.childrenExpanded }),
         ...(input.limitRecovery === undefined ? {} : { limitRecovery: input.limitRecovery }),
         commandId,
         threadId: input.threadId,

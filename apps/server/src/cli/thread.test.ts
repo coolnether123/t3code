@@ -23,6 +23,7 @@ import {
 import {
   readLatestMessages,
   resolveStartModelSelection,
+  resolveStartParent,
   threadCommand,
   type ThreadTools,
   titleFromMessage,
@@ -47,6 +48,31 @@ vi.mock("../auth/EnvironmentAuth.ts", async (importOriginal) => {
 
 const threadId = ThreadId.make("thread-1");
 const runId = RunId.make("run-1");
+
+it.effect("start retains its complete T3 parent and refuses incomplete agent origins", () =>
+  Effect.gen(function* () {
+    assert.strictEqual(
+      yield* resolveStartParent().pipe(Effect.provideService(HostProcess.Environment, {})),
+      undefined,
+    );
+    const parent = { threadId: "parent", environmentId: "local", providerInstanceId: "codex" };
+    assert.deepStrictEqual(
+      yield* resolveStartParent().pipe(
+        Effect.provideService(HostProcess.Environment, {
+          T3CODE_THREAD_ID: parent.threadId,
+          T3CODE_ENVIRONMENT_ID: parent.environmentId,
+          T3CODE_PROVIDER_INSTANCE_ID: parent.providerInstanceId,
+        }),
+      ),
+      parent,
+    );
+    const refused = yield* resolveStartParent().pipe(
+      Effect.provideService(HostProcess.Environment, { T3CODE_THREAD_ID: "parent" }),
+      Effect.flip,
+    );
+    assert.strictEqual(refused._tag, "ThreadUsageError");
+  }),
+);
 
 it.effect("start preserves an explicit Sol medium selection without substituting a model", () =>
   Effect.gen(function* () {
@@ -112,6 +138,11 @@ it.effect(
               case "t3_project_list":
                 return Effect.succeed({ structuredContent: { projects, nextCursor: null } });
               case "t3_thread_launch":
+                assert.deepEqual(args.parent, {
+                  threadId: "parent",
+                  environmentId: "local",
+                  providerInstanceId: "codex",
+                });
                 return Effect.succeed({
                   structuredContent: { threadId, projectId: args.projectId, runId: null },
                 });
@@ -143,6 +174,11 @@ it.effect(
         ]).pipe(
           Effect.provideService(HostProcess.HomeDirectory, home),
           Effect.provideService(HostProcess.WorkingDirectory, cwd),
+          Effect.provideService(HostProcess.Environment, {
+            T3CODE_THREAD_ID: "parent",
+            T3CODE_ENVIRONMENT_ID: "local",
+            T3CODE_PROVIDER_INSTANCE_ID: "codex",
+          }),
         );
         assert.strictEqual(
           (yield* TestConsole.logLines).at(-1),

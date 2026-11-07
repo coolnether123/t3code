@@ -200,6 +200,8 @@ function ThreadLineageGroup<Row extends LineageRow>(props: {
 }
 
 function relationshipLabel(edge: ThreadRelationshipEdge, currentThreadId: ThreadId) {
+  if (edge.kind === "child")
+    return edge.sourceThreadId === currentThreadId ? "Child" : "Parent thread";
   if (edge.kind === "transfer") return "Context transfer";
   if (edge.kind === "subagent") {
     return edge.sourceThreadId === currentThreadId ? "Subagent" : "Parent agent";
@@ -426,6 +428,13 @@ export function ThreadRelationshipsPanel(props: {
       ? scopeThreadRef(props.environmentId, parentShell.id)
       : null;
   const parentProjection = useThreadProjection(parentRef)?.projection;
+  const delegatedParentRef = currentThread?.delegatedFrom
+    ? scopeThreadRef(
+        currentThread.delegatedFrom.environmentId,
+        currentThread.delegatedFrom.threadId,
+      )
+    : null;
+  const delegatedParent = useQuietThreadShell(delegatedParentRef);
   const navigate = useNavigate();
   const mergeBack = useAtomCommand(threadEnvironment.mergeBack);
   const stopSession = useAtomCommand(threadEnvironment.stopSession);
@@ -541,6 +550,7 @@ export function ThreadRelationshipsPanel(props: {
 
   const {
     related = [],
+    children = [],
     active = [],
     previous = [],
     sideChats = [],
@@ -548,12 +558,22 @@ export function ThreadRelationshipsPanel(props: {
     const isParent = isParentThreadRelationship(edge, props.threadId);
     if (!isParent && graph.nodes.get(threadId)?.thread?.lineage.sideChat === true)
       return "sideChats";
+    if (!isParent && edge.kind === "child") return "children";
     if (edge.kind !== "subagent" || isParent) return "related";
     return isFinishedAgentStatus(edge.status) ? "previous" : "active";
   });
   const { remoteActive = [], remotePrevious = [] } = groupBy(
     (projection?.subagents ?? [])
-      .filter((agent): agent is RemoteSubagent => agent.remoteChild !== undefined)
+      .filter(
+        (agent): agent is RemoteSubagent =>
+          agent.remoteChild !== undefined &&
+          !hiddenKeys.has(
+            threadKey({
+              environmentId: agent.remoteChild.environmentId,
+              threadId: agent.remoteChild.threadId,
+            }),
+          ),
+      )
       .map((remote) => ({ remote })),
     ({ remote }) => (isFinishedAgentStatus(remote.status) ? "remotePrevious" : "remoteActive"),
   );
@@ -563,7 +583,7 @@ export function ThreadRelationshipsPanel(props: {
     rows: ReadonlyArray<LineageRow>;
     expanded: boolean;
   }> = [
-    { id: "related", label: null, rows: related, expanded: true },
+    { id: "children", label: null, rows: children, expanded: true },
     { id: "active", label: null, rows: [...active, ...remoteActive], expanded: true },
     {
       id: "previous",
@@ -578,23 +598,25 @@ export function ThreadRelationshipsPanel(props: {
     ).length ?? 0) + active.filter(({ edge }) => edge.status === "running").length;
 
   // A linked environment's agent may have delegated this thread from there.
-  const delegatedFrom = currentThread?.delegatedFrom;
+  const delegatedFrom =
+    delegatedParentRef !== null &&
+    (hiddenKeys.has(threadKey(delegatedParentRef)) || (hidingAnywhere && delegatedParent === null))
+      ? undefined
+      : currentThread?.delegatedFrom;
 
   const lineageVisible =
     props.showLineage &&
     (related.length > 0 ||
-      active.length > 0 ||
-      previous.length > 0 ||
-      runningCount > 0 ||
-      remoteActive.length > 0 ||
-      remotePrevious.length > 0 ||
       delegatedFrom !== undefined ||
       // Disconnect lives in this heading, so a thread with only side chats still shows it.
       (canDetach && sideChats.length > 0));
+  const childrenCount =
+    children.length + active.length + previous.length + remoteActive.length + remotePrevious.length;
+  const childrenVisible = props.showLineage && (childrenCount > 0 || runningCount > 0);
   const sideChatsVisible = props.showSideChats && sideChats.length > 0;
   const runningSideChats = sideChats.filter(({ edge }) => edge.status === "running").length;
 
-  if (!lineageVisible && !sideChatsVisible) {
+  if (!lineageVisible && !sideChatsVisible && !childrenVisible) {
     return null;
   }
 
@@ -789,10 +811,32 @@ export function ThreadRelationshipsPanel(props: {
             {threadTitle}
           </span>
         </span>
-        {agent ? null : (
+        {agent || edge.kind === "child" ? null : (
           <ArrowRightIcon className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
         )}
-        {agent && !failed && (deriveSubagentElapsedMs(agent, 0) !== null || canStopWorkflow) ? (
+        {edge.kind === "child" && node?.thread ? (
+          <span className="inline-flex shrink-0 items-center gap-1 text-2xs text-muted-foreground">
+            {threadRelationshipStatusLabel(rowStatus)}
+            <AgentElapsed
+              compact
+              agent={{
+                status: ["running", "queued", "preparing", "starting", "waiting"].includes(
+                  rowStatus ?? "",
+                )
+                  ? "running"
+                  : "completed",
+                startedAt: DateTime.formatIso(
+                  node.thread.latestRunStartedAt ??
+                    node.thread.latestRunRequestedAt ??
+                    node.thread.createdAt,
+                ),
+                completedAt: node.thread.latestRunCompletedAt
+                  ? DateTime.formatIso(node.thread.latestRunCompletedAt)
+                  : DateTime.formatIso(node.thread.updatedAt),
+              }}
+            />
+          </span>
+        ) : agent && !failed && (deriveSubagentElapsedMs(agent, 0) !== null || canStopWorkflow) ? (
           <span
             className={`shrink-0 text-2xs font-normal tabular-nums text-muted-foreground ${canStopWorkflow ? "min-w-6 text-end" : ""} ${trailingVisibilityClass}`}
           >
@@ -942,7 +986,7 @@ export function ThreadRelationshipsPanel(props: {
       {lineageVisible ? (
         <ThreadDetailsSection
           headingId="thread-details-lineage-heading"
-          title={runningCount > 0 ? `Lineage · ${runningCount} running` : "Lineage"}
+          title="Lineage"
           // A lone "Previous agents" row names itself; the heading returns for status or actions.
           showHeading={
             runningCount > 0 ||
@@ -987,6 +1031,22 @@ export function ThreadRelationshipsPanel(props: {
               />
             </ThreadLineageRowList>
           )}
+          <ThreadLineageGroup
+            key={`${scopedThreadKey(ref)}:related`}
+            label={null}
+            rows={related}
+            expanded
+          >
+            {(visibleRows) => visibleRows.map(renderRelationshipRow)}
+          </ThreadLineageGroup>
+        </ThreadDetailsSection>
+      ) : null}
+      {childrenVisible ? (
+        <ThreadDetailsSection
+          headingId="thread-details-children-heading"
+          title={`Children · ${childrenCount}`}
+          data-thread-children-panel
+        >
           {groups.map((group) => (
             <ThreadLineageGroup key={`${scopedThreadKey(ref)}:${group.id}`} {...group}>
               {(visibleRows) =>

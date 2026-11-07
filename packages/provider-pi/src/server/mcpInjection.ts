@@ -288,6 +288,9 @@ export function buildPiRpcLaunch(input: {
   delete environment[T3_MCP_URL_ENV];
   delete environment[T3_MCP_BEARER_ENV];
   delete environment[T3_PI_MCP_EXTENSION_PATH_ENV];
+  delete environment.T3CODE_THREAD_ID;
+  delete environment.T3CODE_ENVIRONMENT_ID;
+  delete environment.T3CODE_PROVIDER_INSTANCE_ID;
 
   return {
     args,
@@ -305,6 +308,9 @@ export function buildPiRpcLaunch(input: {
       ...(hasT3Mcp && input.mcpSession !== undefined
         ? {
             [T3_MCP_URL_ENV]: input.mcpSession.endpoint,
+            T3CODE_THREAD_ID: input.mcpSession.threadId,
+            T3CODE_ENVIRONMENT_ID: input.mcpSession.environmentId,
+            T3CODE_PROVIDER_INSTANCE_ID: input.mcpSession.providerInstanceId,
             [T3_MCP_BEARER_ENV]: bearerTokenFromAuthorizationHeader(
               input.mcpSession.authorizationHeader,
             ),

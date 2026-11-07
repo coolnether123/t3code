@@ -1507,6 +1507,69 @@ it.effect.each(["failed", "interrupted"] as const)(
   },
 );
 
+it.effect("keeps launch parent identity on retries and refuses reparenting before sending", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const parent = yield* launches.launch(
+      launchInput({ command: "parent:create", thread: "thread:parent" }),
+    );
+    const input = {
+      ...launchInput({ command: "child:create", thread: "thread:child" }),
+      parentThreadId: parent.threadId,
+      projectId: otherProjectId,
+    };
+    const child = yield* launches.launch(input);
+    const retry = yield* launches.launch(input);
+    assert.isTrue(retry.resumed);
+    assert.deepEqual(retry.projection.thread.lineage, {
+      parentThreadId: parent.threadId,
+      relationshipToParent: "child",
+      rootThreadId: parent.threadId,
+    });
+    const { parentThreadId: _parentThreadId, ...withoutParent } = input;
+    const rejected = yield* launches
+      .launch({
+        ...withoutParent,
+        initialMessage: { text: "Do not send after losing parent context", attachments: [] },
+      })
+      .pipe(Effect.flip);
+    assert.equal(rejected._tag, "ThreadLaunchError");
+    assert.deepEqual((yield* threads.getThreadProjection(child.threadId)).messages, []);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("reconciles the committed parent before concurrent launches can send", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const parents = yield* Effect.forEach(["a", "b"], (name) =>
+      launches.launch(
+        launchInput({ command: `race-parent:${name}`, thread: `race-parent:${name}` }),
+      ),
+    );
+    const childId = ThreadId.make("race-child");
+    const results = yield* Effect.forEach(
+      parents,
+      (parent) =>
+        launches
+          .launch({
+            ...launchInput({ command: "race-create", thread: childId, message: parent.threadId }),
+            parentThreadId: parent.threadId,
+          })
+          .pipe(Effect.result),
+      { concurrency: "unbounded" },
+    );
+    assert.equal(results.filter(Result.isSuccess).length, 1);
+    assert.equal(results.filter(Result.isFailure).length, 1);
+    const child = yield* threads.getThreadProjection(childId);
+    assert.equal(child.messages.length, 1);
+    assert.equal(child.messages[0]?.text, child.thread.lineage.parentThreadId);
+  }).pipe(Effect.provide(harness.layer));
+});
+
 it.effect("replays a server-allocated launch", () =>
   Effect.gen(function* () {
     const setupEntered = yield* Deferred.make<void>();

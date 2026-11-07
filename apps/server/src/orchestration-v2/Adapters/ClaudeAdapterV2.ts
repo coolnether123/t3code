@@ -11014,8 +11014,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...(launchArgSettings === undefined
               ? {}
               : { sdkSettings: claudeSdkLaunchArgSettings(launchArgSettings) }),
-            environment:
-              turnInput.appThread === undefined
+            environment: {
+              ...(turnInput.appThread === undefined
                 ? adapterOptions.environment
                 : claudeQueryEnvironment(
                     adapterOptions.environment,
@@ -11023,7 +11023,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     turnInput.appThread.lineage.relationshipToParent === "subagent"
                       ? yield* resolveSubagentPromptCacheTtl(turnInput.runtimePolicy.cwd)
                       : undefined,
-                  ),
+                  )),
+              ...(mcpSession === undefined
+                ? {}
+                : {
+                    T3CODE_ENVIRONMENT_ID: mcpSession.environmentId,
+                    T3CODE_PROVIDER_INSTANCE_ID: mcpSession.providerInstanceId,
+                  }),
+            },
             tools:
               turnInput.runtimePolicy.toolMode === "none"
                 ? []

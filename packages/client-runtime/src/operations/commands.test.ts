@@ -151,6 +151,11 @@ describe("V2 environment commands", () => {
       yield* updateThreadMetadata({ threadId: v2ThreadId, sectionId: null }).pipe(
         Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
       );
+      for (const childrenExpanded of [true, false]) {
+        yield* updateThreadMetadata({ threadId: v2ThreadId, childrenExpanded }).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        );
+      }
       expect(projects[0]).toMatchObject({
         type: "project.update",
         sections,
@@ -160,6 +165,8 @@ describe("V2 environment commands", () => {
       expect(commands).toMatchObject([
         { type: "thread.metadata.update", sectionId: "client", sectionAssignment: "manual" },
         { type: "thread.metadata.update", sectionId: null, sectionAssignment: "manual" },
+        { type: "thread.metadata.update", childrenExpanded: true },
+        { type: "thread.metadata.update", childrenExpanded: false },
       ]);
     }).pipe(Effect.provide(layerTestRandom)),
   );

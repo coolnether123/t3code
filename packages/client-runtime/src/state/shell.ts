@@ -394,8 +394,10 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
         const { omitIdleSubagents, omitOlderSettled, omissionKey } =
           yield* session.initialConfig.pipe(
             Effect.map((config) => {
-              const omitIdleSubagents = config.shellThreadFamilies === true;
-              const omitOlderSettled = config.shellOlderSettled === true && omitIdleSubagents;
+              // The sidebar tree needs finished children as well as working ones.
+              const omitIdleSubagents = false;
+              const omitOlderSettled =
+                config.shellOlderSettled === true && config.shellThreadFamilies === true;
               // Migrations rewrite projections without events, so an upgraded server reloads.
               const { serverVersion, databaseMigration } = config.environment;
               return {

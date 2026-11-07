@@ -1731,6 +1731,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             "tools.update_plan.enabled": true,
             mcp_optional_startup_grace_ms: 10_000,
             "shell_environment_policy.set.T3CODE_THREAD_ID": `thread-${scenario}`,
+            "shell_environment_policy.set.T3CODE_ENVIRONMENT_ID": "environment-codex-mcp",
+            "shell_environment_policy.set.T3CODE_PROVIDER_INSTANCE_ID": "codex",
             "mcp_servers.t3-code": {
               url: "http://127.0.0.1:43123/mcp",
               tool_timeout_sec: 3_900,

@@ -86,6 +86,7 @@ const layerLaunches = Layer.effect(
         threads
           .dispatch({
             type: "thread.create",
+            ...(input.parentThreadId === undefined ? {} : { parentThreadId: input.parentThreadId }),
             commandId: input.commandId,
             threadId: input.threadId!,
             projectId: input.projectId,
@@ -274,6 +275,37 @@ const usersOwnThread = Effect.gen(function* () {
 });
 
 it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts", (it) => {
+  it.effect("records a verified local CLI parent and refuses mismatched or linked origins", () =>
+    Effect.gen(function* () {
+      const parentId = yield* launch(claudeCode, "CLI parent");
+      const parent = {
+        threadId: parentId,
+        environmentId: claudeCode.environmentId,
+        providerInstanceId: instanceId,
+      };
+      const child = yield* launch(claudeCode, "CLI child", { parent });
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      assert.deepEqual((yield* projections.getThreadShell(child))?.lineage, {
+        parentThreadId: parentId,
+        rootThreadId: parentId,
+        relationshipToParent: "child",
+      });
+      for (const [scope, candidate] of [
+        [claudeCode, { ...parent, environmentId: "another-environment" }],
+        [claudeCode, { ...parent, providerInstanceId: "another-provider" }],
+        [claudeCode, { ...parent, threadId: "missing-parent" }],
+        [laptop, parent],
+      ] as const) {
+        const result = yield* call(scope, "t3_thread_launch", {
+          projectId,
+          title: "Refused CLI child",
+          modelSelection: { instanceId, model: "gpt-5" },
+          parent: candidate,
+        });
+        assert.equal(failureCode(result), "invalid_request");
+      }
+    }),
+  );
   it.effect("is stamped, and so is the work it derives", () =>
     Effect.gen(function* () {
       const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -290,7 +322,7 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
         Effect.flatMap((threads) => threads.getThreadProjection(launched)),
       )).thread;
       const child = makeSubagentChildThread({
-        parentThread: thread,
+        parentThread: { ...thread, childrenExpanded: true },
         childThreadId: ThreadId.make("thread:child"),
         parentNodeId: NodeId.make("node:child"),
         activeProviderThreadId: null,
@@ -302,10 +334,11 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
         creationSource: "mcp",
       });
       assert.deepEqual(child.linkOrigin, shell?.linkOrigin);
+      assert.isFalse(child.childrenExpanded);
       const fork = yield* ThreadForkService.ThreadForkServiceV2.pipe(
         Effect.flatMap((forks) =>
           forks.plan({
-            sourceProjection: { thread },
+            sourceProjection: { thread: { ...thread, childrenExpanded: true } },
             sourceRun: { id: RunId.make("run:source"), status: "completed" } as OrchestrationV2Run,
             sourceProviderThread: undefined,
             canonicalSourcePoint: { threadId: launched },
@@ -319,6 +352,7 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
         Effect.provide(ThreadForkService.layer),
       );
       assert.deepEqual(fork.targetThread.linkOrigin, shell?.linkOrigin);
+      assert.isFalse(fork.targetThread.childrenExpanded);
 
       // An ordinary outside agent's launch is not a link's.
       const plain = yield* launch(claudeCode, "Started by Claude Code");

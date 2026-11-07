@@ -11,6 +11,9 @@ import {
   getFallbackThreadIdAfterDelete,
   hasUnseenCompletion,
   resolveSidebarRowThreadId,
+  buildSidebarThreadTree,
+  flattenSidebarThreadTree,
+  filterSidebarV2VisibleThreads,
   orderItemsByPreferredIds,
   pinOrderKeyBetween,
   resolveSidebarSweepKeys,
@@ -168,12 +171,92 @@ describe("sidebar thread lineage helpers", () => {
 
     expect(resolveSidebarRowThreadId(child.id, environmentId, threads)).toBe(root.id);
     expect(resolveSidebarRowThreadId(grandchild.id, environmentId, threads)).toBe(root.id);
+    expect(
+      resolveSidebarRowThreadId(child.id, environmentId, [
+        { ...root, childrenExpanded: true },
+        child,
+      ]),
+    ).toBe(child.id);
+    expect(
+      resolveSidebarRowThreadId(grandchild.id, environmentId, [
+        { ...root, childrenExpanded: true },
+        child,
+        grandchild,
+      ]),
+    ).toBe(child.id);
+    expect(
+      resolveSidebarRowThreadId(grandchild.id, environmentId, [
+        { ...root, childrenExpanded: true },
+        { ...child, childrenExpanded: true },
+        grandchild,
+      ]),
+    ).toBe(grandchild.id);
     expect(resolveSidebarRowThreadId(forkChild.id, environmentId, threads)).toBe(fork.id);
     expect(resolveSidebarRowThreadId(elsewhere.id, otherEnvironmentId, threads)).toBe(elsewhere.id);
     expect(resolveSidebarRowThreadId(orphan.id, environmentId, threads)).toBe(orphan.id);
     const loopA = subagentOf("thread-loop-a", ThreadId.make("thread-loop-b"));
     const loopB = subagentOf("thread-loop-b", loopA.id);
     expect(resolveSidebarRowThreadId(loopA.id, environmentId, [loopA, loopB])).toBe(loopA.id);
+  });
+
+  it("nests visible descendants with their parent, promotes hidden-parent children, and breaks cycles", () => {
+    const parent = makeThreadFixture({ id: ThreadId.make("parent"), sectionId: "client-a" });
+    const child = makeThreadFixture({
+      id: ThreadId.make("child"),
+      sectionId: "client-b",
+      lineage: {
+        rootThreadId: parent.id,
+        parentThreadId: parent.id,
+        relationshipToParent: "child",
+      },
+    });
+    const grandchild = makeThreadFixture({
+      id: ThreadId.make("grandchild"),
+      lineage: {
+        rootThreadId: parent.id,
+        parentThreadId: child.id,
+        relationshipToParent: "subagent",
+      },
+    });
+    const key = (thread: typeof parent) => `${thread.environmentId}:${thread.id}`;
+    const tree = buildSidebarThreadTree([parent, child, grandchild]);
+    expect(tree.roots).toEqual([parent]);
+    expect(tree.childrenByParentKey.get(key(parent))).toEqual([child]);
+    expect(tree.childrenByParentKey.get(key(child))).toEqual([grandchild]);
+    expect(flattenSidebarThreadTree(tree.roots, tree.childrenByParentKey)).toEqual([parent]);
+    expect(
+      flattenSidebarThreadTree([{ ...parent, childrenExpanded: true }], tree.childrenByParentKey),
+    ).toEqual([{ ...parent, childrenExpanded: true }, child]);
+    expect(
+      filterSidebarV2VisibleThreads(
+        [parent, child, grandchild],
+        new Set([`${parent.environmentId}:${parent.projectId}`]),
+        new Set(),
+      ),
+    ).toEqual([parent]);
+    expect(buildSidebarThreadTree([child, grandchild]).roots).toEqual([child]);
+    const elsewhere = { ...child, environmentId: EnvironmentId.make("elsewhere") };
+    expect(buildSidebarThreadTree([parent, elsewhere]).roots).toEqual([parent, elsewhere]);
+    const delegated = {
+      ...elsewhere,
+      delegatedFrom: {
+        environmentId: parent.environmentId,
+        threadId: parent.id,
+        title: parent.title,
+      },
+    };
+    expect(
+      buildSidebarThreadTree([parent, delegated]).childrenByParentKey.get(key(parent)),
+    ).toEqual([delegated]);
+    expect(buildSidebarThreadTree([delegated]).roots).toEqual([delegated]);
+    const sideChat = { ...child, lineage: { ...child.lineage, sideChat: true } };
+    expect(buildSidebarThreadTree([parent, sideChat]).roots).toEqual([parent]);
+    const archived = { ...child, archivedAt: "2026-01-01T00:00:00.000Z" };
+    expect(buildSidebarThreadTree([parent, archived]).childrenByParentKey.size).toBe(0);
+    const loopParent = { ...parent, lineage: { ...child.lineage, parentThreadId: child.id } };
+    const cyclic = buildSidebarThreadTree([loopParent, child, grandchild]);
+    expect(cyclic.roots).toEqual([loopParent, child]);
+    expect(cyclic.childrenByParentKey.get(key(child))).toEqual([grandchild]);
   });
 });
 

@@ -817,7 +817,7 @@ describe("environment shell synchronization", () => {
     }),
   );
 
-  it.effect("opts in to shell omissions and counts authoritative snapshots and removals", () =>
+  it.effect("keeps finished children while omitting older settled roots and tracks removals", () =>
     Effect.gen(function* () {
       const events = yield* Queue.unbounded<OrchestrationV2ShellStreamItem>();
       const subscribeInputs = yield* Queue.unbounded<unknown>();
@@ -875,14 +875,14 @@ describe("environment shell synchronization", () => {
       const stateWhere = (predicate: (state: EnvironmentShellState) => boolean) =>
         SubscriptionRef.changes(shellState).pipe(Stream.filter(predicate), Stream.runHead);
 
-      // Both transports must omit, or omitted children would come back through the socket.
-      expect(yield* Queue.take(subscribeInputs)).toMatchObject({
+      const subscribed = yield* Queue.take(subscribeInputs);
+      expect(subscribed).toMatchObject({
         afterSequence: 1,
-        omitIdleSubagents: true,
         omitOlderSettled: true,
       });
+      expect(subscribed).not.toHaveProperty("omitIdleSubagents");
       expect(yield* Ref.get(loadOptions)).toEqual([
-        { omitIdleSubagents: true, omitOlderSettled: true },
+        { omitIdleSubagents: false, omitOlderSettled: true },
       ]);
       const loaded = Option.getOrThrow(yield* stateWhere((state) => state.generation > 0));
       expect(loaded.removedAt.size).toBe(0);
@@ -917,7 +917,6 @@ describe("environment shell synchronization", () => {
       yield* SubscriptionRef.set(activeSession, Option.some({ ...familySession }));
       expect(yield* Queue.take(subscribeInputs)).toMatchObject({
         afterSequence: 5,
-        omitIdleSubagents: true,
         omitOlderSettled: true,
       });
       expect(yield* Ref.get(loadOptions)).toHaveLength(1);
@@ -1113,6 +1112,7 @@ describe("environment shell synchronization", () => {
           ...session(client),
           initialConfig: Effect.succeed({
             shellThreadFamilies: true,
+            shellOlderSettled: true,
             environment: { serverVersion: "1.0.0" },
           } as never),
         }),

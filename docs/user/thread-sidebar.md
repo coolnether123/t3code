@@ -95,6 +95,18 @@ rules or nesting can be edited.
 When a launcher supplies a client name, new chats use its matching section or create one.
 Automatic filing never overrides a chat you have moved yourself, even if you chose Unsorted.
 
+## Open child threads
+
+When an agent starts child threads, expand the count beside its sidebar row to see their
+status and elapsed time. Click a child to open it. Children can have children of their own.
+They stay beneath their parent in its section, even if they were filed elsewhere. Expansion
+choices are saved on the server and shared by browsers and the desktop app.
+
+The parent chat's details panel also has a **Children** list. Hidden infrastructure threads
+do not appear in either list. A visible client thread whose parent is hidden appears on its
+own in its client section, without a link to the hidden parent. Side chats keep their existing
+separate list.
+
 ## Pin and reorder threads
 
 Pin a thread from its menu. Named sections preserve the thread's pin without moving it to a

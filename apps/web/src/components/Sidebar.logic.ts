@@ -1,7 +1,6 @@
 import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
-import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import * as React from "react";
@@ -567,30 +566,97 @@ export function isSidebarHiddenThread(thread: Pick<SidebarThreadSummary, "lineag
   return !isListedThreadLineage(thread.lineage);
 }
 
-// Subagent and side-chat threads have no sidebar row, so an open one is represented by
-// its nearest listed ancestor. A broken chain (missing parent, cycle,
-// other environment) resolves to the thread itself, which then matches no row.
+// A collapsed parent represents its descendants; side chats always use their parent row.
 export function resolveSidebarRowThreadId(
   threadId: ThreadId,
   environmentId: EnvironmentId,
-  threads: readonly Pick<SidebarThreadSummary, "id" | "environmentId" | "lineage">[],
+  threads: readonly (Pick<SidebarThreadSummary, "id" | "environmentId" | "lineage"> & {
+    readonly childrenExpanded?: boolean;
+  })[],
 ): ThreadId {
   const findThread = (id: ThreadId) =>
     threads.find((thread) => thread.id === id && thread.environmentId === environmentId);
   const visited = new Set<ThreadId>();
   let thread = findThread(threadId);
-  while (thread !== undefined && isSidebarHiddenThread(thread)) {
+  let rowId = threadId;
+  while (
+    thread !== undefined &&
+    (isSidebarHiddenThread(thread) || thread.lineage.relationshipToParent === "child")
+  ) {
     if (thread.lineage.parentThreadId === null || visited.has(thread.id)) return threadId;
     visited.add(thread.id);
-    thread = findThread(thread.lineage.parentThreadId);
+    const parent = findThread(thread.lineage.parentThreadId);
+    if (parent === undefined) return rowId;
+    if (thread.lineage.sideChat || !parent.childrenExpanded) rowId = parent.id;
+    thread = parent;
   }
-  return thread?.id ?? threadId;
+  return rowId;
 }
 
-/**
- * `delegatedUnderParent` holds the tasks linked environments run for a thread
- * the sidebar lists, by thread key; they show under that thread, as subagents do.
- */
+export function buildSidebarThreadTree<
+  T extends Pick<SidebarThreadSummary, "archivedAt" | "environmentId" | "id" | "lineage"> & {
+    readonly delegatedFrom?: SidebarThreadSummary["delegatedFrom"];
+  },
+>(threads: readonly T[]) {
+  const visible = threads.filter(
+    (thread) => thread.archivedAt === null && !thread.lineage.sideChat,
+  );
+  const keyOf = (thread: T) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+  const byKey = new Map(visible.map((thread) => [keyOf(thread), thread]));
+  const parentByKey = new Map<string, string>();
+  for (const thread of visible) {
+    const delegatedParent = thread.delegatedFrom;
+    if (delegatedParent) {
+      const parentKey = scopedThreadKey(
+        scopeThreadRef(delegatedParent.environmentId, delegatedParent.threadId),
+      );
+      if (byKey.has(parentKey)) {
+        parentByKey.set(keyOf(thread), parentKey);
+        continue;
+      }
+    }
+    if (
+      thread.lineage.relationshipToParent !== "subagent" &&
+      thread.lineage.relationshipToParent !== "child"
+    )
+      continue;
+    if (thread.lineage.parentThreadId === null) continue;
+    const parentKey = scopedThreadKey(
+      scopeThreadRef(thread.environmentId, thread.lineage.parentThreadId),
+    );
+    if (byKey.has(parentKey)) parentByKey.set(keyOf(thread), parentKey);
+  }
+  const cyclic = new Set<string>();
+  const checked = new Set<string>();
+  for (const key of parentByKey.keys()) {
+    const path = new Map<string, number>();
+    let current: string | undefined = key;
+    while (current !== undefined && !checked.has(current)) {
+      const cycleStart = path.get(current);
+      if (cycleStart !== undefined) {
+        for (const [entry, index] of path) if (index >= cycleStart) cyclic.add(entry);
+        break;
+      }
+      path.set(current, path.size);
+      current = parentByKey.get(current);
+    }
+    for (const entry of path.keys()) checked.add(entry);
+  }
+  for (const key of cyclic) parentByKey.delete(key);
+  const roots: T[] = [];
+  const childrenByParentKey = new Map<string, T[]>();
+  for (const thread of visible) {
+    const parentKey = parentByKey.get(keyOf(thread));
+    if (parentKey === undefined) roots.push(thread);
+    else {
+      const siblings = childrenByParentKey.get(parentKey) ?? [];
+      siblings.push(thread);
+      childrenByParentKey.set(parentKey, siblings);
+    }
+  }
+  return { roots, childrenByParentKey };
+}
+
 export function filterSidebarV2VisibleThreads<
   T extends Pick<SidebarThreadSummary, "archivedAt" | "environmentId" | "id" | "lineage"> & {
     projectId: string;
@@ -598,19 +664,31 @@ export function filterSidebarV2VisibleThreads<
 >(
   threads: readonly T[],
   scopedProjectKeys: ReadonlySet<string> | null,
-  delegatedUnderParent: ReadonlySet<string>,
+  _delegatedUnderParent: ReadonlySet<string>,
 ): T[] {
-  return threads.filter(
+  return buildSidebarThreadTree(threads).roots.filter(
     (thread) =>
-      thread.archivedAt === null &&
-      !isShownUnderParent(
-        { environmentId: thread.environmentId, threadId: thread.id },
-        thread.lineage,
-        delegatedUnderParent,
-      ) &&
-      (scopedProjectKeys === null ||
-        scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
+      scopedProjectKeys === null ||
+      scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`),
   );
+}
+
+export function flattenSidebarThreadTree<
+  T extends Pick<SidebarThreadSummary, "id" | "environmentId"> & {
+    readonly childrenExpanded?: boolean;
+  },
+>(roots: readonly T[], childrenByParentKey: ReadonlyMap<string, readonly T[]>): T[] {
+  return roots.flatMap((thread) => [
+    thread,
+    ...(thread.childrenExpanded
+      ? flattenSidebarThreadTree(
+          childrenByParentKey.get(
+            scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+          ) ?? [],
+          childrenByParentKey,
+        )
+      : []),
+  ]);
 }
 
 export function buildBulkTitleRegenerationContextMenuItem(input: {

@@ -155,7 +155,7 @@ export type OrchestrationV2ProviderRef = typeof OrchestrationV2ProviderRef.Type;
 
 export const OrchestrationV2AppThreadLineage = Schema.Struct({
   parentThreadId: Schema.NullOr(ThreadId),
-  relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
+  relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent", "child"])),
   rootThreadId: ThreadId,
   sideChat: Schema.optional(Schema.Boolean),
 });
@@ -508,6 +508,9 @@ export const OrchestrationV2AppThread = Schema.Struct({
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   paused: Schema.optional(Schema.Boolean),
+  childrenExpanded: Schema.optional(Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   /** Absent on threads written before tags existed; read as empty. */
@@ -2185,6 +2188,9 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   paused: Schema.optional(Schema.Boolean),
+  childrenExpanded: Schema.optional(Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   /** Absent on threads written before tags existed; read as empty. */
@@ -2973,6 +2979,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.create"),
+    parentThreadId: Schema.optional(ThreadId),
     clientName: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
     sectionId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     subagentBackend: Schema.optional(SubagentBackend),
@@ -3115,6 +3122,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.metadata.update"),
+    childrenExpanded: Schema.optional(Schema.Boolean),
     sectionId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     sectionAssignment: Schema.optional(Schema.Literals(["manual", "auto"])),
     paused: Schema.optional(Schema.Boolean),
@@ -3708,6 +3716,7 @@ export const OrchestrationV2ArchivedShellSnapshot = Schema.Struct({
 export type OrchestrationV2ArchivedShellSnapshot = typeof OrchestrationV2ArchivedShellSnapshot.Type;
 
 export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
+  parentThreadId: Schema.optional(ThreadId),
   clientName: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
   sectionId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   commandId: CommandId,

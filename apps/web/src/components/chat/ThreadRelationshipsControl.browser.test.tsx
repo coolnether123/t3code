@@ -1,4 +1,5 @@
 import * as DateTime from "effect/DateTime";
+import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { EnvironmentId, NodeId, ThreadId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
@@ -11,6 +12,8 @@ const state = vi.hoisted(() => ({
   relatedShells: [] as unknown[],
   threadTitles: {} as Record<string, string>,
   archivedThreads: [] as unknown[],
+  hiddenKeys: new Set<string>(),
+  hiding: false,
 }));
 
 vi.mock(import("../../state/query"), async (original) => ({
@@ -35,8 +38,8 @@ vi.mock(import("../../state/entities"), () => ({
       ? []
       : [(state.projection as { thread: unknown }).thread, ...state.relatedShells]) as never,
   useProjects: (() => []) as never,
-  useHiddenThreadKeys: (() => new Set()) as never,
-  useAnyEnvironmentHiding: (() => false) as never,
+  useHiddenThreadKeys: (() => state.hiddenKeys) as never,
+  useAnyEnvironmentHiding: (() => state.hiding) as never,
 }));
 vi.mock(import("../../state/environments"), () => ({
   useEnvironment: (() => null) as never,
@@ -67,6 +70,8 @@ function setup() {
   state.relatedShells = [];
   state.threadTitles = { source: "Source" };
   state.archivedThreads = [];
+  state.hiddenKeys = new Set();
+  state.hiding = false;
   state.projection = {
     thread: {
       id: threadId,
@@ -114,6 +119,88 @@ it.each([
       }),
     )
     .toBeEnabled();
+});
+
+it("lists independent children, opens one, and hides infrastructure children and parent links", async () => {
+  setup();
+  const projection = makeThreadProjectionFixture();
+  const childId = ThreadId.make("independent-child");
+  const hiddenId = ThreadId.make("hidden-infrastructure");
+  const shell = (id: ThreadId, title: string) => ({
+    ...projection.thread,
+    id,
+    title,
+    lineage: {
+      rootThreadId: projection.thread.id,
+      parentThreadId: projection.thread.id,
+      relationshipToParent: "child",
+    },
+    status: "running",
+    activityRunStatus: "running",
+    latestRunRequestedAt: projection.thread.createdAt,
+  });
+  state.projection = projection;
+  state.relatedShells = [shell(childId, "Client child"), shell(hiddenId, "Infrastructure child")];
+  state.hiding = true;
+  state.hiddenKeys = new Set([
+    threadKey({ environmentId: EnvironmentId.make("local"), threadId: hiddenId }),
+  ]);
+  await using screen = await render(
+    <ThreadRelationshipsPanel
+      environmentId={EnvironmentId.make("local")}
+      threadId={projection.thread.id}
+      showLineage
+      showSideChats
+    />,
+  );
+  await expect.element(screen.getByRole("heading", { name: "Children · 1" })).toBeVisible();
+  await expect
+    .element(screen.getByText("Infrastructure child", { exact: true }))
+    .not.toBeInTheDocument();
+  await screen.getByRole("button", { name: /Client child/ }).click();
+  await vi.waitFor(() =>
+    expect(screen.router?.state.location.pathname).toBe("/local/independent-child"),
+  );
+
+  state.projection = { ...projection, thread: shell(childId, "Client child") };
+  state.relatedShells = [];
+  state.hiddenKeys = new Set([
+    threadKey({ environmentId: EnvironmentId.make("local"), threadId: projection.thread.id }),
+  ]);
+  await screen.rerender(
+    <ThreadRelationshipsPanel
+      environmentId={EnvironmentId.make("local")}
+      threadId={childId}
+      showLineage
+      showSideChats
+    />,
+  );
+  expect(screen.container.querySelector("[data-thread-relationships-panel]")).toBeNull();
+  expect(screen.container.textContent).not.toContain(projection.thread.id);
+  state.projection = {
+    ...projection,
+    thread: {
+      ...projection.thread,
+      delegatedFrom: {
+        environmentId: EnvironmentId.make("remote"),
+        threadId: hiddenId,
+        title: "Hidden remote parent",
+      },
+    },
+  };
+  state.hiddenKeys = new Set([
+    threadKey({ environmentId: EnvironmentId.make("remote"), threadId: hiddenId }),
+  ]);
+  await screen.rerender(
+    <ThreadRelationshipsPanel
+      environmentId={EnvironmentId.make("local")}
+      threadId={projection.thread.id}
+      showLineage
+      showSideChats
+    />,
+  );
+  expect(screen.container.textContent).not.toContain("Hidden remote parent");
+  expect(screen.container.querySelector("[data-thread-relationships-panel]")).toBeNull();
 });
 
 it.each([

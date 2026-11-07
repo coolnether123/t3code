@@ -2930,6 +2930,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.driver": command.modelSelection.instanceId,
     });
 
+    if (command.parentThreadId === command.threadId) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "A thread cannot be its own parent.",
+      });
+    }
     // Tombstones reserve their ids too; recreating one would overwrite its history.
     const existing = yield* projectionStore.getThread(command.threadId).pipe(
       Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
@@ -2958,6 +2965,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
     }
 
+    const parent =
+      command.parentThreadId === undefined
+        ? null
+        : yield* projectionStore.getThread(command.parentThreadId).pipe(mapDispatchError(command));
+    if (parent !== null && (parent.deletedAt !== null || parent.archivedAt !== null)) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "A child requires an active parent thread in this environment.",
+      });
+    }
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
     const thread: OrchestrationV2AppThread = {
@@ -2979,16 +2997,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         : { subagentBackend: command.subagentBackend }),
       activeProviderThreadId: null,
       pullRequests: [],
-      ...(command.linkOrigin === undefined ? {} : { linkOrigin: command.linkOrigin }),
+      ...((parent?.linkOrigin ?? command.linkOrigin) === undefined
+        ? {}
+        : { linkOrigin: parent?.linkOrigin ?? command.linkOrigin }),
       // Only stamped work names a remote parent, so a client cannot claim one.
       ...(command.linkOrigin === undefined || command.delegatedFrom === undefined
         ? {}
         : { delegatedFrom: command.delegatedFrom }),
       lineage: {
-        parentThreadId: null,
-        relationshipToParent: null,
-        rootThreadId: command.threadId,
+        parentThreadId: parent?.id ?? null,
+        relationshipToParent: parent === null ? null : "child",
+        rootThreadId: parent?.lineage.rootThreadId ?? command.threadId,
       },
+      childrenExpanded: false,
       forkedFrom: null,
       createdAt: now,
       updatedAt: now,
@@ -3879,6 +3900,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           };
         }
         case "thread.metadata.update": {
+          const expansionOnly =
+            command.childrenExpanded !== undefined &&
+            Object.keys(command).every(
+              (key) =>
+                key === "type" ||
+                key === "commandId" ||
+                key === "threadId" ||
+                key === "childrenExpanded",
+            );
           const previousRecovery =
             thread.limitRecovery?.runId === command.limitRecovery?.runId &&
             thread.limitRecovery?.resetAt === command.limitRecovery?.resetAt
@@ -3909,6 +3939,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 }),
             ...(command.title === undefined ? {} : { title: command.title }),
             ...(command.paused === undefined ? {} : { paused: command.paused }),
+            ...(command.childrenExpanded === undefined
+              ? {}
+              : { childrenExpanded: command.childrenExpanded }),
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),
             ...(command.limitRecovery !== undefined &&
             limitRecovery?.snooze === true &&
@@ -3962,7 +3995,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               : command.regenerateTitle === false || command.title !== undefined
                 ? { titleRegeneration: null }
                 : {}),
-            updatedAt: now,
+            updatedAt: expansionOnly ? thread.updatedAt : now,
           };
         }
         case "thread.pull-request.link":

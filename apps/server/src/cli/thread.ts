@@ -8,6 +8,8 @@ import {
   ModelSelection,
   RunId,
   ThreadId,
+  EnvironmentId,
+  ProviderInstanceId,
   TrimmedNonEmptyString,
   type OrchestratorMcpThreadListItem,
   type OrchestratorMcpThreadStatus,
@@ -627,6 +629,32 @@ const threadListCommand = Command.make("list", {
   ),
 );
 
+/** Never turn an incomplete agent origin into an unrelated top-level thread. */
+const decodeStartParent = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    threadId: ThreadId,
+    environmentId: EnvironmentId,
+    providerInstanceId: ProviderInstanceId,
+  }),
+);
+export const resolveStartParent = Effect.fn("cli.thread.startParent")(function* () {
+  const env = yield* HostProcess.Environment;
+  const values = [env.T3CODE_THREAD_ID, env.T3CODE_ENVIRONMENT_ID, env.T3CODE_PROVIDER_INSTANCE_ID];
+  if (values.every((value) => value === undefined)) return undefined;
+  return yield* decodeStartParent({
+    threadId: values[0],
+    environmentId: values[1],
+    providerInstanceId: values[2],
+  }).pipe(
+    Effect.mapError(
+      () =>
+        new ThreadUsageError({
+          detail: "The T3 parent identity is incomplete. No thread was created.",
+        }),
+    ),
+  );
+});
+
 const threadStartCommand = Command.make("start", {
   ...projectLocationFlags,
   project: Argument.String("project").pipe(
@@ -666,6 +694,7 @@ const threadStartCommand = Command.make("start", {
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       const message = yield* readMessageArgument(flags.message);
+      const parent = yield* resolveStartParent();
       const workspaceStrategy = yield* launchWorkspaceStrategy(flags);
       const modelSelection = yield* resolveStartModelSelection(flags);
       const title = yield* decodeTitle(
@@ -679,6 +708,7 @@ const threadStartCommand = Command.make("start", {
             "t3_thread_launch",
             {
               projectId: project.id,
+              ...(parent === undefined ? {} : { parent }),
               title,
               message,
               ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),

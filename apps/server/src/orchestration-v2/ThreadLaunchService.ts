@@ -78,6 +78,7 @@ export interface ThreadLaunchInitialMessage {
 }
 
 export interface ThreadLaunchInput {
+  readonly parentThreadId?: ThreadId;
   readonly clientName?: string;
   readonly sectionId?: string | null;
   readonly commandId: CommandId;
@@ -885,7 +886,13 @@ const make = Effect.gen(function* () {
             .thread({ projectId: input.projectId })
             .pipe(Effect.mapError(mapError(input, "create-thread"))));
 
-        if (reusableLaunchReceipt !== undefined) {
+        if (
+          reusableLaunchReceipt !== undefined ||
+          (Option.isSome(launchReceipt) &&
+            launchReceipt.value.status === "accepted" &&
+            launchReceipt.value.threadId === candidateThreadId &&
+            launchReceipt.value.commandType === "thread.create")
+        ) {
           const shell = yield* threads
             .getThreadShell(candidateThreadId)
             .pipe(Effect.mapError(mapError(input, "create-thread", candidateThreadId)));
@@ -899,10 +906,30 @@ const make = Effect.gen(function* () {
               candidateThreadId,
             )("Project identity changed.");
           }
+          if (shell.lineage.parentThreadId !== (input.parentThreadId ?? null)) {
+            return yield* mapError(
+              input,
+              "create-thread",
+              candidateThreadId,
+            )("Parent identity changed.");
+          }
         }
 
         if (input.reuseExistingThread === true && Option.isNone(launchReceipt)) {
           yield* validateReusableThread(input, candidateThreadId);
+          const shell = yield* threads
+            .getThreadShell(candidateThreadId)
+            .pipe(Effect.mapError(mapError(input, "update-thread", candidateThreadId)));
+          if (
+            input.parentThreadId !== undefined &&
+            shell?.lineage.parentThreadId !== input.parentThreadId
+          ) {
+            return yield* mapError(
+              input,
+              "update-thread",
+              candidateThreadId,
+            )("Parent identity changed.");
+          }
         }
 
         const workspaceStrategy: ThreadLaunchWorkspaceStrategy =
@@ -934,6 +961,9 @@ const make = Effect.gen(function* () {
               })
             : threads.dispatch({
                 type: "thread.create",
+                ...(input.parentThreadId === undefined
+                  ? {}
+                  : { parentThreadId: input.parentThreadId }),
                 ...(input.clientName === undefined ? {} : { clientName: input.clientName }),
                 ...(input.sectionId === undefined ? {} : { sectionId: input.sectionId }),
                 commandId: input.commandId,
@@ -967,6 +997,15 @@ const make = Effect.gen(function* () {
         const threadId =
           claimed.storedEvents.find((stored) => stored.event.type.startsWith("thread."))?.event
             .threadId ?? candidateThreadId;
+        const creation = claimed.storedEvents.find(
+          (stored) => stored.event.type === "thread.created",
+        )?.event;
+        if (
+          creation?.type === "thread.created" &&
+          creation.payload.lineage.parentThreadId !== (input.parentThreadId ?? null)
+        ) {
+          return yield* mapError(input, "create-thread", threadId)("Parent identity changed.");
+        }
         if (project.id !== input.projectId) {
           return yield* mapError(input, "resolve-project", threadId)("Project identity changed.");
         }

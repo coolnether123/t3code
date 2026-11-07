@@ -582,15 +582,22 @@ describe("v2 thread shell lists", () => {
       const renamed = harness.registry.get(quietAtom);
       expect(renamed?.title).toBe("Renamed");
 
+      setThread({ ...running, title: "Renamed", childrenExpanded: true }, 4);
+      const expanded = harness.registry.get(quietAtom);
+      expect(expanded).not.toBe(renamed);
+      expect(expanded?.childrenExpanded).toBe(true);
+      setThread({ ...running, title: "Renamed", childrenExpanded: false }, 5);
+      expect(harness.registry.get(quietAtom)?.childrenExpanded).toBe(false);
+
       const stopped: OrchestrationV2ThreadShell = {
         ...running,
         activeRunId: null,
         status: "completed",
       };
-      setThread({ ...stopped, title: "Renamed", updatedAt: at(3) }, 4);
+      setThread({ ...stopped, title: "Renamed", updatedAt: at(3) }, 6);
       const completed = harness.registry.get(quietAtom);
       expect(completed).not.toBe(renamed);
-      setThread({ ...stopped, title: "Renamed", updatedAt: at(4) }, 5);
+      setThread({ ...stopped, title: "Renamed", updatedAt: at(4) }, 7);
       expect(harness.registry.get(quietAtom)?.updatedAt).toBe(DateTime.formatIso(at(4)));
       expect(harness.registry.get(quietAtom)).not.toBe(completed);
     } finally {

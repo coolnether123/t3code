@@ -91,6 +91,35 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const context = yield* readCaller();
         const { caller } = context;
+        const explicitParent = input.parent;
+        if (
+          explicitParent !== undefined &&
+          (explicitParent.environmentId !== scope.environmentId ||
+            scope.client?.linked === true ||
+            (caller !== undefined && explicitParent.threadId !== caller.id))
+        )
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "The parent must match this environment and calling thread.",
+          });
+        const parent =
+          explicitParent === undefined
+            ? caller
+            : yield* context.threads
+                .getThreadShell(explicitParent.threadId)
+                .pipe(Effect.mapError(unavailable));
+        if (
+          explicitParent !== undefined &&
+          (parent == null ||
+            parent.deletedAt !== null ||
+            parent.archivedAt !== null ||
+            (parent.providerInstanceId ?? parent.modelSelection.instanceId) !==
+              explicitParent.providerInstanceId)
+        )
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "The parent identity could not be verified. No thread was created.",
+          });
         // A retry with the same key replays the first launch: the ids derive
         // from the caller and the key, and the launch service replays a
         // command it already accepted.
@@ -226,6 +255,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           });
         }
         const result = yield* ThreadMessageIntake.launchThread({
+          ...(parent == null ? {} : { parentThreadId: parent.id }),
           commandId,
           threadId,
           projectId,

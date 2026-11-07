@@ -40,8 +40,10 @@ import {
   ClockIcon,
   GitBranchIcon,
   MessageCircleQuestionIcon,
+  MinusIcon,
   PinIcon,
   PinOffIcon,
+  PlusIcon,
   ShieldQuestionIcon,
   SquarePenIcon,
   TerminalIcon,
@@ -65,6 +67,7 @@ import { useUiStateStore } from "../../uiStateStore";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
 import { useNowMinute } from "../../hooks/useNowMinute";
 import { useNowSecond } from "../../hooks/useNowSecond";
+import { AgentElapsed } from "../chat/AgentElapsed";
 import { vcsEnvironment } from "../../state/vcs";
 import { useEnvironmentQuery } from "../../state/query";
 import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
@@ -540,6 +543,9 @@ type SidebarThreadRowProps = {
   // "folder-multiline" adds the card's branch and PR line under it.
   variant: "card" | "slim" | "folder" | "folder-multiline";
   navigationParent?: string | undefined;
+  childThread?: boolean;
+  childCount?: number;
+  onToggleChildren?: () => void;
   variantAction: SidebarSweepAction;
   settlementSupported: boolean;
   snoozeSupported: boolean;
@@ -710,6 +716,39 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
 
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
   const status = resolveSidebarThreadStatus(thread);
+  const childWorking = status === "working" || status === "preparing";
+  const childStatus =
+    status === "approval" || status === "input" || status === "request"
+      ? "Waiting on you"
+      : status === "failed" || status === "limited"
+        ? "Failed"
+        : childWorking
+          ? "Working"
+          : status === "waiting" && thread.latestRun?.completedAt == null
+            ? "Waiting"
+            : "Finished";
+  const childrenControl =
+    (props.childCount ?? 0) > 0 ? (
+      <button
+        type="button"
+        aria-label={`${thread.childrenExpanded ? "Collapse" : "Expand"} children of ${thread.title}, ${props.childCount} ${props.childCount === 1 ? "child" : "children"}`}
+        aria-expanded={thread.childrenExpanded ?? false}
+        onPointerDown={(event) => event.stopPropagation()}
+        onKeyDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          props.onToggleChildren?.();
+        }}
+        className="relative z-20 inline-flex h-6 shrink-0 cursor-pointer items-center gap-0.5 rounded px-1 text-xs tabular-nums text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      >
+        {thread.childrenExpanded ? (
+          <MinusIcon aria-hidden className="size-3" />
+        ) : (
+          <PlusIcon aria-hidden className="size-3" />
+        )}
+        {props.childCount}
+      </button>
+    ) : null;
   const lastVisitedDate = lastVisitedAt === undefined ? null : parseTimestampDate(lastVisitedAt);
   const wokeAtDate = props.wokeAt === null ? null : parseTimestampDate(props.wokeAt);
   const isWoke =
@@ -1243,6 +1282,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             {/* `contents` keeps one-line rows a single flex row. */}
             <div className={multiline ? "flex h-6 min-w-0 items-center gap-2.5" : "contents"}>
               {accessibleTitle}
+              {childrenControl}
               {inFolder ? null : (
                 <span
                   className={cn(
@@ -1283,7 +1323,29 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                       !isWoke && "group-any-hover/sidebar-row:opacity-0",
                     )}
                   >
-                    {variantAction === "unsnooze" && props.snoozeWakeLabelText !== null ? (
+                    {props.childThread ? (
+                      <span
+                        className="inline-flex items-center gap-1 text-xs"
+                        data-child-status={childStatus}
+                      >
+                        {childStatus}
+                        <AgentElapsed
+                          compact
+                          agent={{
+                            status:
+                              childWorking ||
+                              (childStatus === "Waiting" && thread.latestRun?.completedAt == null)
+                                ? "running"
+                                : "completed",
+                            startedAt:
+                              thread.latestRun?.startedAt ??
+                              thread.latestRun?.requestedAt ??
+                              thread.createdAt,
+                            completedAt: thread.latestRun?.completedAt ?? thread.updatedAt,
+                          }}
+                        />
+                      </span>
+                    ) : variantAction === "unsnooze" && props.snoozeWakeLabelText !== null ? (
                       <span className="inline-flex items-center gap-1 text-xs text-info-foreground tabular-nums">
                         {/* The clock tells a wake time from an age at a glance. */}
                         <AlarmClockIcon aria-hidden className="size-3" />
@@ -1438,6 +1500,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             )}
           >
             <div className="flex h-5 min-w-0 items-center gap-1.5">
+              {childrenControl}
               {draftIndicator}
               {props.project ? (
                 <ProjectFavicon project={props.project} className="size-4 shrink-0" />

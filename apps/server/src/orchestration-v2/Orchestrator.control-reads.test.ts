@@ -963,6 +963,93 @@ it.effect("settles only the stopped run's background work, once", () =>
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("persists independent spawn lineage and expansion through event replay", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const rootId = ThreadId.make("thread:spawn-root");
+    const childId = ThreadId.make("thread:spawn-child");
+    const grandchildId = ThreadId.make("thread:spawn-grandchild");
+    const events: OrchestrationV2DomainEvent[] = [];
+    for (const [threadId, parentThreadId] of [
+      [rootId, undefined],
+      [childId, rootId],
+      [grandchildId, childId],
+    ] as const) {
+      const command = {
+        type: "thread.create" as const,
+        commandId: CommandId.make(`create:${threadId}`),
+        threadId,
+        ...(parentThreadId === undefined ? {} : { parentThreadId }),
+        projectId: ProjectId.make(`project:${threadId}`),
+        title: "Spawn lineage",
+        modelSelection,
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+        createdBy: "agent" as const,
+        creationSource: "mcp" as const,
+      };
+      const created = yield* orchestrator.dispatch(command);
+      events.push(...created.storedEvents.map((stored) => stored.event));
+      const retry = yield* orchestrator.dispatch(command);
+      assert.deepEqual(retry.storedEvents, created.storedEvents);
+      const shell = yield* projections.getThreadShell(threadId);
+      assert.equal(shell?.childrenExpanded, false);
+      assert.deepEqual(shell?.lineage, {
+        parentThreadId: parentThreadId ?? null,
+        relationshipToParent: parentThreadId === undefined ? null : "child",
+        rootThreadId: rootId,
+      });
+    }
+    const originalUpdatedAt = (yield* projections.getThread(rootId)).updatedAt;
+    yield* TestClock.adjust("1 minute");
+    for (const childrenExpanded of [true, false, true]) {
+      const updated = yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make(`expand:${events.length}`),
+        threadId: rootId,
+        childrenExpanded,
+      });
+      events.push(...updated.storedEvents.map((stored) => stored.event));
+      assert.equal((yield* projections.getThread(rootId)).childrenExpanded, childrenExpanded);
+      assert.equal((yield* projections.getThreadShell(rootId))?.childrenExpanded, childrenExpanded);
+      assert.deepEqual((yield* projections.getThreadShell(rootId))?.updatedAt, originalUpdatedAt);
+    }
+    const first = events.find(
+      (event) => event.type === "thread.created" && event.threadId === rootId,
+    );
+    assert.ok(first?.type === "thread.created");
+    const replayed = events
+      .filter((event) => event.threadId === rootId)
+      .reduce(ProjectionStore.applyToProjection, ProjectionStore.emptyProjection(first));
+    assert.isTrue(ProjectionStore.threadShellFromProjection(replayed).childrenExpanded);
+    const selfId = ThreadId.make("thread:self-child");
+    for (const parentThreadId of [ThreadId.make("thread:missing"), selfId]) {
+      const threadId = parentThreadId === selfId ? selfId : ThreadId.make("thread:invalid-child");
+      const rejected = yield* orchestrator
+        .dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`invalid:${threadId}`),
+          threadId,
+          parentThreadId,
+          projectId: ProjectId.make("project:spawn"),
+          title: "Invalid spawn",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "agent",
+          creationSource: "mcp",
+        })
+        .pipe(Effect.result);
+      assert.isTrue(Result.isFailure(rejected));
+    }
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("keeps delegated child pull-request links independent of the parent", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;

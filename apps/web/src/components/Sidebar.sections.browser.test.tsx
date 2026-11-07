@@ -36,6 +36,142 @@ vi.mock("./sidebar/SidebarChrome", () => ({
 }));
 
 describe("sidebar project sections", () => {
+  it("reads saved child expansion, nests across filing sections, and opens descendants", async () => {
+    using stack = new DisposableStack();
+    const previousSettings = getClientSettings();
+    stack.defer(() => __setClientSettingsForTests(previousSettings));
+    __setClientSettingsForTests({
+      ...DEFAULT_CLIENT_SETTINGS,
+      boringSidebarEnabled: false,
+      legacySidebarEnabled: false,
+    });
+    const environmentId = EnvironmentId.make("environment-test");
+    const projectId = ProjectId.make("project-test");
+    const project: EnvironmentProject = {
+      id: projectId,
+      environmentId,
+      title: "Workroom",
+      workspaceRoot: "/workroom",
+      repositoryIdentity: null,
+      defaultModelSelection: null,
+      scripts: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      sections: [
+        { id: "client-a", name: "Client A", collapsed: false },
+        { id: "client-b", name: "Client B", collapsed: false },
+      ],
+    };
+    const parent = makeThreadFixture({
+      id: ThreadId.make("parent"),
+      title: "Parent work",
+      sectionId: "client-a",
+    });
+    const child = makeThreadFixture({
+      id: ThreadId.make("child"),
+      title: "Child work",
+      sectionId: "client-b",
+      lineage: {
+        rootThreadId: parent.id,
+        parentThreadId: parent.id,
+        relationshipToParent: "child",
+      },
+      runtime: {
+        status: "running",
+        activeRunId: null,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        providerName: null,
+        lastError: null,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    const grandchild = makeThreadFixture({
+      id: ThreadId.make("grandchild"),
+      title: "Grandchild work",
+      sectionId: "client-b",
+      hasPendingUserInput: true,
+      lineage: {
+        rootThreadId: parent.id,
+        parentThreadId: child.id,
+        relationshipToParent: "subagent",
+      },
+    });
+    const promoted = makeThreadFixture({
+      id: ThreadId.make("client-orphan"),
+      title: "Visible client work",
+      sectionId: "client-b",
+      lineage: {
+        rootThreadId: ThreadId.make("hidden-infrastructure"),
+        parentThreadId: ThreadId.make("hidden-infrastructure"),
+        relationshipToParent: "child",
+      },
+    });
+    let threads = [parent, child, grandchild, promoted];
+    vi.mocked(useProjects).mockReturnValue([project]);
+    vi.mocked(useQuietThreadShells).mockImplementation(() => threads);
+    const config = { environment: { capabilities: { projectSections: true } } } as ServerConfig;
+    vi.mocked(useServerConfigs).mockReturnValue(
+      new Map([[environmentId, config as EnvironmentServerConfig]]),
+    );
+    const update = vi.fn(
+      async (value: {
+        environmentId: EnvironmentId;
+        input?: { threadId?: ThreadId; childrenExpanded?: boolean };
+      }) => {
+        const childrenExpanded = value.input?.childrenExpanded;
+        if (childrenExpanded !== undefined) {
+          threads = threads.map((thread) =>
+            thread.id === value.input?.threadId ? { ...thread, childrenExpanded } : thread,
+          );
+        }
+        return AsyncResult.success(undefined);
+      },
+    );
+    vi.mocked(useOrchestrationCommand).mockReturnValue(update);
+    const ui = () => (
+      <SidebarProvider>
+        <aside className="flex h-screen w-72 flex-col">
+          <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+        </aside>
+      </SidebarProvider>
+    );
+    await using screen = await render(ui());
+    const row = (id: ThreadId) =>
+      screen.container.querySelector(`[data-thread-item="${environmentId}:${id}"]`);
+    expect(row(child.id)).toBeNull();
+    expect(
+      row(promoted.id)?.closest("[data-project-section]")?.getAttribute("data-project-section"),
+    ).toBe("client-b");
+    await screen.getByRole("button", { name: "Expand children of Parent work, 1 child" }).click();
+    await vi.waitFor(() =>
+      expect(update).toHaveBeenCalledWith(
+        expect.objectContaining({ input: { threadId: parent.id, childrenExpanded: true } }),
+      ),
+    );
+    await screen.rerender(ui());
+    expect(
+      row(child.id)?.closest("[data-project-section]")?.getAttribute("data-project-section"),
+    ).toBe("client-a");
+    expect(row(child.id)?.querySelector("[data-child-status]")?.textContent).toMatch(/Working\d/);
+    expect(row(grandchild.id)).toBeNull();
+    await screen.getByRole("button", { name: "Expand children of Child work, 1 child" }).click();
+    await screen.rerender(ui());
+    expect(
+      row(grandchild.id)?.closest("[data-project-section]")?.getAttribute("data-project-section"),
+    ).toBe("client-a");
+    expect(row(grandchild.id)?.querySelector("[data-child-status]")?.textContent).toContain(
+      "Waiting on you",
+    );
+    await userEvent.click(row(grandchild.id)!.querySelector<HTMLElement>("[data-sidebar-row]")!);
+    await vi.waitFor(() =>
+      expect(screen.router?.state.location.pathname).toBe("/environment-test/grandchild"),
+    );
+    await screen.getByRole("button", { name: "Collapse children of Parent work, 1 child" }).click();
+    await screen.rerender(ui());
+    expect(row(child.id)).toBeNull();
+    expect(screen.container.textContent).not.toContain("hidden-infrastructure");
+  });
+
   it("moves a chat by dragging and by its menu, then reads the assignments back from a fresh snapshot", async () => {
     using stack = new DisposableStack();
     const previousSettings = getClientSettings();
