@@ -234,6 +234,9 @@ def _prune(root, host, apply, probe, retained_marker=None):
         return result
     _directory(directory)
     candidates = sorted((path for path in directory.iterdir() if RECEIPT.fullmatch(path.name) and (path / "rollback").exists()), reverse=True)
+    if not candidates:
+        result['verification'] = 'no_archive_payload_no_health_claim'
+        return result
     current = recheck_current = None
     if retained_marker is not None:
         try:

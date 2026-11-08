@@ -304,6 +304,7 @@ class NightlyTests(unittest.TestCase):
                 payload.mkdir(parents=True)
                 with sqlite3.connect(payload / "state.sqlite") as db:
                     db.execute("CREATE TABLE saved(value TEXT)")
+                    db.execute("INSERT INTO saved VALUES ('retained fixture')")
             (old.parent / "rollback.inventory.json").write_text(json.dumps({"sha256": archive.inventory(old)}))
             marker = current.parent / "latest-rollback.json"
             marker.write_text(json.dumps({"marker":"t3-fork-backend-deployment-v1","directory":str(current)}))
@@ -311,6 +312,8 @@ class NightlyTests(unittest.TestCase):
             self.assertEqual(result["kept"], current.name)
             self.assertFalse(old.exists())
             self.assertTrue((current / "state.sqlite").exists())
+            with sqlite3.connect((current / 'state.sqlite').as_uri() + '?mode=ro&immutable=1', uri=True) as db:
+                self.assertEqual(db.execute('SELECT value FROM saved').fetchall(), [('retained fixture',)])
             self.assertTrue((old.parent / "rollback.inventory.json").exists())
             old.mkdir()
             with sqlite3.connect(old / 'state.sqlite') as db:
