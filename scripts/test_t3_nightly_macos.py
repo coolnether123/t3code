@@ -265,6 +265,28 @@ class NightlyTests(unittest.TestCase):
             self.assertIn("20261105-030000-123", held["held"])
             self.assertTrue((root / "millie/20261105-030000-123/rollback").exists())
 
+    def test_rollback_retention_honors_dangling_stop_markers(self):
+        import sqlite3
+        for stop_name in ('STOP-ALL', 'STOP-disk-retention'):
+            with self.subTest(stop_name=stop_name), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory).resolve()
+                root = home / 'archive'
+                for name in ('20261105-030000-123', '20261106-030000-123'):
+                    payload = root / 'millie' / name / 'rollback'
+                    payload.mkdir(parents=True)
+                    with sqlite3.connect(payload / 'state.sqlite') as db:
+                        db.execute('CREATE TABLE saved(value TEXT)')
+                    (payload.parent / 'rollback.inventory.json').write_text(
+                        json.dumps({'sha256': archive.inventory(payload)}))
+                control = home / 'Codex_Workroom/task_evidence/otis-control'
+                control.mkdir(parents=True)
+                (control / stop_name).symlink_to(home / 'absent-target')
+                with patch.object(archive.Path, 'home', return_value=home):
+                    result = archive.prune(root, 'millie', apply=True, probe=lambda path: None)
+                self.assertEqual(result['removed'], [])
+                self.assertIn('20261105-030000-123', result['held'])
+                self.assertTrue((root / 'millie/20261105-030000-123/rollback/state.sqlite').exists())
+
     def test_archive_retention_fails_closed_for_unhealthy_and_locked_payloads(self):
         import sqlite3
         with tempfile.TemporaryDirectory() as directory:

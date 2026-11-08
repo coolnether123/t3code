@@ -279,7 +279,7 @@ def _prune(root, host, apply, probe, retained_marker=None):
             slots = _slots(path, host)
             if apply:
                 control = Path.home() / "Codex_Workroom/task_evidence/otis-control"
-                if any((control / name).exists() for name in ("STOP-ALL", "STOP-disk-retention")):
+                if any(os.path.lexists(control / name) for name in ("STOP-ALL", "STOP-disk-retention")):
                     raise RuntimeError("rollback retention stopped")
                 if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
                     raise RuntimeError("rollback retention safe removal unavailable")
