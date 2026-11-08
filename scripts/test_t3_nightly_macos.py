@@ -325,6 +325,25 @@ class NightlyTests(unittest.TestCase):
             self.assertEqual(refused['removed'], [])
             self.assertTrue(old.exists())
 
+    def test_unsigned_archive_app_cannot_replace_the_only_recovery_copy(self):
+        import sqlite3
+        import subprocess
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve() / 'archive'
+            for name in ('20261105-030000-123', '20261106-030000-123'):
+                receipt = root / 'elora' / name
+                data = receipt / 'rollback/t3-home/userdata'
+                data.mkdir(parents=True)
+                with sqlite3.connect(data / 'state.sqlite') as db:
+                    db.execute('CREATE TABLE saved(value TEXT)')
+                (receipt / 'previous-app').mkdir()
+                for slot in ('rollback', 'previous-app'):
+                    (receipt / (slot + '.inventory.json')).write_text(json.dumps({'sha256': archive.inventory(receipt / slot)}))
+            with patch.object(archive.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)):
+                result = archive.prune(root, 'elora', apply=True, probe=lambda path: None)
+            self.assertEqual(result['removed'], [])
+            self.assertTrue((root / 'elora/20261105-030000-123/rollback').exists())
+
 
 if __name__ == "__main__":
     unittest.main()

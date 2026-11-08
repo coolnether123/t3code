@@ -128,6 +128,11 @@ def _slots(path, host):
 
 def _healthy(path, host):
     slots = _slots(path, host)
+    if host == 'elora':
+        result = subprocess.run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(path / 'previous-app')],
+                                capture_output=True, timeout=60)
+        if result.returncode:
+            raise RuntimeError('archived rollback app signature invalid')
     data = path / "rollback" / "t3-home/userdata" if host == "elora" else path / "rollback"
     _directory(data)
     database = data / "state.sqlite"
