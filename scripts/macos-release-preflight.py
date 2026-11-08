@@ -25,18 +25,44 @@ def desktop_environment(environ):
     return env
 
 
+RESERVE_BYTES = 20 * 1024**3
+COPY_HEADROOM = 64 * 1024**2
+
+
+def snapshot_allocation(database):
+    with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as live:
+        page_size = live.execute('PRAGMA page_size').fetchone()[0]
+        pages = live.execute('PRAGMA page_count').fetchone()[0]
+        free_pages = live.execute('PRAGMA freelist_count').fetchone()[0]
+    return 2 * (pages - free_pages) * page_size + COPY_HEADROOM
+
+
 def snapshot(home, destination):
     userdata = destination / 'userdata'
     userdata.mkdir(parents=True, mode=0o700)
     source = home / 'userdata'
     name = 'statev2.sqlite' if (source / 'statev2.sqlite').exists() else 'state.sqlite'
-    if shutil.disk_usage(destination.parent).free - (source / name).stat().st_size < 20 * 1024**3:
+    if shutil.disk_usage(destination.parent).free - snapshot_allocation(source / name) < RESERVE_BYTES:
         raise RuntimeError('copied-state preflight would cross the 20 GiB reserve')
     target = userdata / name
     with sqlite3.connect((source / name).as_uri() + '?mode=ro', uri=True) as live:
-        with sqlite3.connect(target) as copied:
-            live.backup(copied)
+        reserve_lost = False
+
+        def check_reserve():
+            nonlocal reserve_lost
+            reserve_lost = shutil.disk_usage(destination.parent).free < RESERVE_BYTES + COPY_HEADROOM
+            return int(reserve_lost)
+
+        live.set_progress_handler(check_reserve, 1)
+        try:
+            live.execute('VACUUM INTO ?', (str(target),))
+        except sqlite3.OperationalError:
+            if reserve_lost:
+                raise RuntimeError('copied-state preflight would cross the 20 GiB reserve') from None
+            raise
     with sqlite3.connect(target) as copied:
+        if copied.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+            raise RuntimeError('copied-state snapshot integrity check failed')
         tables = {row[0] for row in copied.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         # Keep the full database and migration history, but never replay copied work.
         threads = 'orchestration_v2_projection_threads'
