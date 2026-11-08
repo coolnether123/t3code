@@ -124,19 +124,25 @@ def execute(config_path):
                 verified = subprocess.run(config['verifyCommand'], env=env, stdin=subprocess.DEVNULL,
                                           stdout=log, stderr=subprocess.STDOUT)
             readback = json.loads(Path(config['verifyReceipt']).read_text()) if verified.returncode == 0 else {}
-            healthy = (verified.returncode == 0 and readback.get('liveHealthy') is True
-                       and readback.get('installedCommit') == config['targetInstalledCommit'])
+            healthy = verified.returncode == 0 and readback.get('liveHealthy') is True
+            target_installed = readback.get('installedCommit') == config['targetInstalledCommit']
             write_once(root / 'release-result.json', dict(at=time.time(), releaseExit=run.returncode,
-                                                         liveHealthy=healthy, readback=readback))
+                                                         liveHealthy=healthy, targetInstalled=target_installed,
+                                                         readback=readback))
         result = json.loads((root / 'release-result.json').read_text())
-        if result['releaseExit'] != 0 or not result['liveHealthy']:
-            raise ReleaseHeld('Release outcome is not a verified healthy target; read existing result')
+        if not result['liveHealthy']:
+            raise ReleaseHeld('No verified healthy target or rollback; read existing result')
         if (root / 'continuation.json').exists():
             return
         check_stops(Path(config['stopDirectory']), config['automationId'])
-        command = continuation(config, rt._detail(config['threadId']))
-        receipt = rt._dispatch_once(command, 'release-continuation-' + config['releaseId'])
-        write_once(root / 'continuation.json', dict(dispatched=True, receipt=receipt))
+        try:
+            command = continuation(config, rt._detail(config['threadId']))
+            receipt = rt._dispatch_once(command, 'release-continuation-' + config['releaseId'])
+            write_once(root / 'continuation.json', dict(dispatched=True, receipt=receipt))
+        except ReleaseHeld as error:
+            if not (root / 'continuation-held.json').exists():
+                write_once(root / 'continuation-held.json', dict(dispatched=False, reason=str(error)))
+            raise
 
 
 if __name__ == '__main__':
