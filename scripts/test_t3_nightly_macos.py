@@ -293,6 +293,35 @@ class NightlyTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 archive.prune(alias, "millie", apply=True, probe=lambda path: None)
 
+    def test_verified_newer_current_rollback_replaces_archive_payload(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "archive"
+            old = root / "millie/20261105-030000-123/rollback"
+            current = base / "backups/20261106030000000-0123456789ab"
+            for payload in (old, current):
+                payload.mkdir(parents=True)
+                with sqlite3.connect(payload / "state.sqlite") as db:
+                    db.execute("CREATE TABLE saved(value TEXT)")
+            (old.parent / "rollback.inventory.json").write_text(json.dumps({"sha256": archive.inventory(old)}))
+            marker = current.parent / "latest-rollback.json"
+            marker.write_text(json.dumps({"marker":"t3-fork-backend-deployment-v1","directory":str(current)}))
+            result = archive.prune(root, "millie", apply=True, probe=lambda path: None, retained_marker=marker)
+            self.assertEqual(result["kept"], current.name)
+            self.assertFalse(old.exists())
+            self.assertTrue((current / "state.sqlite").exists())
+            self.assertTrue((old.parent / "rollback.inventory.json").exists())
+            old.mkdir()
+            with sqlite3.connect(old / 'state.sqlite') as db:
+                db.execute('CREATE TABLE saved(value TEXT)')
+            (old.parent / 'rollback.inventory.json').write_text(json.dumps({'sha256': archive.inventory(old)}))
+            (current / 'state.sqlite').write_bytes(b'corrupt current backup')
+            refused = archive.prune(root, 'millie', apply=True, probe=lambda path: None, retained_marker=marker)
+            self.assertIn('current_rollback_unverified', refused['held'])
+            self.assertEqual(refused['removed'], [])
+            self.assertTrue(old.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

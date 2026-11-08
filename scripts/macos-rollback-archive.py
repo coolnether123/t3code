@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import sqlite3
@@ -15,6 +16,7 @@ import subprocess
 import sys
 
 sys.dont_write_bytecode = True
+RECEIPT = re.compile(r'(?:\d{8}-\d{6}-\d+|\d{14,17}-[0-9a-f]{12})')
 
 def inventory(root):
     root = Path(root)
@@ -153,7 +155,77 @@ def _audit(root, value):
         os.fsync(stream.fileno())
 
 
-def _prune(root, host, apply, probe):
+def _stamp(name):
+    return re.sub(r'[^0-9]', '', name)[:14]
+
+
+def _active(marker, host, probe):
+    marker = Path(marker)
+    if marker.resolve() != marker or marker.is_symlink():
+        raise RuntimeError("current rollback marker is linked")
+    info = marker.stat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+        raise RuntimeError("current rollback marker identity differs")
+    raw = marker.read_bytes()
+    value = json.loads(raw)
+    expected = "t3-desktop-apfs-v1" if host == "elora" else "t3-fork-backend-deployment-v1"
+    current = Path(value["directory"])
+    _directory(current)
+    if (value.get("marker") != expected or current.parent != marker.parent
+            or not RECEIPT.fullmatch(current.name)):
+        raise RuntimeError("current rollback marker binding differs")
+    data = current / "t3-home/userdata" if host == "elora" else current
+    _directory(data)
+    paths = [data / "state.sqlite"]
+    if (data / "statev2.sqlite").exists():
+        paths.append(data / "statev2.sqlite")
+    if host == "elora":
+        app = Path(value['previous_app'])
+        _directory(app)
+        if app.parent != Path('/Applications') or app.name != '.T3 Code (Alpha).previous.' + current.name + '.app':
+            raise RuntimeError("current rollback app binding differs")
+        app_info = app / 'Contents/Info.plist'
+        if not plistlib.loads(app_info.read_bytes()).get('CFBundleIdentifier'):
+            raise RuntimeError("current rollback app is incomplete")
+        paths.append(app_info)
+    def verify_app():
+        if host == 'elora':
+            result = subprocess.run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(app)],
+                                    capture_output=True, timeout=60)
+            if result.returncode:
+                raise RuntimeError('current rollback app signature invalid')
+    verify_app()
+    def versions():
+        result = []
+        for path in paths:
+            entry = path.lstat()
+            if (path.resolve() != path or not stat.S_ISREG(entry.st_mode)
+                    or entry.st_uid != os.getuid()):
+                raise RuntimeError("current rollback payload differs")
+            wal = Path(str(path) + '-wal')
+            if wal.exists() or wal.is_symlink():
+                if wal.is_symlink() or wal.stat().st_size:
+                    raise RuntimeError("current rollback has uncheckpointed writes")
+            result.append((entry.st_dev, entry.st_ino, entry.st_size, entry.st_mtime_ns, entry.st_ctime_ns))
+        return result
+    probe(current)
+    before = versions()
+    for path in paths:
+        if path.suffix != '.sqlite':
+            continue
+        with contextlib.closing(sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
+            if db.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+                raise RuntimeError("current rollback database unhealthy")
+    def recheck():
+        if marker.read_bytes() != raw or versions() != before:
+            raise RuntimeError("current rollback changed")
+        probe(current)
+        verify_app()
+    recheck()
+    return current, recheck
+
+
+def _prune(root, host, apply, probe, retained_marker=None):
     if host not in ("elora", "millie"):
         raise RuntimeError("rollback retention host differs")
     directory = root / host
@@ -161,13 +233,19 @@ def _prune(root, host, apply, probe):
     if not directory.exists():
         return result
     _directory(directory)
-    candidates = sorted((path for path in directory.iterdir() if re.fullmatch(r"[0-9][0-9a-f-]+", path.name) and (path / "rollback").exists()), reverse=True)
-    if len(candidates) <= 1:
+    candidates = sorted((path for path in directory.iterdir() if RECEIPT.fullmatch(path.name) and (path / "rollback").exists()), reverse=True)
+    current = recheck_current = None
+    if retained_marker is not None:
+        try:
+            current, recheck_current = _active(retained_marker, host, probe)
+        except (RuntimeError, OSError, ValueError, KeyError, sqlite3.Error, subprocess.SubprocessError):
+            result['held'].append('current_rollback_unverified')
+    if len(candidates) <= 1 and current is None:
         result["kept"] = candidates[0].name if candidates else None
         result["verification"] = "no_deletion_no_health_claim"
         return result
-    keeper = None
-    for path in candidates:
+    keeper = current
+    for path in candidates if current is None else []:
         try:
             _directory(path)
             _healthy(path, host)
@@ -178,8 +256,11 @@ def _prune(root, host, apply, probe):
             result["held"].append(path.name)
     if keeper is None:
         return result
+    result['kept'] = keeper.name
+    if current is not None:
+        result['retained_current'] = True
     for path in candidates:
-        if path >= keeper:
+        if _stamp(path.name) >= _stamp(keeper.name):
             continue
         try:
             _directory(path)
@@ -192,7 +273,10 @@ def _prune(root, host, apply, probe):
                 if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
                     raise RuntimeError("rollback retention safe removal unavailable")
                 _audit(root, {"action": "delete_intent", "host": host, "receipt": path.name, "retained": keeper.name})
-                _healthy(keeper, host)
+                if recheck_current is not None:
+                    recheck_current()
+                else:
+                    _healthy(keeper, host)
                 probe(path)
                 _slots(path, host)
                 for slot in slots:
@@ -204,15 +288,15 @@ def _prune(root, host, apply, probe):
     return result
 
 
-def prune(root, host, *, apply=False, probe=closed):
+def prune(root, host, *, apply=False, probe=closed, retained_marker=None):
     root = Path(root)
     if not root.exists():
         return {"host": host, "kept": None, "removed": [], "held": []}
     if not apply:
         _directory(root)
-        return _prune(root, host, False, probe)
+        return _prune(root, host, False, probe, retained_marker)
     with retention_lock(root):
-        return _prune(root, host, True, probe)
+        return _prune(root, host, True, probe, retained_marker)
 
 
 def archive(source, host, receipt, slot="rollback", archive_root=None):
