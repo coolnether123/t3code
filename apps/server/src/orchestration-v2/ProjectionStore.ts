@@ -1028,6 +1028,8 @@ type ShellThreadRow = {
   readonly latest_run_requested_at: string | null;
   readonly latest_run_started_at: string | null;
   readonly latest_run_completed_at: string | null;
+  readonly native_child_turn_payload_json: string | null;
+  readonly native_child_node_payload_json: string | null;
   readonly latest_run_stop_requested: number;
   readonly active_run_id: string | null;
   readonly active_run_status: string | null;
@@ -1537,6 +1539,40 @@ const linkCardStillAsks = (
   latestUserAuthoredMessageAt === null ||
   !DateTime.isGreaterThan(latestUserAuthoredMessageAt, item.startedAt ?? item.updatedAt);
 
+function nativeChildWork(
+  thread: OrchestrationV2AppThread,
+  turns: ReadonlyArray<OrchestrationV2ProviderTurn>,
+  nodes: ReadonlyArray<OrchestrationV2ExecutionNode>,
+) {
+  if (thread.lineage.relationshipToParent !== "subagent") return null;
+  const owns = (row: { readonly providerThreadId: ProviderThreadId | null }) =>
+    thread.activeProviderThreadId !== null &&
+    row.providerThreadId === thread.activeProviderThreadId;
+  const turn = turns
+    .filter((row) => row.runAttemptId === null && owns(row))
+    .toSorted((left, right) => right.ordinal - left.ordinal)[0];
+  const node = nodes
+    .filter((row) => row.runId === null && row.kind === "root_turn" && owns(row))
+    .toSorted(
+      (left, right) =>
+        (right.startedAt === null ? 0 : DateTime.toEpochMillis(right.startedAt)) -
+          (left.startedAt === null ? 0 : DateTime.toEpochMillis(left.startedAt)) ||
+        right.id.localeCompare(left.id),
+    )[0];
+  const work =
+    node !== undefined &&
+    (turn === undefined ||
+      (node.providerTurnId === turn.id &&
+        (turn.status === "pending" || turn.status === "running") &&
+        node.status !== "idle" &&
+        node.status !== "pending" &&
+        node.status !== "running"))
+      ? node
+      : turn;
+  if (work === undefined) return null;
+  return { ...work, status: work.status === "pending" ? ("starting" as const) : work.status };
+}
+
 export function threadShellFromProjection(
   projection: OrchestrationV2ThreadProjection,
 ): OrchestrationV2ThreadShell {
@@ -1556,6 +1592,16 @@ export function threadShellFromProjection(
       projection.turnItems,
       providerSession?.lastError ?? null,
     ) ?? latestUnheldRun(runs);
+  const nativeWork =
+    latestRun === null
+      ? nativeChildWork(projection.thread, projection.providerTurns, projection.nodes)
+      : null;
+  const nativeActivityStatus =
+    nativeWork?.status === "running" ||
+    nativeWork?.status === "starting" ||
+    nativeWork?.status === "waiting"
+      ? nativeWork.status
+      : null;
   const activeRun =
     runs
       .filter(isInterruptibleRunForShell)
@@ -1610,6 +1656,7 @@ export function threadShellFromProjection(
     turnItems: projection.turnItems,
     activeProviderThreadId: projection.thread.activeProviderThreadId,
     runs,
+    hasActiveRun: activeRun !== null || nativeActivityStatus !== null,
     pullRequests: projection.thread.pullRequests,
   });
   return {
@@ -1648,8 +1695,8 @@ export function threadShellFromProjection(
       : { delegatedFrom: projection.thread.delegatedFrom }),
     latestRunId: latestRun?.id ?? null,
     latestRunRequestedAt: latestRun?.requestedAt ?? null,
-    latestRunStartedAt: latestRun?.startedAt ?? null,
-    latestRunCompletedAt: latestRun?.completedAt ?? null,
+    latestRunStartedAt: latestRun?.startedAt ?? nativeWork?.startedAt ?? null,
+    latestRunCompletedAt: latestRun?.completedAt ?? nativeWork?.completedAt ?? null,
     latestRunStopRequested:
       latestRun != null &&
       projection.turnItems.some(
@@ -1657,10 +1704,14 @@ export function threadShellFromProjection(
       ),
     activeRunId: activeRun?.id ?? null,
     blockedOnThreadWait: deriveBlockedOnThreadWait({ activeRun, turnItems: projection.turnItems }),
-    activityRunStatus: activityRun?.status ?? null,
+    activityRunStatus: activityRun?.status ?? nativeActivityStatus,
     activityRunStartedAt:
-      activityRun === null ? null : orchestrationV2RunWorkStartedAt(activityRun),
-    status: latestRun?.status ?? "idle",
+      activityRun === null
+        ? nativeActivityStatus === null
+          ? null
+          : (nativeWork?.startedAt ?? null)
+        : orchestrationV2RunWorkStartedAt(activityRun),
+    status: latestRun?.status ?? nativeWork?.status ?? "idle",
     ...threadErrorSummary(
       latestRootProviderFailure(latestRun, projection.turnItems),
       providerSession?.lastError ?? null,
@@ -6273,6 +6324,28 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               presented.requested_at AS latest_run_requested_at,
               json_extract(presented.payload_json, '$.startedAt') AS latest_run_started_at,
               presented.completed_at AS latest_run_completed_at,
+              (
+                SELECT turn.payload_json
+                FROM orchestration_v2_projection_provider_turns turn
+                WHERE presented.run_id IS NULL
+                  AND json_extract(t.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+                  AND turn.thread_id = t.thread_id
+                  AND turn.provider_thread_id = t.active_provider_thread_id
+                  AND turn.run_attempt_id IS NULL
+                ORDER BY turn.ordinal DESC
+                LIMIT 1
+              ) AS native_child_turn_payload_json,
+              (
+                SELECT node.payload_json
+                FROM orchestration_v2_projection_nodes node
+                WHERE presented.run_id IS NULL
+                  AND json_extract(t.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+                  AND node.thread_id = t.thread_id AND node.run_id IS NULL
+                  AND node.kind = 'root_turn'
+                  AND node.provider_thread_id = t.active_provider_thread_id
+                ORDER BY node.started_at DESC, node.node_id DESC
+                LIMIT 1
+              ) AS native_child_node_payload_json,
               EXISTS (
                 SELECT 1 FROM orchestration_v2_projection_turn_items stop_request
                 WHERE stop_request.thread_id = t.thread_id AND stop_request.run_id = presented.run_id
@@ -6905,17 +6978,36 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             : yield* decodeTurnItemPayload(row.terminal_failure_payload_json);
         let latestRunId = row.latest_run_id === null ? null : RunId.make(row.latest_run_id);
         let latestRunStatus = shellStatusFromStoredRunStatus(row.latest_run_status);
+        const nativeWork =
+          latestRunId === null
+            ? nativeChildWork(
+                thread,
+                row.native_child_turn_payload_json === null
+                  ? []
+                  : [yield* decodeProviderTurnPayload(row.native_child_turn_payload_json)],
+                row.native_child_node_payload_json === null
+                  ? []
+                  : [yield* decodeNodePayload(row.native_child_node_payload_json)],
+              )
+            : null;
+        const nativeActivityStatus =
+          nativeWork?.status === "running" ||
+          nativeWork?.status === "starting" ||
+          nativeWork?.status === "waiting"
+            ? nativeWork.status
+            : null;
+        if (nativeWork !== null) latestRunStatus = nativeWork.status;
         let latestRunRequestedAt =
           row.latest_run_requested_at === null
             ? null
             : DateTime.makeUnsafe(row.latest_run_requested_at);
         let latestRunStartedAt =
           row.latest_run_started_at === null
-            ? null
+            ? (nativeWork?.startedAt ?? null)
             : DateTime.makeUnsafe(row.latest_run_started_at);
         let latestRunCompletedAt =
           row.latest_run_completed_at === null
-            ? null
+            ? (nativeWork?.completedAt ?? null)
             : DateTime.makeUnsafe(row.latest_run_completed_at);
         let latestRunStopRequested = row.latest_run_stop_requested === 1;
         if (row.blocking_run_id !== null && row.blocking_failure_payload_json !== null) {
@@ -6959,7 +7051,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             providerThreads: providerThreadsByThreadId.get(thread.id) ?? [],
             turnItems: pendingTurnItemsByThreadId.get(thread.id) ?? [],
             activeProviderThreadId: thread.activeProviderThreadId,
-            hasActiveRun: row.active_run_id !== null,
+            hasActiveRun: row.active_run_id !== null || nativeActivityStatus !== null,
             pullRequests: thread.pullRequests,
           }),
         ];
@@ -6981,7 +7073,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           }),
           activityRunStartedAt:
             row.activity_run_started_at === null
-              ? null
+              ? nativeActivityStatus === null
+                ? null
+                : (nativeWork?.startedAt ?? null)
               : DateTime.makeUnsafe(row.activity_run_started_at),
           activityRunStatus:
             row.activity_run_status === "preparing" ||
@@ -6989,7 +7083,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             row.activity_run_status === "running" ||
             row.activity_run_status === "waiting"
               ? row.activity_run_status
-              : null,
+              : nativeActivityStatus,
           ...threadErrorSummary(
             terminalFailureItem?.type === "error" ? terminalFailureItem.failure : null,
             row.last_error,
@@ -7308,6 +7402,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               SELECT 1 FROM orchestration_v2_projection_runs r
               WHERE r.thread_id = t.thread_id
                 AND r.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+            )
+            OR EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_provider_turns turn
+              WHERE turn.thread_id = t.thread_id AND turn.run_attempt_id IS NULL
+                AND turn.status IN ('pending', 'running')
+            )
+            OR EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_nodes node
+              WHERE node.thread_id = t.thread_id AND node.run_id IS NULL
+                AND node.kind = 'root_turn' AND node.status IN ('pending', 'running', 'waiting')
             )
             OR EXISTS (
               SELECT 1 FROM orchestration_v2_projection_runtime_requests request

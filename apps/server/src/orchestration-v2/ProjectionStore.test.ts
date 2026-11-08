@@ -747,6 +747,167 @@ it.effect("SQL queue readiness skips held runs without bypassing active work", (
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("native child shells follow runless provider turns without inventing app runs", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const parentId = yield* addRolledBackRecoveryCandidate("native-child-shell");
+    const parent = yield* store.getThreadProjection(parentId);
+    const threadId = ThreadId.make("thread:native-child-shell");
+    const providerThreadId = ProviderThreadId.make("provider-thread:native-child-shell");
+    const nodeId = NodeId.make("node:native-child-shell");
+    const now = yield* DateTime.now;
+    yield* store.apply({
+      id: EventId.make("event:native-child-shell:created"),
+      type: "thread.created",
+      threadId,
+      occurredAt: now,
+      payload: {
+        ...parent.thread,
+        id: threadId,
+        activeProviderThreadId: providerThreadId,
+        lineage: {
+          parentThreadId: parentId,
+          relationshipToParent: "subagent",
+          rootThreadId: parentId,
+        },
+      },
+    });
+    const assertNativeStatus = Effect.fnUntraced(function* (
+      status: "starting" | "running" | "completed" | "failed" | "interrupted",
+      requestKind: "command" | null = null,
+    ) {
+      const projection = yield* store.getThreadProjection(threadId);
+      const memory = ProjectionStore.threadShellFromProjection(projection);
+      const sql = yield* store.getThreadShell(threadId);
+      const listed = (yield* store.getShellSnapshot()).threads.find((row) => row.id === threadId);
+      for (const shell of [memory, sql, listed]) {
+        assert.equal(shell?.status, status);
+        assert.equal(
+          shell?.activityRunStatus,
+          status === "running" || status === "starting" ? status : null,
+        );
+        assert.equal(shell?.latestRunId, null);
+        assert.equal(shell?.activeRunId, null);
+        assert.equal(shell?.pendingRuntimeRequest?.kind ?? null, requestKind);
+      }
+      assert.deepEqual(projection.runs, []);
+      yield* assertShellIndexCoversShells();
+    });
+    const node = {
+      id: nodeId,
+      threadId,
+      runId: null,
+      parentNodeId: null,
+      rootNodeId: nodeId,
+      kind: "root_turn" as const,
+      countsForRun: false,
+      providerThreadId,
+      providerTurnId: null,
+      nativeItemRef: null,
+      runtimeRequestId: null,
+      checkpointScopeId: null,
+      startedAt: now,
+      completedAt: null,
+    };
+    for (const status of ["pending", "completed"] as const) {
+      yield* store.apply({
+        id: EventId.make(`event:native-child-shell:node:${status}`),
+        type: "node.updated",
+        threadId,
+        occurredAt: now,
+        payload: { ...node, status, completedAt: status === "completed" ? now : null },
+      });
+      yield* assertNativeStatus(status === "pending" ? "starting" : status);
+    }
+    for (const [ordinal, status] of (
+      ["running", "completed", "running", "failed"] as const
+    ).entries()) {
+      const startedAt = DateTime.add(now, { seconds: ordinal });
+      yield* store.apply({
+        id: EventId.make(`event:native-child-shell:${ordinal}`),
+        type: "provider-turn.updated",
+        threadId,
+        occurredAt: startedAt,
+        payload: {
+          id: ProviderTurnId.make(`turn:native-child-shell:${Math.floor(ordinal / 2)}`),
+          providerThreadId,
+          nodeId,
+          runAttemptId: null,
+          nativeTurnRef: null,
+          ordinal: Math.floor(ordinal / 2) + 1,
+          status,
+          startedAt,
+          completedAt: status === "running" ? null : startedAt,
+        },
+      });
+      if (status === "failed") {
+        yield* store.apply({
+          id: EventId.make("event:native-child-shell:stale-running-node"),
+          type: "node.updated",
+          threadId,
+          occurredAt: startedAt,
+          payload: {
+            ...node,
+            providerTurnId: ProviderTurnId.make("turn:native-child-shell:1"),
+            status: "running",
+            startedAt,
+          },
+        });
+      }
+      yield* assertNativeStatus(status);
+    }
+    const turnId = ProviderTurnId.make("turn:native-child-shell:activity-only");
+    yield* store.apply({
+      id: EventId.make("event:native-child-shell:activity-running"),
+      type: "provider-turn.updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: turnId,
+        providerThreadId,
+        nodeId,
+        runAttemptId: null,
+        nativeTurnRef: null,
+        ordinal: 3,
+        status: "running",
+        startedAt: now,
+        completedAt: null,
+      },
+    });
+    yield* store.apply({
+      id: EventId.make("event:native-child-shell:activity-interrupted"),
+      type: "node.updated",
+      threadId,
+      occurredAt: now,
+      payload: { ...node, providerTurnId: turnId, status: "interrupted", completedAt: now },
+    });
+    yield* assertNativeStatus("interrupted");
+    for (const kind of ["user_input", "command"] as const) {
+      yield* store.apply({
+        id: EventId.make(`event:native-child-shell:request:${kind}`),
+        type: "runtime-request.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: RuntimeRequestId.make(`request:native-child-shell:${kind}`),
+          nodeId,
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind,
+          status: "pending",
+          responseCapability: {
+            type: "live",
+            providerSessionId: ProviderSessionId.make("native-child-session"),
+          },
+          createdAt: now,
+          resolvedAt: null,
+        },
+      });
+    }
+    yield* assertNativeStatus("interrupted", "command");
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("SQL shells flag only an active turn blocked solely on T3 thread waits", () =>
   Effect.gen(function* () {
     const store = yield* ProjectionStore.ProjectionStoreV2;

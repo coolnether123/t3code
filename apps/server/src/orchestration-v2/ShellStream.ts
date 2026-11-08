@@ -430,7 +430,8 @@ export function shouldPublishShellApplicationEvent(
   }
   return !(
     subagentThreadIds.has(event.threadId) &&
-    (event.type === "node.updated" ||
+    ((event.type === "node.updated" &&
+      !(event.payload.kind === "root_turn" && event.payload.runId === null)) ||
       event.type === "turn-item.updated" ||
       event.type === "provider-turn.updated" ||
       event.type === "message.updated")

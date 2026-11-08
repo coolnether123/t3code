@@ -17,6 +17,20 @@ describe("backgroundWorkHoldsCompletion", () => {
 });
 
 describe("derivePendingBackgroundWork", () => {
+  it("keeps structured runless child work pending without an app run", () => {
+    const input = {
+      latestRun: null,
+      providerThreads: [],
+      turnItems: [
+        { id: "native-child", type: "subagent" as const, status: "running" as const, title: null },
+      ],
+    };
+    expect(derivePendingBackgroundWork(input)).toEqual([
+      { taskId: "native-child", kind: "subagent" },
+    ]);
+    expect(derivePendingBackgroundWork({ ...input, hasActiveRun: true })).toEqual([]);
+  });
+
   it("takes each subagent item's instance from its joined owner", () => {
     const owner = ProviderInstanceId.make("claude-owner");
     const tasks = derivePendingBackgroundWork({

@@ -7851,7 +7851,9 @@ describe("CodexAdapterV2 post-settle continuation", () => {
 
   it.effect.each([
     ["shutdown", "cancelled"],
+    ["errored", "failed"],
     ["activity-completed", "completed"],
+    ["activity-interrupted", "interrupted"],
     ["late-activity-completed", "completed"],
     ["stale-running", "completed"],
     ["duplicate-completed", "completed"],
@@ -7903,7 +7905,11 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               )!,
             );
           }
-          if (nativeStatus === "activity-completed" || nativeStatus === "late-activity-completed") {
+          if (
+            nativeStatus === "activity-completed" ||
+            nativeStatus === "activity-interrupted" ||
+            nativeStatus === "late-activity-completed"
+          ) {
             entries.push({
               type: "emit_inbound",
               label: "activity-done",
@@ -7915,7 +7921,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   item: {
                     type: "subAgentActivity",
                     id: "activity-done",
-                    kind: "completed",
+                    kind: nativeStatus === "activity-interrupted" ? "interrupted" : "completed",
                     agentThreadId: RESUME_CHILD_THREAD,
                     agentPath: "/root/resume_agent",
                   },
@@ -7993,6 +7999,18 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           yield* Deferred.await(marker);
           const latest = harness.subagentUpdates().at(-1)!.subagent;
           assert.equal(latest.status, expectedStatus);
+          if (nativeStatus !== "late-activity-completed") {
+            const childRoot = harness.events.findLast(
+              (event) =>
+                event.type === "node.updated" &&
+                event.node.threadId === latest.childThreadId &&
+                event.node.kind === "root_turn",
+            );
+            assert.equal(
+              childRoot?.type === "node.updated" ? childRoot.node.status : null,
+              expectedStatus,
+            );
+          }
           if (nativeStatus === "duplicate-completed") {
             const first = harness.subagentUpdates().find((e) => e.subagent.status === "completed")!;
             assert.equal(

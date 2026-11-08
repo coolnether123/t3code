@@ -244,10 +244,7 @@ export function derivePendingBackgroundWork(input: {
   if (hasActiveRun) {
     return [];
   }
-  if (input.latestRun == null) {
-    return pullRequestWatchTasks(input.pullRequests);
-  }
-  if (!isLatestRunSettledForBackgroundWait(input.latestRun)) {
+  if (input.latestRun != null && !isLatestRunSettledForBackgroundWait(input.latestRun)) {
     return [];
   }
 

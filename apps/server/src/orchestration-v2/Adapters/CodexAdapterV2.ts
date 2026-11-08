@@ -2788,6 +2788,49 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             input.subagent.task = task;
             if (input.startedAt !== undefined) input.subagent.startedAt = input.startedAt;
 
+            // Native lifecycle snapshots can settle a child without a turn/completed notification.
+            if (
+              !isOrchestrationV2WorkActive(status) &&
+              !settled &&
+              input.completedAt === undefined
+            ) {
+              const nativeTurnId = Array.from(input.subagent.nativeTurnIds).at(-1);
+              const childNodeId =
+                nativeTurnId === undefined || input.subagent.nativeTurnIds.size === 1
+                  ? input.subagent.childRootNodeId
+                  : idAllocator.derive.nodeFromProviderItem({
+                      driver: CODEX_PROVIDER,
+                      nativeItemId: `${nativeTurnId}:thread-root`,
+                    });
+              yield* emitProviderEvent({
+                type: "node.updated",
+                driver: CODEX_PROVIDER,
+                node: {
+                  id: childNodeId,
+                  threadId: input.subagent.childThreadId,
+                  runId: null,
+                  parentNodeId: null,
+                  rootNodeId: childNodeId,
+                  kind: "root_turn",
+                  status,
+                  countsForRun: false,
+                  providerThreadId: input.subagent.providerThread.id,
+                  providerTurnId:
+                    nativeTurnId === undefined
+                      ? null
+                      : idAllocator.derive.providerTurn({
+                          driver: CODEX_PROVIDER,
+                          nativeTurnId,
+                        }),
+                  nativeItemRef: task.nativeTaskRef,
+                  runtimeRequestId: null,
+                  checkpointScopeId: null,
+                  startedAt: task.startedAt,
+                  completedAt,
+                },
+              });
+            }
+
             yield* emitProviderEvent({
               type: "subagent.updated",
               driver: CODEX_PROVIDER,
