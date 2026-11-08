@@ -324,6 +324,19 @@ class NightlyTests(unittest.TestCase):
             self.assertIn('current_rollback_unverified', refused['held'])
             self.assertEqual(refused['removed'], [])
             self.assertTrue(old.exists())
+            (current / 'state.sqlite').unlink()
+            with sqlite3.connect(current / 'state.sqlite') as db:
+                db.execute('CREATE TABLE saved(value TEXT)')
+            for name in ('20261107030000000-0123456789ab', '20261108030000000-0123456789ab'):
+                payload = root / 'millie' / name / 'rollback'
+                payload.mkdir(parents=True)
+                with sqlite3.connect(payload / 'state.sqlite') as db:
+                    db.execute('CREATE TABLE saved(value TEXT)')
+                (payload.parent / 'rollback.inventory.json').write_text(json.dumps({'sha256': archive.inventory(payload)}))
+            newest = archive.prune(root, 'millie', apply=True, probe=lambda path: None, retained_marker=marker)
+            self.assertEqual(newest['kept'], '20261108030000000-0123456789ab')
+            self.assertFalse((root / 'millie/20261107030000000-0123456789ab/rollback').exists())
+            self.assertTrue((current / 'state.sqlite').exists())
 
     def test_unsigned_archive_app_cannot_replace_the_only_recovery_copy(self):
         import sqlite3

@@ -253,11 +253,14 @@ def _prune(root, host, apply, probe, retained_marker=None):
         result["verification"] = "no_deletion_no_health_claim"
         return result
     keeper = current
-    for path in candidates if current is None else []:
+    for path in candidates:
+        if current is not None and _stamp(path.name) <= _stamp(current.name):
+            continue
         try:
             _directory(path)
             _healthy(path, host)
             keeper = path
+            recheck_current = None
             result["kept"] = path.name
             break
         except (RuntimeError, OSError, ValueError, sqlite3.Error):
@@ -265,7 +268,7 @@ def _prune(root, host, apply, probe, retained_marker=None):
     if keeper is None:
         return result
     result['kept'] = keeper.name
-    if current is not None:
+    if keeper == current:
         result['retained_current'] = True
     for path in candidates:
         if _stamp(path.name) >= _stamp(keeper.name):
