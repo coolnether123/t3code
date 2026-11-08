@@ -1238,6 +1238,20 @@ describe("composerDraftStore project draft thread mapping", () => {
     });
   });
 
+  it("persists a section-bound draft and clears that section when its project changes", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    store.setDraftThreadContext(draftId, { sectionId: "ita" });
+    store.setPrompt(draftId, "Which workspace and rules?");
+    const persisted = partializeComposerDraftStoreState(useComposerDraftStore.getState());
+    expect(Object.values(persisted.draftThreadsByThreadKey)[0]?.sectionId).toBe("ita");
+    const options = useComposerDraftStore.persist.getOptions();
+    const merged = options.merge?.(persisted, useComposerDraftStore.getState());
+    expect(Object.values(merged?.draftThreadsByThreadKey ?? {})[0]?.sectionId).toBe("ita");
+    store.setDraftThreadContext(draftId, { projectRef: remoteProjectRef });
+    expect(store.getDraftThread(draftId)?.sectionId).toBeNull();
+  });
+
   it("pins manual workspace choices and can return to automatic routing without losing the prompt", () => {
     const store = useComposerDraftStore.getState();
     store.setProjectDraftThreadId(projectRef, draftId, { threadId });

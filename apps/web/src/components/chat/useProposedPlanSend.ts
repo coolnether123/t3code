@@ -313,6 +313,7 @@ export function useImplementPlanInNewThread(input: ImplementPlanInNewThreadInput
         interactionMode: "default",
         branch: activeThreadBranch,
         worktreePath: activeThread.worktreePath,
+        sectionId: activeThread.sectionId ?? null,
         createdAt,
       },
     });

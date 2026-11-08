@@ -39,6 +39,8 @@ export interface SidebarProjectSectionsProps {
   readonly renderThread: (thread: EnvironmentThreadShell, parent: string) => ReactNode;
   readonly onOpenSection: (project: ScopedProjectRef, section: ProjectSection) => void;
   readonly canNest?: (project: ScopedProjectRef) => boolean;
+  readonly onNewThread?: (project: ScopedProjectRef, sectionId: string | null) => void;
+  readonly isSettled?: (thread: EnvironmentThreadShell) => boolean;
 }
 
 function SectionGroup(props: {
@@ -54,6 +56,7 @@ function SectionGroup(props: {
   readonly onReorder: (direction: -1 | 1) => void;
   readonly onOpen: () => void;
   readonly onCreateChild: (() => void) | undefined;
+  readonly onNewThread: (() => void) | undefined;
   readonly first: boolean;
   readonly last: boolean;
 }) {
@@ -91,6 +94,16 @@ function SectionGroup(props: {
           <span className="min-w-0 flex-1 truncate">{name}</span>
           <span className="text-3xs tabular-nums">{props.count}</span>
         </button>
+        {props.onNewThread ? (
+          <Button
+            size="xs"
+            variant="ghost-muted"
+            aria-label={`New chat in ${name}`}
+            onClick={props.onNewThread}
+          >
+            <PlusIcon aria-hidden /> New chat
+          </Button>
+        ) : null}
         {props.section ? (
           <>
             <Button
@@ -154,6 +167,7 @@ export function SidebarProjectSections(props: SidebarProjectSectionsProps) {
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expandedSettled, setExpandedSettled] = useState<ReadonlySet<string>>(new Set());
   const startEdit = (
     project: EnvironmentProject,
     section: ProjectSection | null,
@@ -244,6 +258,12 @@ export function SidebarProjectSections(props: SidebarProjectSectionsProps) {
           );
           const siblingIndex = siblings.findIndex((entry) => entry.id === section?.id);
           const parent = projectSectionDropId(projectRef, group.id);
+          const isSettled =
+            props.isSettled ??
+            ((thread: EnvironmentThreadShell) => thread.settledOverride === "settled");
+          const settled = group.threads.filter(isSettled);
+          const active = group.threads.filter((thread) => !isSettled(thread));
+          const showSettled = expandedSettled.has(parent);
           return (
             <SectionGroup
               key={group.id ?? "unsorted"}
@@ -251,8 +271,12 @@ export function SidebarProjectSections(props: SidebarProjectSectionsProps) {
               section={section}
               canUpdate={canUpdate}
               count={
-                group.threads.length +
-                children.reduce((count, entry) => count + entry.threads.length, 0)
+                active.length +
+                children.reduce(
+                  (count, entry) =>
+                    count + entry.threads.filter((thread) => !isSettled(thread)).length,
+                  0,
+                )
               }
               collapsed={group.collapsed}
               first={siblingIndex === 0}
@@ -260,6 +284,9 @@ export function SidebarProjectSections(props: SidebarProjectSectionsProps) {
               onOpen={() => {
                 if (section) props.onOpenSection(projectRef, section);
               }}
+              onNewThread={
+                props.onNewThread ? () => props.onNewThread?.(projectRef, group.id) : undefined
+              }
               onCreateChild={
                 section && !section.parentSectionId && props.canNest?.(projectRef)
                   ? () => startEdit(project, null, false, section.id)
@@ -288,7 +315,31 @@ export function SidebarProjectSections(props: SidebarProjectSectionsProps) {
                   );
               }}
             >
-              {group.threads.map((thread) => props.renderThread(thread, parent))}
+              {active.map((thread) => props.renderThread(thread, parent))}
+              {settled.length > 0 ? (
+                <li className="px-2">
+                  <Button
+                    size="xs"
+                    variant="ghost-muted"
+                    aria-expanded={showSettled}
+                    onClick={() =>
+                      setExpandedSettled((previous) => {
+                        const next = new Set(previous);
+                        if (next.has(parent)) next.delete(parent);
+                        else next.add(parent);
+                        return next;
+                      })
+                    }
+                  >
+                    Settled ({settled.length})
+                  </Button>
+                  {showSettled ? (
+                    <ul role="presentation">
+                      {settled.map((thread) => props.renderThread(thread, parent))}
+                    </ul>
+                  ) : null}
+                </li>
+              ) : null}
               {children.length ? (
                 <li role="presentation" className="ml-3 border-l border-sidebar-border pl-1">
                   <ul role="presentation">{children.map(renderGroup)}</ul>

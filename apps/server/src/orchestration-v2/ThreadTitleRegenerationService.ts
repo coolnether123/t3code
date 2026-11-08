@@ -2,6 +2,7 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { isAttachmentOnlyBootstrapPrompt } from "@t3tools/shared/composerContextReferences";
 import {
   CommandId,
+  dateOnlyThreadTitle,
   type ChatAttachment,
   type MessageId,
   type OrchestrationV2AppThread,
@@ -176,11 +177,11 @@ const make = Effect.gen(function* () {
         instructions: settings.threadTitleInstructions,
         modelSelection: settings.textGenerationModelSelection,
       });
-      const generatedTitle = result.title.trim();
+      const generatedTitle = dateOnlyThreadTitle(result.title.trim());
       return generatedTitle === "New thread" ||
         (input.kind.type === "regenerate" && generatedTitle === projection.thread.title.trim())
         ? { type: "complete" as const }
-        : { type: "complete" as const, title: result.title };
+        : { type: "complete" as const, title: generatedTitle };
     }).pipe(
       Effect.retry({
         times: input.kind.type === "initial" ? 2 : 0,

@@ -65,6 +65,14 @@ function metadataCommand(input: {
   readonly update: ThreadMetadataMcpUpdateInput;
 }): Extract<OrchestrationV2Command, { readonly type: "thread.metadata.update" }> {
   switch (input.update.action) {
+    case "move_section":
+      return {
+        type: "thread.metadata.update",
+        commandId: input.commandId,
+        threadId: input.threadId,
+        sectionId: input.update.sectionId!,
+        sectionAssignment: "manual",
+      };
     case "rename":
       return {
         type: "thread.metadata.update",
@@ -88,7 +96,7 @@ function resultFromThread(input: {
   readonly sequence: number;
   readonly thread: Pick<
     OrchestrationV2AppThread,
-    "id" | "title" | "titleRegeneration" | "linkedPullRequest" | "updatedAt"
+    "id" | "title" | "titleRegeneration" | "linkedPullRequest" | "updatedAt" | "sectionId"
   >;
 }): ThreadMetadataMcpUpdateResult {
   return {
@@ -97,6 +105,7 @@ function resultFromThread(input: {
     commandId: input.commandId,
     sequence: input.sequence,
     title: input.thread.title,
+    sectionId: input.thread.sectionId ?? null,
     titleRegeneration:
       input.thread.titleRegeneration === undefined || input.thread.titleRegeneration === null
         ? null
@@ -125,6 +134,15 @@ const make = Effect.gen(function* () {
     }
 
     const threadId = input.threadId ?? scope.thread?.threadId;
+    if (
+      input.action === "move_section" &&
+      (scope.thread === undefined || threadId !== scope.thread.threadId)
+    ) {
+      return yield* failure(
+        "capability_denied",
+        "An agent may move only its own calling thread into a section.",
+      );
+    }
     if (threadId === undefined) {
       return yield* failure(
         "target_required",

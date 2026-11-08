@@ -262,13 +262,22 @@ describe("sidebar project sections", () => {
     );
     await page.viewport(1024, 900);
     await using screen = await render(ui());
+    expect(
+      screen.getByRole("button", { name: "New chat in Client A", exact: true }).element(),
+    ).not.toBeNull();
     for (const other of otherThreads) {
-      expect(
-        screen.container.querySelector(
-          `[data-thread-item="${scopedThreadKey(scopeThreadRef(other.environmentId, other.id))}"]`,
-        ),
-      ).not.toBeNull();
+      const row = screen.container.querySelector(
+        `[data-thread-item="${scopedThreadKey(scopeThreadRef(other.environmentId, other.id))}"]`,
+      );
+      if (other.settledOverride === "settled") expect(row).toBeNull();
+      else expect(row).not.toBeNull();
     }
+    await userEvent.click(screen.getByRole("button", { name: "Settled (1)", exact: true }));
+    expect(
+      screen.container.querySelector(
+        `[data-thread-item="${scopedThreadKey(scopeThreadRef(otherThreads[1]!.environmentId, otherThreads[1]!.id))}"]`,
+      ),
+    ).not.toBeNull();
     const source = screen.container.querySelector<HTMLElement>(
       `[data-thread-item="${scopedThreadKey(scopeThreadRef(environmentId, thread.id))}"] [data-sidebar-row]`,
     )!;

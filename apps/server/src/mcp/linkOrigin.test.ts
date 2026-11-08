@@ -6,6 +6,8 @@ import {
   CommandId,
   ContextTransferId,
   EnvironmentId,
+  EventId,
+  MessageId,
   NodeId,
   type OrchestrationV2Run,
   ProjectId,
@@ -22,6 +24,7 @@ import * as ServerConfig from "../config.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import { makeSubagentChildThread } from "@t3tools/provider-core/server/subagentProjection";
@@ -64,6 +67,7 @@ const adapter = {
 const layerDatabase = SqlitePersistence.layerMemory;
 const layerOrchestrator = Layer.mergeAll(
   layerDatabase,
+  ProjectStore.layer.pipe(Layer.provide(layerDatabase)),
   ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
   ProviderReplayHarness.layerWithRegistry(
     { name: "link-origin" },
@@ -392,6 +396,74 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
       assert.equal((yield* projections.getThreadShell(users))?.title, "The user's own");
       // An ordinary outside agent is not fenced.
       assert.equal((yield* rename(claudeCode, users)).isError, false);
+      const selfScope: McpInvocationContext.McpInvocationScope = {
+        ...claudeCode,
+        thread: {
+          threadId: users,
+          providerSessionId: "session:self",
+          providerInstanceId: instanceId,
+          runtimeMode: "auto",
+        },
+      };
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projects = yield* ProjectStore.ProjectStoreV2;
+      yield* projects.apply({
+        sequence: 1,
+        eventId: EventId.make("self-move-project"),
+        aggregateKind: "project",
+        aggregateId: projectId,
+        occurredAt: "2026-11-08T00:00:00.000Z",
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "project.created",
+        payload: {
+          projectId,
+          title: "Self move project",
+          workspaceRoot: "/p/t3code",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: "2026-11-08T00:00:00.000Z",
+          updatedAt: "2026-11-08T00:00:00.000Z",
+        },
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("self-move-start"),
+        threadId: users,
+        messageId: MessageId.make("self-move-message"),
+        text: "Start self-move test",
+        attachments: [],
+        createdBy: "user",
+        creationSource: "web",
+        dispatchMode: { type: "start_immediately" },
+      });
+      const movedSelf = yield* call(selfScope, "t3_thread_update", {
+        action: "move_section",
+        sectionId: null,
+      });
+      assert.equal(movedSelf.isError, false, JSON.stringify(movedSelf.content));
+      assert.equal(
+        failureCode(
+          yield* call(selfScope, "t3_thread_update", {
+            threadId: ownLaunch,
+            action: "move_section",
+            sectionId: null,
+          }),
+        ),
+        "capability_denied",
+      );
+      assert.equal(
+        failureCode(
+          yield* call(claudeCode, "t3_thread_update", {
+            threadId: users,
+            action: "move_section",
+            sectionId: null,
+          }),
+        ),
+        "capability_denied",
+      );
       // Naming this environment's own id is still this environment's thread.
       for (const [name, args] of [
         ["t3_thread_send", { message: "From the laptop." }],

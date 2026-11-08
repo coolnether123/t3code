@@ -1,5 +1,6 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as ProcessRunner from "../processRunner.ts";
 import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
@@ -27,6 +28,7 @@ import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -133,6 +135,7 @@ function startWithMissingWorktree(
   const createWorktree = vi.fn(() => Effect.succeed({} as never));
   const listLocalBranchNames = vi.fn(() => Effect.succeed(["feature/restore"]));
   const layer = ProviderTurnStart.layer.pipe(
+    Layer.provide(Layer.mock(ProcessRunner.ProcessRunner)({})),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
@@ -270,6 +273,7 @@ it.each([
 
 function makeLocalCommandHarness(input: {
   readonly text: string;
+  readonly startup?: string;
   readonly sections?: readonly ProjectSection[];
   readonly worktreePath?: string;
   readonly worktreesDir?: string;
@@ -917,6 +921,21 @@ function makeLocalCommandHarness(input: {
   );
   const layer = ProviderTurnStart.layer.pipe(
     Layer.provide(
+      Layer.mock(ProcessRunner.ProcessRunner)({
+        run: () =>
+          Effect.succeed({
+            stdout: input.startup ?? "",
+            stderr: "",
+            code: 0 as never,
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            stdoutInvalidUtf8: false,
+            stderrInvalidUtf8: false,
+          }),
+      }),
+    ),
+    Layer.provide(
       Layer.mergeAll(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
           prepareProviderHandoff: (handoff) =>
@@ -1094,6 +1113,47 @@ effectIt.effect.each(["codex", "antigravity"] as const)(
         harness.projection().messages.find((message) => message.id === input.message.messageId)
           ?.text,
       ).toBe("Continue.");
+    }),
+);
+
+effectIt.effect(
+  "loads current Workroom startup alongside section rules on Christine's first turn",
+  () =>
+    Effect.gen(function* () {
+      const home = yield* HostProcess.HomeDirectory;
+      const harness = makeLocalCommandHarness({
+        text: "Which workspace and rules?",
+        startup: "CURRENT WORKROOM AGENTS AND ROUTING",
+        workspaceRoot: `${home}/Codex_Workroom`,
+        failReadsAfterRunning: true,
+        sections: [
+          {
+            id: "ita",
+            name: "IT Ally",
+            collapsed: false,
+            rules: "Use ITA procedures.",
+            scope: { clientName: "IT Ally" },
+          },
+        ],
+      });
+      const initial = harness.projection();
+      harness.setProjection({
+        ...initial,
+        thread: { ...initial.thread, sectionId: "ita" },
+        runs: initial.runs.map((run) => ({
+          ...run,
+          ordinal: 1,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex-christine"),
+            model: "gpt-6.1-sol",
+          },
+        })),
+      });
+      yield* harness.start;
+      const started = harness.startRootRun.mock.calls[0]![0];
+      expect(started.sectionContext).toContain("CURRENT WORKROOM AGENTS AND ROUTING");
+      expect(started.sectionContext).toContain("Use ITA procedures.");
+      expect(started.message.text).toBe("Which workspace and rules?");
     }),
 );
 

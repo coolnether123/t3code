@@ -1332,6 +1332,7 @@ export function useComposerSend(input: ComposerSendInput) {
               ...(isLocalDraftThread
                 ? {
                     createThread: {
+                      sectionId: activeThread.sectionId ?? null,
                       projectId: activeProject.id,
                       title,
                       modelSelection: threadCreateModelSelection,

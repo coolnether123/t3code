@@ -5,6 +5,7 @@ const testState = vi.hoisted(() => {
   let completeProjectFileRead: (value: null) => void = () => undefined;
   let projectFileRead = Promise.resolve<null>(null);
   let projectRemoved = false;
+  let workspaceRoot = "/remote/project";
   let connectedEnvironmentIds = ["environment-primary", "environment-ssh"];
   let targetSettings = {
     defaultThreadEnvMode: "local" as "local" | "worktree" | null,
@@ -61,6 +62,12 @@ const testState = vi.hoisted(() => {
     get projectRemoved() {
       return projectRemoved;
     },
+    get workspaceRoot() {
+      return workspaceRoot;
+    },
+    useWorkroom() {
+      workspaceRoot = "/Users/test/Codex_Workroom";
+    },
     get connectedEnvironmentIds() {
       return connectedEnvironmentIds;
     },
@@ -95,6 +102,7 @@ const testState = vi.hoisted(() => {
       openDraftRoute = null;
       draftsWithUserText = new Set();
       projectRemoved = false;
+      workspaceRoot = "/remote/project";
       connectedEnvironmentIds = ["environment-primary", "environment-ssh"];
       targetSettings = {
         defaultThreadEnvMode: workspaceDefaults.envMode,
@@ -107,6 +115,7 @@ const testState = vi.hoisted(() => {
       draftStore.setDraftThreadContext.mockClear();
       draftStore.setLogicalProjectDraftThreadId.mockClear();
       draftStore.setPrompt.mockClear();
+      draftStore.setModelSelection.mockClear();
       projectFileRead = new Promise<null>((resolve) => {
         completeProjectFileRead = resolve;
       });
@@ -218,7 +227,9 @@ vi.mock("../state/entities", () => {
   const project = {
     id: "project-remote",
     environmentId: "environment-ssh",
-    workspaceRoot: "/remote/project",
+    get workspaceRoot() {
+      return testState.workspaceRoot;
+    },
     defaultThreadEnvMode: null,
     defaultModelSelection: null,
   };
@@ -295,6 +306,32 @@ describe.each([
       "Read the playbook. ",
     );
     expect(testState.draftStore.setPrompt.mock.invocationCallOrder[0]).toBeLessThan(
+      testState.router.navigate.mock.invocationCallOrder[0] ?? 0,
+    );
+  });
+
+  it("binds the section and Christine's Workroom model before navigation", async () => {
+    testState.reset(draft);
+    testState.useWorkroom();
+    const pending = useNewThreadHandler()(
+      { environmentId: "environment-ssh", projectId: "project-remote" } as never,
+      { sectionId: "ita", envMode: "local" },
+    );
+    testState.completeProjectFileRead(null);
+    const opened = await pending;
+    expect(testState.draftStore.setDraftThreadContext).toHaveBeenCalledWith(opened?.draftId, {
+      sectionId: "ita",
+    });
+    expect(testState.draftStore.setModelSelection).toHaveBeenLastCalledWith(
+      opened?.draftId,
+      {
+        instanceId: "codex-christine",
+        model: "gpt-6.1-sol",
+        options: [{ id: "reasoningEffort", value: "high" }],
+      },
+      { replaceOptions: true },
+    );
+    expect(testState.draftStore.setModelSelection.mock.invocationCallOrder.at(-1)).toBeLessThan(
       testState.router.navigate.mock.invocationCallOrder[0] ?? 0,
     );
   });

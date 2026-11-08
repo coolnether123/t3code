@@ -3201,6 +3201,21 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const showJumpHints = useThreadJumpHintsVisible(shouldShowJumpHintsNow);
 
   const handleNewThreadClick = (event?: ReactMouseEvent) => {
+    const workroom = projects.find(
+      (project) =>
+        project.environmentId === primaryEnvironmentId &&
+        project.workspaceRoot.endsWith("/Codex_Workroom") &&
+        project.archivedAt == null,
+    );
+    if (workroom && !event?.shiftKey) {
+      if (isMobile) setOpenMobile(false);
+      void handleNewThread(scopeProjectRef(workroom.environmentId, workroom.id), {
+        envMode: "local",
+        worktreePath: null,
+        branch: null,
+      });
+      return;
+    }
     if (
       legacySidebarEnabled ||
       shouldCreateNewThreadInCurrentProject(
@@ -3603,7 +3618,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                         );
                         const isCard =
                           section === "active" || section === "pinned" || section === "working";
-                        const children = childrenByParentKey.get(threadKey) ?? [];
+                        const children = (childrenByParentKey.get(threadKey) ?? []).filter(
+                          (child) =>
+                            !sectionLayoutEnabled ||
+                            section === "settled" ||
+                            sectionByThreadKey.get(threadShellKey(child)) !== "settled",
+                        );
                         const rowVariant = nested
                           ? "slim"
                           : folderRow
@@ -3768,6 +3788,18 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             key="project-sections"
                             projects={sectionProjects}
                             threads={searchableThreads}
+                            isSettled={(thread) =>
+                              sectionByThreadKey.get(threadShellKey(thread)) === "settled"
+                            }
+                            onNewThread={(project, sectionId) => {
+                              if (isMobile) setOpenMobile(false);
+                              void handleNewThread(project, {
+                                sectionId,
+                                envMode: "local",
+                                worktreePath: null,
+                                branch: null,
+                              });
+                            }}
                             canUpdate={canUpdateSections}
                             onUpdate={updateProjectSections}
                             canNest={(project) =>

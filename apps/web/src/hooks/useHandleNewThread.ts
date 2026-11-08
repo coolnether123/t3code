@@ -3,7 +3,12 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import { DEFAULT_SERVER_SETTINGS, type ScopedProjectRef, type ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  ProviderInstanceId,
+  type ScopedProjectRef,
+  type ThreadId,
+} from "@t3tools/contracts";
 import { type AnyRouter, useRouter } from "@tanstack/react-router";
 import {
   composerDraftHasUserContent,
@@ -86,6 +91,7 @@ export function createNewThreadHandler(router: AnyRouter) {
       replace?: boolean;
       /** Composer text for the draft, set before it shows. A draft with user text keeps it. */
       prompt?: string;
+      sectionId?: string | null;
     },
   ): Promise<{ draftId: DraftId; threadId: ThreadId } | null> => {
     const projects = readProjects();
@@ -107,6 +113,20 @@ export function createNewThreadHandler(router: AnyRouter) {
     } = useComposerDraftStore.getState();
     // Never over text the user wrote: a draft can gain some while this awaits.
     const seedPrompt = (draftId: DraftId) => {
+      if (composerDraftHasUserContent(getComposerDraft(draftId))) return;
+      if (options?.sectionId !== undefined)
+        setDraftThreadContext(draftId, { sectionId: options.sectionId });
+      if (project?.workspaceRoot.endsWith("/Codex_Workroom")) {
+        setModelSelection(
+          draftId,
+          {
+            instanceId: ProviderInstanceId.make("codex-christine"),
+            model: "gpt-6.1-sol",
+            options: [{ id: "reasoningEffort", value: "high" }],
+          },
+          { replaceOptions: true },
+        );
+      }
       if (options?.prompt === undefined) return;
       if (composerDraftHasUserContent(getComposerDraft(draftId))) return;
       setPrompt(draftId, options.prompt);
@@ -428,6 +448,10 @@ export function resolveDefaultProjectRef(
   projects: ReadonlyArray<EnvironmentProject>,
   projectOrder: readonly string[],
 ): ScopedProjectRef | null {
+  const workroom = projects.find(
+    (project) => project.archivedAt == null && project.workspaceRoot.endsWith("/Codex_Workroom"),
+  );
+  if (workroom) return scopeProjectRef(workroom.environmentId, workroom.id);
   const [defaultProject] = orderItemsByPreferredIds({
     items: projects.filter((project) => project.archivedAt == null),
     preferredIds: projectOrder,

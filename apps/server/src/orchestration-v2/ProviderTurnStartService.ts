@@ -58,6 +58,8 @@ import {
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import { sectionTurnContext } from "./sectionTurnContext.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as ProcessRunner from "../processRunner.ts";
 import {
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
@@ -146,6 +148,7 @@ export const layer: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | RunExecutionService.RunExecutionServiceV2
   | RuntimePolicy.RuntimePolicyV2
+  | ProcessRunner.ProcessRunner
 > = Layer.effect(
   ProviderTurnStartServiceV2,
   Effect.gen(function* () {
@@ -162,6 +165,7 @@ export const layer: Layer.Layer<
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
+    const runner = yield* ProcessRunner.ProcessRunner;
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
 
     const resolveRecreateBase = Effect.fn("ProviderTurnStartService.resolveRecreateBase")(
@@ -364,6 +368,32 @@ export const layer: Layer.Layer<
           previous: previousSectionRun?.sectionContext,
           move: projection.thread.sectionMove,
         });
+      let workroomStartup = "";
+      const hostHome = yield* HostProcess.HomeDirectory;
+      if (
+        run.ordinal === 1 &&
+        run.modelSelection.instanceId === "codex-christine" &&
+        Option.isSome(sectionProject) &&
+        path.resolve(sectionProject.value.workspaceRoot) === path.join(hostHome, "Codex_Workroom")
+      ) {
+        const startup = yield* runner.run({
+          command: "/usr/bin/python3",
+          args: [
+            "-c",
+            "import sys;from pathlib import Path;root=Path(sys.argv[1]);sys.path.insert(0,str(root/'Automation_Harnesses/t3_backend'));from startup_parity import prepare_startup;value=prepare_startup(root,account_home=Path.home()/'.codex',prompt='Follow the current user assignment and section rules.');print(value['prompt'])",
+            path.join(hostHome, "Codex_Workroom"),
+          ],
+          timeout: "20 seconds",
+          maxOutputBytes: 256 * 1024,
+        });
+        if (startup.code !== 0 || startup.stdout.trim().length === 0) {
+          return yield* new ProviderTurnStartError({
+            runId,
+            cause: "Current Workroom startup sources unavailable",
+          });
+        }
+        workroomStartup = startup.stdout;
+      }
       const rootNode = projection.nodes.find((candidate) => candidate.id === run.rootNodeId);
       const attempt = projection.attempts.find((candidate) => candidate.id === run.activeAttemptId);
       const providerThread = projection.providerThreads.find(
@@ -1746,10 +1776,11 @@ export const layer: Layer.Layer<
         },
         modelSelection: run.modelSelection,
         runtimePolicy: resolvedRuntimePolicy,
-        ...(turnSection.sectionId !== null ||
+        ...(workroomStartup.length > 0 ||
+        turnSection.sectionId !== null ||
         turnSection.moveId !== undefined ||
         Object.keys(turnSection.taskScope).length > 0
-          ? { sectionContext: turnSection.text }
+          ? { sectionContext: [workroomStartup, turnSection.text].filter(Boolean).join("\n\n") }
           : {}),
       });
     });
