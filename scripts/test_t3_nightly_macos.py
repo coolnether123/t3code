@@ -239,6 +239,60 @@ class NightlyTests(unittest.TestCase):
                 archive.archive(source, "elora", "20261105-030000-123", archive_root=root / "archive")
             self.assertEqual((target / "state.sqlite").read_bytes(), b"synthetic saved data")
 
+    def test_rollback_retention_keeps_newest_healthy_and_receipts(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve() / "archive"
+            for name in ("20261105-030000-123", "20261106-030000-123"):
+                receipt = root / "millie" / name
+                payload = receipt / "rollback"
+                payload.mkdir(parents=True)
+                with sqlite3.connect(payload / "state.sqlite") as db:
+                    db.execute("CREATE TABLE saved(value TEXT)")
+                (receipt / "rollback.inventory.json").write_text(json.dumps({"source": str(payload), "sha256": archive.inventory(payload)}))
+            newest = root / "millie/20261107-030000-123"
+            (newest / "rollback").mkdir(parents=True)
+            (newest / "rollback/state.sqlite").write_bytes(b"incomplete")
+            result = archive.prune(root, "millie", apply=True, probe=lambda path: None)
+            self.assertEqual(result["kept"], "20261106-030000-123")
+            self.assertFalse((root / "millie/20261105-030000-123/rollback").exists())
+            self.assertTrue((root / "millie/20261105-030000-123/rollback.inventory.json").exists())
+            self.assertTrue((newest / "rollback/state.sqlite").exists())
+            self.assertTrue((root / "millie/20261106-030000-123/rollback/state.sqlite").exists())
+            (root / "millie/20261105-030000-123/rollback").mkdir()
+            (root / "millie/20261105-030000-123/rollback/state.sqlite").write_bytes(b"changed")
+            held = archive.prune(root, "millie", apply=True, probe=lambda path: (_ for _ in ()).throw(RuntimeError("live owner")))
+            self.assertIn("20261105-030000-123", held["held"])
+            self.assertTrue((root / "millie/20261105-030000-123/rollback").exists())
+
+    def test_archive_retention_fails_closed_for_unhealthy_and_locked_payloads(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve() / "archive"
+            older = root / "millie/20261105-030000-123/rollback"
+            newer = root / "millie/20261106-030000-123/rollback"
+            for payload in (older, newer):
+                payload.mkdir(parents=True)
+                with sqlite3.connect(payload / "state.sqlite") as db:
+                    db.execute("CREATE TABLE saved(value TEXT)")
+                (payload.parent / "rollback.inventory.json").write_text(json.dumps({"sha256": archive.inventory(payload)}))
+            preview = archive.prune(root, "millie", probe=lambda path: None)
+            self.assertEqual(preview["eligible"], [older.parent.name])
+            self.assertTrue(older.exists())
+            with archive.retention_lock(root):
+                with self.assertRaises(BlockingIOError):
+                    archive.prune(root, "millie", apply=True, probe=lambda path: None)
+            (newer / "state.sqlite").write_bytes(b"corrupt but accurately inventoried")
+            (newer.parent / "rollback.inventory.json").write_text(json.dumps({"sha256": archive.inventory(newer)}))
+            result = archive.prune(root, "millie", apply=True, probe=lambda path: None)
+            self.assertEqual(result["kept"], older.parent.name)
+            self.assertEqual(result["removed"], [])
+            self.assertTrue(older.exists())
+            alias = root.with_name("alias")
+            alias.symlink_to(root, target_is_directory=True)
+            with self.assertRaises(RuntimeError):
+                archive.prune(alias, "millie", apply=True, probe=lambda path: None)
+
 
 if __name__ == "__main__":
     unittest.main()
