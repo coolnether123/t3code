@@ -1,5 +1,6 @@
 import {
   boundAttachmentIds,
+  buildLocalDraftThread,
   buildExpiredTerminalContextToastCopy,
   mergeDirectPreviewAnnotation,
   planComposerTurn,
@@ -58,6 +59,28 @@ const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");
 const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
+
+it("carries a section-bound draft through the composer thread presented for first send", () => {
+  const thread = buildLocalDraftThread(
+    threadId,
+    {
+      threadId,
+      environmentId,
+      projectId,
+      logicalProjectKey: "workroom",
+      createdAt: now,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      envMode: "local",
+      startFromOrigin: false,
+      sectionId: "ita",
+    },
+    { instanceId: ProviderInstanceId.make("codex-christine"), model: "gpt-6.1-sol" },
+  );
+  expect(thread.sectionId).toBe("ita");
+});
 
 function makeThread(overrides: Partial<Thread> = {}): Thread {
   return makeThreadFixture({

@@ -9,3 +9,12 @@ it("removes launcher clock prefixes without changing dates or times in the subje
   );
   expect(dateOnlyThreadTitle("Call at 4:30 p.m.")).toBe("Call at 4:30 p.m.");
 });
+
+it("adds the creation date to an undated generated title using the Workroom timezone", () => {
+  expect(dateOnlyThreadTitle("Workspace and rules", "2026-11-09T02:00:00Z")).toBe(
+    "11/8 Workspace and rules",
+  );
+  expect(dateOnlyThreadTitle("11/7 Existing date", "2026-11-09T02:00:00Z")).toBe(
+    "11/7 Existing date",
+  );
+});

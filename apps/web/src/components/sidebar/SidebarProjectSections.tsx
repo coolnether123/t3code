@@ -94,16 +94,6 @@ function SectionGroup(props: {
           <span className="min-w-0 flex-1 truncate">{name}</span>
           <span className="text-3xs tabular-nums">{props.count}</span>
         </button>
-        {props.onNewThread ? (
-          <Button
-            size="xs"
-            variant="ghost-muted"
-            aria-label={`New chat in ${name}`}
-            onClick={props.onNewThread}
-          >
-            <PlusIcon aria-hidden /> New chat
-          </Button>
-        ) : null}
         {props.section ? (
           <>
             <Button
@@ -146,6 +136,18 @@ function SectionGroup(props: {
           </>
         ) : null}
       </div>
+      {props.onNewThread ? (
+        <div className="pb-1 pl-8">
+          <Button
+            size="xs"
+            variant="ghost-muted"
+            aria-label={`New chat in ${name}`}
+            onClick={props.onNewThread}
+          >
+            <PlusIcon aria-hidden /> New chat
+          </Button>
+        </div>
+      ) : null}
       {!collapsed ? (
         <ul role="presentation" className="flex min-h-3 flex-col gap-px">
           {props.children}

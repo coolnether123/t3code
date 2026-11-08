@@ -13,6 +13,7 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -177,7 +178,10 @@ const make = Effect.gen(function* () {
         instructions: settings.threadTitleInstructions,
         modelSelection: settings.textGenerationModelSelection,
       });
-      const generatedTitle = dateOnlyThreadTitle(result.title.trim());
+      const generatedTitle = dateOnlyThreadTitle(
+        result.title.trim(),
+        DateTime.formatIso(projection.thread.createdAt),
+      );
       return generatedTitle === "New thread" ||
         (input.kind.type === "regenerate" && generatedTitle === projection.thread.title.trim())
         ? { type: "complete" as const }

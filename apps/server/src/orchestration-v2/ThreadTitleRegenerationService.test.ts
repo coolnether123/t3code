@@ -315,7 +315,7 @@ describe("ThreadTitleRegenerationService", () => {
             assert.deepEqual(call?.attachments, attachments);
             const projection = yield* threads.getThreadProjection(threadId);
             assert.equal(projection.messages[0]?.text, text);
-            assert.equal(projection.thread.title, "Generated title");
+            assert.match(projection.thread.title, /^\d{1,2}\/\d{1,2} Generated title$/u);
           }).pipe(Effect.provide(harness.layer));
         }
       }),
@@ -430,7 +430,7 @@ describe("ThreadTitleRegenerationService", () => {
           assert.equal(call?.cwd, testCase.cwd);
           assert.include(call?.message, "USER:\nInvestigate the flaky login test");
           const projection = yield* threads.getThreadProjection(threadId);
-          assert.equal(projection.thread.title, "Fresh title");
+          assert.match(projection.thread.title, /^\d{1,2}\/\d{1,2} Fresh title$/u);
           assert.isNotOk(projection.thread.titleRegeneration);
         }
       }).pipe(Effect.provide(harness.layer));
@@ -510,7 +510,7 @@ describe("ThreadTitleRegenerationService", () => {
         assert.notInclude(call?.forkSource?.history, "Later work the fork never saw");
         assert.notInclude(call?.forkSource?.history, "Rolled back attempt");
         const fork = yield* threads.getThreadProjection(forkThreadId);
-        assert.equal(fork.thread.title, "Generated title");
+        assert.match(fork.thread.title, /^\d{1,2}\/\d{1,2} Generated title$/u);
       }).pipe(Effect.provide(harness.layer));
     }),
   );
