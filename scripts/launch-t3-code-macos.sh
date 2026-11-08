@@ -226,6 +226,7 @@ stop_tree() {
   for i in {1..10}; do live=0; for p in "${OWNED_PIDS[@]}"; do alive "$p" && live=1; done; [[ "$live" -eq 0 ]] && return; sleep 1; done
   for (( i=${#OWNED_PIDS[@]}-1; i>=0; i-- )); do p="${OWNED_PIDS[i]}"; alive "$p" && kill -KILL "$p" 2>/dev/null || true; done
   sleep 1; for p in "${OWNED_PIDS[@]}"; do alive "$p" && fail "captured PID $p did not stop"; done
+  return 0
 }
 stop_existing() {
   local exe="$1" r p; r="$(root "$exe")"

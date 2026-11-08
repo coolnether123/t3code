@@ -16,6 +16,25 @@ const source = NodeFS.readFileSync(scriptPath, "utf8");
 const bash = NodeOS.type() === "Windows_NT" ? "C:/Program Files/Git/bin/bash.exe" : "/bin/bash";
 
 describe("launch-t3-code-macos", () => {
+  it.each(["graceful", "forced", "stubborn"])(
+    "returns the actual captured-process stop result: %s",
+    (mode) => {
+      const stop = source.match(/stop_tree\(\) \{[\s\S]*?\n\}(?=\nstop_existing\(\))/)?.[0];
+      assert.isString(stop);
+      const program = [
+        "set -euo pipefail",
+        "OWNED_PIDS=(100); DRY_RUN=0; stopped=0",
+        "plan() { :; }; sleep() { :; }; fail() { exit 5; }",
+        `kill() { if [[ "$1" == -KILL || '${mode}' == graceful ]]; then stopped=1; fi; return 0; }`,
+        `alive() { [[ '${mode}' == stubborn || "$stopped" == 0 ]]; }`,
+        stop,
+        "stop_tree; printf stop-confirmed",
+      ].join("\n");
+      const result = NodeChildProcess.spawnSync(bash, ["-c", program], { encoding: "utf8" });
+      assert.equal(result.status, mode === "stubborn" ? 5 : 0, result.stderr);
+      if (mode !== "stubborn") assert.include(result.stdout, "stop-confirmed");
+    },
+  );
   it("does not pass the agent harness Node mode into the desktop launch", () => {
     const launch = source.match(/launch_verify\(\) \{[\s\S]*?\n\}(?=\nlaunch_previous\(\))/)?.[0];
     assert.isString(launch);
