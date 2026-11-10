@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./usageQuotaCredits": {
+      "types": "./src/usageQuotaCredits.ts",
+      "import": "./src/usageQuotaCredits.ts"
+    },
     "./usageResetReport": {
       "types": "./src/usageResetReport.ts",
       "import": "./src/usageResetReport.ts"

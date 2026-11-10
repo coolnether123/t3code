@@ -123,6 +123,7 @@ import {
   emptyClaudeQuotaHistory,
 } from "./claudeQuotaHistory.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
+import { CODEX_CREDIT_HISTORY_FILE } from "./CodexCreditSampler.ts";
 import {
   applyCodexServiceTier,
   CODEX_FAST_WINDOWS,
@@ -451,6 +452,8 @@ const encodeRatesCache = Schema.encodeEffect(
 const decodeUsageImports = Schema.decodeUnknownEffect(
   Schema.fromJsonString(UsageImportsFile as unknown as Schema.Codec<typeof UsageImportsFile.Type>),
 );
+const decodeClaudeSettings = Schema.decodeEffect(ClaudeSettings);
+const defaultClaudeSettings = Schema.decodeSync(ClaudeSettings)({});
 const decodeCodexSettings = Schema.decodeUnknownEffect(CodexSettings);
 
 /** The scan cache is narrowed by hand in `usageScanCache`, so JSON is enough here. */
@@ -731,8 +734,8 @@ export const make = Effect.gen(function* () {
     const claudeDirs = yield* Effect.forEach(
       claudeConfigs,
       Effect.fnUntraced(function* (raw) {
-        const config = yield* Schema.decodeEffect(ClaudeSettings)(raw.config ?? {}).pipe(
-          Effect.orElseSucceed(() => Schema.decodeSync(ClaudeSettings)({})),
+        const config = yield* decodeClaudeSettings(raw.config ?? {}).pipe(
+          Effect.orElseSucceed(() => defaultClaudeSettings),
         );
         const environment = yield* mergeProviderInstanceEnvironment(
           raw.environment,
@@ -1253,7 +1256,23 @@ export const make = Effect.gen(function* () {
     const quotaHistory =
       input.includeQuotaHistory || input.quotaHistoryOnly || input.quotaIntervals !== undefined
         ? (progress?.quotaHistory ??
-          (yield* readQuotaHistory(undefined).pipe(
+          (yield* Effect.gen(function* () {
+            const legacy = yield* readQuotaHistory(undefined);
+            const current = yield* readQuotaHistory(
+              path.join(config.stateDir, CODEX_CREDIT_HISTORY_FILE),
+            );
+            if (current.status !== "ready") return legacy;
+            const samples = new Map(legacy.samples.map((sample) => [sample.observedAt, sample]));
+            for (const sample of current.samples) samples.set(sample.observedAt, sample);
+            return {
+              ...legacy,
+              status: "ready" as const,
+              message: null,
+              samples: [...samples.values()].sort((a, b) =>
+                a.observedAt.localeCompare(b.observedAt),
+              ),
+            };
+          }).pipe(
             Effect.provideService(Crypto.Crypto, crypto),
             Effect.provideService(FileSystem.FileSystem, fileSystem),
             Effect.provideService(Path.Path, path),

@@ -2,6 +2,8 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
+import type { UsageQuotaCredits } from "@t3tools/contracts";
+import { decodeQuotaCredits } from "@t3tools/shared/usageQuotaCredits";
 
 const WEEK_MINUTES = 7 * 24 * 60;
 const MAX_SAMPLES = 5_000;
@@ -20,6 +22,7 @@ export interface CodexQuotaSample {
   readonly observedAt: string;
   readonly remainingPercent: number;
   readonly resetsAt: string;
+  readonly credits?: UsageQuotaCredits;
 }
 
 interface RateLimitWindow {
@@ -29,6 +32,7 @@ interface RateLimitWindow {
 }
 
 interface RateLimitSnapshot {
+  readonly credits?: unknown;
   readonly limitId?: unknown;
   readonly primary?: RateLimitWindow | null;
   readonly secondary?: RateLimitWindow | null;
@@ -78,10 +82,12 @@ export function codexWeeklyQuotaSample(
     return null;
   const resetMs = resetSeconds * 1_000;
   if (resetMs < observedAtMs) return null;
+  const credits = decodeQuotaCredits(snapshot.credits ?? response.rateLimits?.credits);
   return {
     observedAt: new Date(observedAtMs).toISOString(),
     remainingPercent: 100 - usedPercent,
     resetsAt: new Date(resetMs).toISOString(),
+    ...(credits === undefined ? {} : { credits }),
   };
 }
 
@@ -123,10 +129,12 @@ function decodePrior(text: string): {
     ) {
       throw new Error("Existing quota history contains an invalid sample.");
     }
+    const credits = decodeQuotaCredits(item.Credits);
     samples.push({
       observedAt: new Date(observed).toISOString(),
       remainingPercent: remaining,
       resetsAt: new Date(resets).toISOString(),
+      ...(credits === undefined ? {} : { credits }),
     });
     rows.push(item);
   }
@@ -159,16 +167,19 @@ export function appendCodexQuotaSample(
     throw new Error("Quota sample is invalid.");
   }
 
+  const credits = decodeQuotaCredits(sample.credits);
   const normalized: CodexQuotaSample = {
     observedAt: new Date(observedAt).toISOString(),
     remainingPercent: sample.remainingPercent,
     resetsAt: new Date(resetsAt).toISOString(),
+    ...(credits === undefined ? {} : { credits }),
   };
   const existing = prior.samples.find((item) => item.observedAt === normalized.observedAt);
   if (
     existing &&
     (existing.remainingPercent !== normalized.remainingPercent ||
-      existing.resetsAt !== normalized.resetsAt)
+      existing.resetsAt !== normalized.resetsAt ||
+      JSON.stringify(existing.credits) !== JSON.stringify(normalized.credits))
   ) {
     throw new Error("A conflicting quota sample already exists for this observation time.");
   }
@@ -180,6 +191,7 @@ export function appendCodexQuotaSample(
           ObservedAt: normalized.observedAt,
           RemainingPercent: normalized.remainingPercent,
           ResetsAt: normalized.resetsAt,
+          ...(normalized.credits === undefined ? {} : { Credits: normalized.credits }),
         },
       ].sort((a, b) => String(a.ObservedAt).localeCompare(String(b.ObservedAt)));
   if (rows.length > MAX_SAMPLES) {

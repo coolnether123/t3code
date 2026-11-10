@@ -164,11 +164,11 @@ describe("history-only usage requests", () => {
       vi.mocked(readQuotaHistory).mockClear();
       yield* service.readSummary(input);
       yield* service.readSummary(input);
-      expect(readQuotaHistory).toHaveBeenCalledTimes(1);
+      expect(readQuotaHistory).toHaveBeenCalledTimes(2);
       yield* service.readSummary({ ...input, refresh: true });
-      expect(readQuotaHistory).toHaveBeenCalledTimes(2);
+      expect(readQuotaHistory).toHaveBeenCalledTimes(4);
       yield* service.readSummary(input);
-      expect(readQuotaHistory).toHaveBeenCalledTimes(2);
+      expect(readQuotaHistory).toHaveBeenCalledTimes(4);
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
   it.effect("returns saved history without touching transcript caches or model prices", () =>

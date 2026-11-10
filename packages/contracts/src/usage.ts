@@ -143,10 +143,18 @@ export const UsagePricing = Schema.Struct({
 export type UsagePricing = typeof UsagePricing.Type;
 
 /** Sanitized observations imported from an external quota tracker. */
+export const UsageQuotaCredits = Schema.Struct({
+  hasCredits: Schema.Boolean,
+  unlimited: Schema.Boolean,
+  balance: Schema.NullOr(Schema.String),
+});
+export type UsageQuotaCredits = typeof UsageQuotaCredits.Type;
+
 export const UsageQuotaSample = Schema.Struct({
   observedAt: Schema.String,
   remainingPercent: Schema.Number,
   resetsAt: Schema.String,
+  credits: Schema.optional(UsageQuotaCredits),
 });
 export type UsageQuotaSample = typeof UsageQuotaSample.Type;
 

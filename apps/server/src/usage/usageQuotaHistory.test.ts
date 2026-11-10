@@ -29,6 +29,24 @@ const intervals = [
 ];
 
 describe("saved quota history", () => {
+  it("returns credit readings and keeps histories without credits compatible", () => {
+    const credits = { hasCredits: true, unlimited: false, balance: "49537.6424375" };
+    const result = decodeQuotaHistory(
+      document([
+        { ...sample, ObservedAt: "2026-07-20T17:00:00Z" },
+        { ...sample, Credits: credits },
+      ]),
+    );
+    expect(result.status).toBe("ready");
+    expect(result.samples).toMatchObject([{ remainingPercent: 12 }, { credits }]);
+    expect(result.samples[0]).not.toHaveProperty("credits");
+    expect(
+      decodeQuotaHistory(
+        document([{ ...sample, Credits: { ...credits, balance: "private text" } }]),
+      ).samples[0],
+    ).not.toHaveProperty("credits");
+  });
+
   it("imports only sanitized observations and deduplicates timestamps", () => {
     const result = decodeQuotaHistory({
       ...document([sample, sample]),

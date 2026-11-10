@@ -455,6 +455,21 @@ export function UsageResetPage() {
   const calibrationInterval = (() =>
     calibrationPeriod ? (quotaIntervals([calibrationPeriod]).at(0) ?? null) : null)();
   const codexHistory = quotaProvider === "codex" ? source?.summary?.quotaHistory : undefined;
+  const creditSamples = (source?.summary?.quotaHistory?.samples ?? []).filter(
+    (sample) => sample.credits !== undefined,
+  );
+  const creditReading = creditSamples.at(-1);
+  const previousCreditReading = creditSamples.at(-2);
+  const creditBalance = creditReading?.credits?.balance;
+  const creditChange =
+    creditBalance != null &&
+    previousCreditReading?.credits?.balance != null &&
+    !creditReading?.credits?.unlimited &&
+    !previousCreditReading.credits.unlimited
+      ? Number(creditBalance) - Number(previousCreditReading.credits.balance)
+      : null;
+  const formatCredits = (value: number) =>
+    value.toLocaleString(undefined, { maximumFractionDigits: 10 });
   const trackedManualResetCount = codexHistory?.bankedResetCount;
   const trackedManualResetCheckedAt = codexHistory?.bankedResetCheckedAt;
   // Nothing but Public resets can be shown before a limit has readings.
@@ -671,6 +686,29 @@ export function UsageResetPage() {
               onSelect={(key) => updateView({ windowKey: key })}
               onShowOnly={(provider) => updateView({ provider })}
             />
+          ) : null}
+          {view.provider !== "claude" ? (
+            <section
+              aria-label="Codex credit balance"
+              className="rounded-xl border border-border p-4 text-sm"
+            >
+              <p className="font-medium">Codex credits</p>
+              <p className="mt-1 text-xl tabular-nums">
+                {creditReading?.credits?.unlimited
+                  ? "Unlimited"
+                  : creditBalance != null
+                    ? formatCredits(Number(creditBalance))
+                    : "No credit reading yet"}
+              </p>
+              {creditReading ? (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {creditChange !== null && previousCreditReading
+                    ? `${creditChange > 0 ? "+" : ""}${formatCredits(creditChange)} credits since ${dateTime(previousCreditReading.observedAt)}. `
+                    : "Change available after two balance readings. "}
+                  Last reading {dateTime(creditReading.observedAt)}.
+                </p>
+              ) : null}
+            </section>
           ) : null}
           {historyAnswered && selectedWindow && !hasReadings(selectedWindow) ? (
             <LimitNotRecorded limit={selectedWindow} />

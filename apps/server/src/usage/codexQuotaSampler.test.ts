@@ -50,6 +50,22 @@ const sampleAfterFullHistory = {
 };
 
 describe("Codex quota sampler", () => {
+  it("keeps live credit balances with each reading without changing older samples", () => {
+    const old = codexWeeklyQuotaSample(response(73), observedAt)!;
+    const credits = { hasCredits: true, unlimited: false, balance: "49537.6424375" };
+    const current = codexWeeklyQuotaSample(
+      {
+        ...response(74),
+        rateLimits: { ...response(74).rateLimits, credits },
+      },
+      "2026-09-23T15:05:00Z",
+    )!;
+    expect(current).toMatchObject({ credits });
+    const saved = JSON.parse(appendCodexQuotaSample(appendCodexQuotaSample(null, old), current));
+    expect(saved.Samples[0].Credits).toBeUndefined();
+    expect(saved.Samples[1].Credits).toEqual(credits);
+  });
+
   it("selects the explicit weekly window rather than the short window", () => {
     expect(codexWeeklyQuotaSample(response(73), observedAt)).toEqual({
       observedAt,

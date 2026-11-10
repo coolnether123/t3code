@@ -1,4 +1,5 @@
 import { mapUsageModel } from "./usageAggregation.ts";
+import { decodeQuotaCredits } from "@t3tools/shared/usageQuotaCredits";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Crypto from "effect/Crypto";
 
@@ -79,11 +80,18 @@ export function decodeQuotaHistory(document: unknown): UsageQuotaHistory {
       observedAt: DateTime.formatIso(DateTime.makeUnsafe(observed)),
       remainingPercent: RemainingPercent,
       resetsAt: DateTime.formatIso(DateTime.makeUnsafe(reset)),
+      ...(decodeQuotaCredits(item.Credits) === undefined
+        ? {}
+        : { credits: decodeQuotaCredits(item.Credits) }),
     };
     const prior = samples.get(observed);
     if (
       prior &&
-      (prior.remainingPercent !== RemainingPercent || prior.resetsAt !== sample.resetsAt)
+      (prior.remainingPercent !== RemainingPercent ||
+        prior.resetsAt !== sample.resetsAt ||
+        prior.credits?.balance !== sample.credits?.balance ||
+        prior.credits?.hasCredits !== sample.credits?.hasCredits ||
+        prior.credits?.unlimited !== sample.credits?.unlimited)
     ) {
       return invalid;
     }
@@ -164,7 +172,11 @@ export const readQuotaHistory = Effect.fn("UsageQuotaHistory.read")(
         const prior = samples.get(sample.observedAt);
         if (
           prior !== undefined &&
-          (prior.remainingPercent !== sample.remainingPercent || prior.resetsAt !== sample.resetsAt)
+          (prior.remainingPercent !== sample.remainingPercent ||
+            prior.resetsAt !== sample.resetsAt ||
+            prior.credits?.balance !== sample.credits?.balance ||
+            prior.credits?.hasCredits !== sample.credits?.hasCredits ||
+            prior.credits?.unlimited !== sample.credits?.unlimited)
         )
           return decodeQuotaHistory(null);
         samples.set(sample.observedAt, sample);

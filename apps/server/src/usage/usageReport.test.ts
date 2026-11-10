@@ -245,7 +245,15 @@ describe("agent usage report projections", () => {
   });
 
   it("returns bounded quota history and durable reset costs", () => {
-    const report = projectUsageReport(summary, input("quota", 1), calculation);
+    const credits = { hasCredits: true, unlimited: false, balance: "49537.6424375" };
+    const withCredits = {
+      ...summary,
+      quotaHistory: {
+        ...summary.quotaHistory!,
+        samples: summary.quotaHistory!.samples.map((sample) => ({ ...sample, credits })),
+      },
+    };
+    const report = projectUsageReport(withCredits, input("quota", 1), calculation);
     if (report.mode !== "quota") throw new Error("wrong mode");
     expect(report).toMatchObject({
       mode: "quota",
@@ -256,6 +264,7 @@ describe("agent usage report projections", () => {
     });
     expect(report.quotaHistory.samples).toHaveLength(1);
     expect(report.quotaHistory.samples[0]?.remainingPercent).toBe(80);
+    expect(report.quotaHistory.samples[0]?.credits).toEqual(credits);
     expect(report.costs[0]).toMatchObject({
       intervalId: "reset-1",
       costUsd: 3,
