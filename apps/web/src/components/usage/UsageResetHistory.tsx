@@ -1,4 +1,4 @@
-import type { ContextMenuItem } from "@t3tools/contracts";
+import type { ContextMenuItem, UsageSummaryInput } from "@t3tools/contracts";
 import { formatTokens, formatUsd } from "@t3tools/shared/usageFormat";
 import {
   quotaSavedCostPrefix,
@@ -28,8 +28,9 @@ export function monitoredPeriodModels(
   period: QuotaPeriod,
   value: QuotaValue,
   environments: readonly QuotaEnvironment[],
+  provider: NonNullable<UsageSummaryInput["quotaProvider"]> = "codex",
 ) {
-  const savedPrefix = quotaSavedCostPrefix(period, environments);
+  const savedPrefix = quotaSavedCostPrefix(period, environments, provider);
   const interval = value.costObservedUntil
     ? (savedPrefix?.interval ?? null)
     : {
@@ -51,7 +52,7 @@ export function monitoredPeriodModels(
             : environment.summary,
         }))
       : environments;
-  const models = monitoredModels(interval, modelEnvironments);
+  const models = monitoredModels(interval, modelEnvironments, provider);
   return models !== null &&
     models.some((row) => Object.values(row.totals).some((tokens) => tokens > 0))
     ? models
@@ -72,6 +73,7 @@ export function UsageResetHistory({
   periods,
   values,
   environments,
+  provider = "codex",
   selectedCycle,
   monitoringSince,
   onSelectCycle,
@@ -79,6 +81,7 @@ export function UsageResetHistory({
   readonly periods: readonly QuotaPeriod[];
   readonly values: ReadonlyMap<string, QuotaValue>;
   readonly environments: readonly QuotaEnvironment[];
+  readonly provider?: NonNullable<UsageSummaryInput["quotaProvider"]>;
   readonly selectedCycle: string | null;
   readonly monitoringSince: string;
   readonly onSelectCycle: (cycleId: string | null) => void;
@@ -120,7 +123,9 @@ export function UsageResetHistory({
         .toReversed()
         .map((period) => {
           const value = values.get(period.id);
-          const models = value ? monitoredPeriodModels(period, value, environments) : null;
+          const models = value
+            ? monitoredPeriodModels(period, value, environments, provider)
+            : null;
           const gap = (period.observationGapMs ?? Infinity) > 60 * 60_000;
           const title = gap
             ? "Window changed across an observation gap"

@@ -190,6 +190,7 @@ import * as CursorAccountReader from "@t3tools/provider-cursor/server/CursorAcco
 import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import * as UsageService from "./usage/UsageService.ts";
+import * as ClaudeQuotaSampler from "./usage/ClaudeQuotaSampler.ts";
 import * as UsageResetCheck from "./usage/UsageResetCheck.ts";
 import * as UsageProjection from "./usage/UsageProjection.ts";
 import * as CodexUsageHistory from "./usage/CodexUsageHistory.ts";
@@ -282,6 +283,7 @@ const layerBackground = BackgroundPolicy.layer.pipe(
 
 const layerUsage = Layer.mergeAll(
   UsageService.layer,
+  ClaudeQuotaSampler.layer,
   UsageResetCheck.layer,
   UsageResetCheck.communityLayer,
 ).pipe(

@@ -75,6 +75,24 @@ const env = (id = "desktop", patch: Partial<UsageSummary> = {}): QuotaEnvironmen
 });
 
 describe("quota observations", () => {
+  it("calibrates Claude readings using only Claude transcript costs", () => {
+    const claudeFingerprint = { ...fingerprint, provider: "claude" as const };
+    const claude = env("desktop", {
+      sources: [...summary.sources, { ...summary.sources[0]!, fingerprint: claudeFingerprint }],
+      quotaCosts: [
+        ...summary.quotaCosts!,
+        { ...summary.quotaCosts![0]!, fingerprint: claudeFingerprint, costUsd: 46 },
+      ],
+    });
+    expect(quotaValue(period, [claude], "claude")).toMatchObject({
+      costUsd: 46,
+      usdPerPercentagePoint: 2,
+    });
+    expect(quotaValue(period, [claude])).toMatchObject({ costUsd: 230 });
+    const snapshots = quotaValueSnapshots("desktop", [period], [claude], "claude");
+    expect(snapshots[0]?.value.costUsd).toBe(46);
+    expect(snapshots[0]?.key).not.toBe(quotaValueSnapshots("desktop", [period], [claude])[0]?.key);
+  });
   it("waits for a second observation instead of reporting a missing-server feature", () => {
     const first = quotaPeriods([samples[0]!])[0]!;
     const value = quotaValue(first, [env("desktop", { quotaCosts: undefined })]);

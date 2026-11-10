@@ -1,4 +1,4 @@
-import type { UsageQuotaInterval, UsageTokenTotals } from "@t3tools/contracts";
+import type { UsageQuotaInterval, UsageSummaryInput, UsageTokenTotals } from "@t3tools/contracts";
 import type { QuotaEnvironment } from "@t3tools/shared/usageQuota";
 
 // USD per million tokens, standard processing. Verified against OpenAI on 2026-09-23.
@@ -47,6 +47,7 @@ export function formatTokens(value: number) {
 export function monitoredModels(
   interval: string | UsageQuotaInterval,
   environments: readonly QuotaEnvironment[],
+  provider: NonNullable<UsageSummaryInput["quotaProvider"]> = "codex",
 ) {
   const intervalId = typeof interval === "string" ? interval : interval.id;
   const sinceTime = typeof interval === "string" ? undefined : interval.sinceTime;
@@ -67,7 +68,7 @@ export function monitoredModels(
           entry.intervalId === intervalId &&
           (sinceTime === undefined || entry.sinceTime === sinceTime) &&
           (untilTime === undefined || entry.untilTime === untilTime) &&
-          entry.fingerprint.provider === "codex",
+          entry.fingerprint.provider === provider,
       )
       .map((entry) => ({ fingerprint: entry.fingerprint, status: "ok" as const }));
     // A failed current scan may still carry an exact saved rollup from the
@@ -75,7 +76,7 @@ export function monitoredModels(
     // current measured rows remain unavailable until the scan succeeds.
     if (environment.error && savedSources.length === 0) return null;
     const sources = summary.sources.filter(
-      (entry) => entry.fingerprint.provider === "codex" && entry.status !== "missing",
+      (entry) => entry.fingerprint.provider === provider && entry.status !== "missing",
     );
     const sourceEntries = [...sources, ...savedSources].filter(
       (entry, index, all) =>
@@ -99,7 +100,7 @@ export function monitoredModels(
           entry.fingerprint.hostId === source.fingerprint.hostId &&
           entry.fingerprint.resolvedHomePath === source.fingerprint.resolvedHomePath &&
           entry.fingerprint.volumeId === source.fingerprint.volumeId &&
-          entry.fingerprint.provider === "codex",
+          entry.fingerprint.provider === provider,
       );
       const saved = summary.quotaCostSnapshots?.find(
         (entry) =>
@@ -109,7 +110,7 @@ export function monitoredModels(
           entry.fingerprint.hostId === source.fingerprint.hostId &&
           entry.fingerprint.resolvedHomePath === source.fingerprint.resolvedHomePath &&
           entry.fingerprint.volumeId === source.fingerprint.volumeId &&
-          entry.fingerprint.provider === "codex",
+          entry.fingerprint.provider === provider,
       );
       if (source.status !== "ok" && saved === undefined) return null;
       const costRow =

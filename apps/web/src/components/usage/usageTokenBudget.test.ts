@@ -9,6 +9,27 @@ import {
 import type { QuotaEnvironment } from "@t3tools/shared/usageQuota";
 
 describe("remaining API token scenarios", () => {
+  it("reads Claude activity without mixing in Codex costs", () => {
+    const fingerprint = {
+      hostId: "host",
+      provider: "claude",
+      resolvedHomePath: "/claude/projects",
+      volumeId: "one",
+    };
+    const models = [{ model: "claude-fable-5", costUsd: 3, unpricedRecords: 0 }];
+    const environment = {
+      environmentId: "desktop",
+      error: null,
+      summary: {
+        sources: [{ fingerprint, status: "ok" }],
+        quotaCosts: [
+          { intervalId: "current", fingerprint, complete: true, unpricedRecords: 0, models },
+        ],
+      },
+    } as unknown as QuotaEnvironment;
+    expect(monitoredModels("current", [environment], "claude")).toEqual(models);
+    expect(monitoredModels("current", [environment])).toBeNull();
+  });
   it("uses published model and cache-write rates for each comparison", () => {
     expect(TOKEN_PRICES).toEqual([
       {

@@ -71,7 +71,6 @@
         "**/*.graphql.ts": ["exports", "types", "namespaceMembers"],
         // Dormant fork implementations remain available without starting new background work.
         "src/provider/CodexRequestDeadline.ts": ["files"],
-        "src/usage/ClaudeQuotaSampler.ts": ["files"],
       },
       // Keep the transitive Effect runtime pinned for standalone npm installs.
       // The Vite+ web build prerequisite.

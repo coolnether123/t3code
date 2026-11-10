@@ -188,22 +188,23 @@ export function quotaValueSnapshots(
   trackerId: string | undefined,
   periods: readonly QuotaPeriod[],
   environments: readonly QuotaEnvironment[],
+  provider: NonNullable<UsageSummaryInput["quotaProvider"]> = "codex",
 ): readonly QuotaValueSnapshot[] {
   const selection = environments
     .map((environment) => ({
       id: environment.environmentId,
       sources:
         environment.summary?.sources
-          .filter((source) => source.fingerprint.provider === "codex")
+          .filter((source) => source.fingerprint.provider === provider)
           .map((source) => sourceKey(source.fingerprint))
           .sort() ?? [],
     }))
     .sort((a, b) => a.id.localeCompare(b.id));
   const calculatedAt = DateTime.formatIso(DateTime.nowUnsafe());
   return periods.map((period) => ({
-    key: JSON.stringify([trackerId, selection, period]),
+    key: JSON.stringify([trackerId, provider, selection, period]),
     period,
-    value: quotaValue(period, environments),
+    value: quotaValue(period, environments, provider),
     calculatedAt,
   }));
 }
@@ -301,6 +302,7 @@ export interface QuotaSavedCostPrefix {
 export function quotaSavedCostPrefix(
   period: QuotaPeriod,
   environments: readonly QuotaEnvironment[],
+  provider: NonNullable<UsageSummaryInput["quotaProvider"]> = "codex",
 ): QuotaSavedCostPrefix | null {
   const expected = new Set<string>();
   const candidates = new Map<string, UsageQuotaCostSnapshot[]>();
@@ -314,7 +316,7 @@ export function quotaSavedCostPrefix(
     const requirement = { keys: new Set<string>(), byUntil: new Map<string, Set<string>>() };
     environmentRequirements.push(requirement);
     const sources = summary.sources.filter(
-      (source) => source.fingerprint.provider === "codex" && source.status !== "missing",
+      (source) => source.fingerprint.provider === provider && source.status !== "missing",
     );
     for (const source of sources) {
       const key = sourceKey(source.fingerprint);
@@ -329,7 +331,7 @@ export function quotaSavedCostPrefix(
     for (const row of summary.quotaCostSnapshots ?? []) {
       const key = sourceKey(row.fingerprint);
       if (
-        row.fingerprint.provider !== "codex" ||
+        row.fingerprint.provider !== provider ||
         (expected.size > 0 && !expected.has(key)) ||
         row.intervalId !== period.id ||
         row.sinceTime !== period.first.observedAt ||
@@ -396,7 +398,9 @@ export function quotaSavedCostPrefix(
 function quotaValueExact(
   period: QuotaPeriod,
   environments: readonly QuotaEnvironment[],
+  provider: NonNullable<UsageSummaryInput["quotaProvider"]>,
 ): QuotaValue {
+  const providerName = provider === "claude" ? "Claude" : "Codex";
   const unavailable = (reason: string): QuotaValue => ({
     costUsd: null,
     usdPerPercentagePoint: null,
@@ -419,20 +423,20 @@ function quotaValueExact(
   )) {
     const { summary, label } = environment;
     if (environment.isPending && !summary) {
-      return unavailable(`${label} is still reading Codex transcripts.`);
+      return unavailable(`${label} is still reading ${providerName} transcripts.`);
     }
     if (!summary) {
       return unavailable(`${label} has not supplied a complete usage result.`);
     }
     const savedOnly = (summary.quotaCostSnapshots ?? []).filter(
       (candidate) =>
-        candidate.fingerprint.provider === "codex" &&
+        candidate.fingerprint.provider === provider &&
         candidate.intervalId === period.id &&
         candidate.sinceTime === period.first.observedAt &&
         candidate.untilTime === period.last.observedAt,
     );
     const requiredSavedSources = summary.sources.filter(
-      (source) => source.fingerprint.provider === "codex" && source.status !== "missing",
+      (source) => source.fingerprint.provider === provider && source.status !== "missing",
     );
     const savedForRequiredSources = new Set(
       savedOnly.map((candidate) => sourceKey(candidate.fingerprint)),
@@ -482,14 +486,14 @@ function quotaValueExact(
       return unavailable(
         summary.quotaHistory !== undefined ||
           summary.sources.some((source) => source.status === "partial")
-          ? `${label} is still reading Codex transcripts.`
+          ? `${label} is still reading ${providerName} transcripts.`
           : `${label} needs a server with reset-history support.`,
       );
     const sources = summary.sources.filter(
-      (source) => source.fingerprint.provider === "codex" && source.status !== "missing",
+      (source) => source.fingerprint.provider === provider && source.status !== "missing",
     );
     if (sources.length === 0)
-      return unavailable(`${label} has no readable Codex transcript source.`);
+      return unavailable(`${label} has no readable ${providerName} transcript source.`);
     for (const source of sources) {
       const key = sourceKey(source.fingerprint);
       if (seen.has(key)) continue;
@@ -584,10 +588,11 @@ function quotaValueExact(
 export function quotaValue(
   period: QuotaPeriod,
   environments: readonly QuotaEnvironment[],
+  provider: NonNullable<UsageSummaryInput["quotaProvider"]> = "codex",
 ): QuotaValue {
-  const exact = quotaValueExact(period, environments);
+  const exact = quotaValueExact(period, environments, provider);
   if (exact.costUsd !== null) return exact;
-  const savedPrefix = quotaSavedCostPrefix(period, environments);
+  const savedPrefix = quotaSavedCostPrefix(period, environments, provider);
   if (savedPrefix === null) return exact;
   const costUsd = savedPrefix.rows.reduce((total, row) => total + row.costUsd, 0);
   const records = savedPrefix.rows.reduce((total, row) => total + row.records, 0);

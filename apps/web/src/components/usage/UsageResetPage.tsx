@@ -346,7 +346,7 @@ export function UsageResetPage() {
     );
     return activityIntervals.map((interval) => ({
       interval,
-      models: monitoredModels(interval, environments),
+      models: monitoredModels(interval, environments, quotaProvider),
     }));
   })();
   const modelChartActivity = (() => {
@@ -355,7 +355,7 @@ export function UsageResetPage() {
     );
     return modelActivityIntervals.map((interval) => ({
       interval,
-      models: monitoredModels(interval, environments),
+      models: monitoredModels(interval, environments, quotaProvider),
     }));
   })();
   const historical = periods.at(-2);
@@ -364,6 +364,7 @@ export function UsageResetPage() {
       ? monitoredModels(
           paceInterval.id,
           paceCosts.environments.filter((environment) => isSelected(environment.environmentId)),
+          quotaProvider,
         )
       : null)();
   // A new interval changes the cost query key. While that query is warming,
@@ -406,7 +407,12 @@ export function UsageResetPage() {
   const costScope =
     selected.length === 0 ? "no computers" : selected.map((entry) => entry.label).join(", ");
   const currentValues = (() =>
-    quotaValueSnapshots(source?.environmentId, historicalPeriods, selectedWithSavedCosts))();
+    quotaValueSnapshots(
+      source?.environmentId,
+      historicalPeriods,
+      selectedWithSavedCosts,
+      quotaProvider,
+    ))();
   const [snapshots, setSnapshots] = useState<ReadonlyMap<string, QuotaValueSnapshot>>(() =>
     retainQuotaValueSnapshots(new Map(), currentValues),
   );
@@ -528,7 +534,7 @@ export function UsageResetPage() {
     return {
       interval: calibrationInterval,
       period: calibrationPeriod,
-      models: monitoredModels(calibrationInterval, selectedWithSavedCosts),
+      models: monitoredModels(calibrationInterval, selectedWithSavedCosts, quotaProvider),
       remainingValueUsd: current.value.remainingValueUsd,
       ...(current.value.historicalCalibration && calibrationPeriod.id !== historical?.id
         ? { calibrationTargetSince: current.period.first.observedAt }
@@ -537,7 +543,7 @@ export function UsageResetPage() {
   })();
   const currentModels = (() =>
     current
-      ? monitoredPeriodModels(current.period, current.value, selectedWithSavedCosts)
+      ? monitoredPeriodModels(current.period, current.value, selectedWithSavedCosts, quotaProvider)
       : null)();
   const models =
     currentModels ??
@@ -814,6 +820,7 @@ export function UsageResetPage() {
                         periods={historicalPeriods}
                         values={valueByPeriod}
                         environments={selectedWithSavedCosts}
+                        provider={quotaProvider}
                         selectedCycle={selectedCycle}
                         monitoringSince={samples[0]!.observedAt}
                         onSelectCycle={(cycleId) => {
