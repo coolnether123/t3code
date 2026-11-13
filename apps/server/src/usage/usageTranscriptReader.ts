@@ -489,6 +489,24 @@ function* snapshotChunks(snapshot: Buffer, start = 0, end = snapshot.length): Ge
   }
 }
 
+// Each chunk is valid only until the next read; callers must copy retained bytes.
+async function* readFileChunks(filePath: string, start: number, end?: number) {
+  const file = await NodeFSP.open(filePath, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(256 * 1024);
+    for (let position = start; end === undefined || position <= end;) {
+      const length =
+        end === undefined ? buffer.length : Math.min(buffer.length, end - position + 1);
+      const { bytesRead } = await file.read(buffer, 0, length, position);
+      if (bytesRead === 0) return;
+      position += bytesRead;
+      yield buffer.subarray(0, bytesRead);
+    }
+  } finally {
+    await file.close();
+  }
+}
+
 export interface RepeatedInputReadOptions extends Omit<
   ParseCodexRepeatedInputOptions,
   "project" | "environment"
@@ -632,16 +650,11 @@ async function readCompleteJsonlLines(
   };
   const input =
     snapshot === undefined
-      ? NodeFS.createReadStream(filePath, {
-          ...(start === 0 ? {} : { start }),
-          ...(end === undefined ? {} : { end }),
-        })
-      : NodeStream.Readable.from(
-          snapshotChunks(
-            snapshot,
-            start,
-            Math.min(snapshot.length, end === undefined ? snapshot.length : end + 1),
-          ),
+      ? readFileChunks(filePath, start, end)
+      : snapshotChunks(
+          snapshot,
+          start,
+          Math.min(snapshot.length, end === undefined ? snapshot.length : end + 1),
         );
   for await (const chunk of input) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -663,6 +676,8 @@ async function readCompleteJsonlLines(
       startDiscarding(pending);
       nextByte += pending.length;
       pending = Buffer.alloc(0);
+    } else if (pending.length > 0 && snapshot === undefined) {
+      pending = Buffer.from(pending);
     }
   }
 
@@ -673,16 +688,12 @@ async function readCompleteJsonlLines(
     if (sourceEnd === undefined || sourceEnd > end) {
       const rest =
         snapshot === undefined
-          ? NodeFS.createReadStream(filePath, {
-              start: end + 1,
-              ...(sourceEnd === undefined ? {} : { end: sourceEnd }),
-            })
-          : NodeStream.Readable.from(snapshotChunks(snapshot, end + 1));
+          ? readFileChunks(filePath, end + 1, sourceEnd)
+          : snapshotChunks(snapshot, end + 1);
       for await (const chunk of rest) {
         discardUntilLineEnd(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
         if (!discardingLine) break;
       }
-      rest.destroy();
     }
   }
 
