@@ -4,7 +4,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 import { runMigrations } from "../Migrations.ts";
-import Compatibility from "./050_ProjectionThreadsActiveOrderKeyCompatibility.ts";
+import Compatibility from "./050_ProjectionThreadsActiveOrderKeyCompatibility.fixture.ts";
 
 it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
   "050_ProjectionThreadsSchemaCompatibility",

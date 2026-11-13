@@ -212,7 +212,10 @@ it.effect("checkpoint capture skips untracked nested repositories without a comm
       `160000 commit ${nestedHead}\tcommitted\n`,
     );
     assert.deepEqual(yield* fileSystem.readFile(path.join(cwd, ".git", "index")), originalIndex);
-    assert.isTrue(yield* driver.checkpoints.restoreCheckpoint({ cwd, checkpointRef }));
+    assert.deepStrictEqual(yield* driver.checkpoints.restoreCheckpoint({ cwd, checkpointRef }), {
+      restored: true,
+      commitOid: (yield* git(["rev-parse", checkpointRef])).stdout.trim(),
+    });
     assert.strictEqual(
       yield* fileSystem.readFileString(path.join(cwd, nested, "private.txt")),
       "nested\n",
@@ -1255,8 +1258,16 @@ it.effect("restores a checkpoint before the first commit without staging its fil
       yield* fileSystem.writeFileString(path.join(cwd, "file.txt"), "changed\n");
       yield* fileSystem.writeFileString(path.join(cwd, "added.txt"), "new\n");
 
-      assert.isTrue(
+      assert.deepStrictEqual(
         yield* driver.checkpoints.restoreCheckpoint({ cwd, checkpointRef, fallbackToHead: false }),
+        {
+          restored: true,
+          commitOid: (yield* driver.execute({
+            operation: "test",
+            cwd,
+            args: ["rev-parse", checkpointRef],
+          })).stdout.trim(),
+        },
       );
 
       assert.strictEqual(

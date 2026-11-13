@@ -1387,22 +1387,25 @@ describe("composer fallback to another instance of the same driver", () => {
       },
     );
 
-    it("does not alias-expand the fallback instance's custom model", () => {
+    it.each([
+      ["gpt-5.4", "5.4"],
+      ["5.4", "gpt-5.4"],
+    ])("does not alias-expand %s to the fallback custom model %s", (savedModel, customModel) => {
       const { state, traits } = composerFor({
         providers: [
           { ...provider({ provider: codex, instanceId: "codex" }), enabled: false },
           {
             ...provider({ provider: codex, instanceId: "codex_team" }),
-            models: [reasoningModel("5.4", "reasoningEffort", { isCustom: true })],
+            models: [reasoningModel(customModel, "reasoningEffort", { isCustom: true })],
           },
         ],
-        customModels: { codex_team: ["5.4"] },
-        threadModelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.4", [
+        customModels: { codex_team: [customModel] },
+        threadModelSelection: createModelSelection(ProviderInstanceId.make("codex"), savedModel, [
           { id: "reasoningEffort", value: "xhigh" },
         ]),
       });
 
-      expect(state.selectedModel).toBe("5.4");
+      expect(state.selectedModel).toBe(customModel);
       expect(traits.modelOptionsForDispatch).toBeUndefined();
     });
 

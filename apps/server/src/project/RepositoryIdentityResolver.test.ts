@@ -20,6 +20,18 @@ import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
 const normalizePathSeparators = (value: string) => value.replaceAll("\\", "/");
 const normalizeResolvedPath = (value: string) => normalizePathSeparators(value);
 
+const virtualRepositoryFs = Layer.effect(
+  FileSystem.FileSystem,
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const directory = yield* fs.stat(import.meta.dirname);
+    return FileSystem.FileSystem.of({
+      ...fs,
+      stat: (path) => (path.startsWith("/repo") ? Effect.succeed(directory) : fs.stat(path)),
+    });
+  }),
+).pipe(Layer.provide(NodeServices.layer));
+
 const git = (cwd: string, args: ReadonlyArray<string>) =>
   Effect.gen(function* () {
     const processRunner = yield* ProcessRunner.ProcessRunner;
@@ -60,7 +72,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
             }),
         });
         const resolver = yield* RepositoryIdentityResolver.make().pipe(
-          Effect.provide(processRunner),
+          Effect.provide(Layer.merge(processRunner, virtualRepositoryFs)),
         );
         const first = yield* resolver.resolve("/repo").pipe(Effect.forkChild);
         yield* Deferred.await(started);
@@ -101,7 +113,9 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
             };
           }),
       });
-      const resolver = yield* RepositoryIdentityResolver.make().pipe(Effect.provide(processRunner));
+      const resolver = yield* RepositoryIdentityResolver.make().pipe(
+        Effect.provide(Layer.merge(processRunner, virtualRepositoryFs)),
+      );
       const first = yield* resolver.resolve("/repo").pipe(Effect.forkChild);
       yield* Deferred.await(started);
       const secondStarted = yield* Deferred.make<void>();
@@ -166,7 +180,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
           );
         },
       }),
-    ).pipe(Layer.provide(layerProcessRunner));
+    ).pipe(Layer.provide(Layer.merge(layerProcessRunner, virtualRepositoryFs)));
 
     return Effect.gen(function* () {
       const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
@@ -182,14 +196,16 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       expect(calls).toEqual([
         ["-C", "/repo/packages/web", "rev-parse", "--show-toplevel"],
         ["-C", "/repo", "remote", "-v"],
+        ["-C", "/repo", "config", "--get-regexp", "^remote\\..*\\.gh-resolved$"],
       ]);
 
       const refreshed = yield* resolver.resolve("/repo/packages/web", { refresh: true });
       expect(refreshed?.rootPath).toBe("/repo/packages/web");
       expect(yield* resolver.resolve("/repo/packages/web")).toEqual(refreshed);
-      expect(calls.slice(2)).toEqual([
+      expect(calls.slice(3)).toEqual([
         ["-C", "/repo/packages/web", "rev-parse", "--show-toplevel"],
         ["-C", "/repo/packages/web", "remote", "-v"],
+        ["-C", "/repo/packages/web", "config", "--get-regexp", "^remote\\..*\\.gh-resolved$"],
       ]);
       remoteUrl = "git@ssh.forge.test:team/repo.git";
       const forgejo = yield* resolver.resolve(rootPath, { refresh: true });
@@ -234,7 +250,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
     const layerResolver = Layer.effect(
       RepositoryIdentityResolver.RepositoryIdentityResolver,
       RepositoryIdentityResolver.make(),
-    ).pipe(Layer.provide(layerProcessRunner));
+    ).pipe(Layer.provide(Layer.merge(layerProcessRunner, virtualRepositoryFs)));
 
     return Effect.gen(function* () {
       const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
@@ -247,24 +263,9 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       expect(recovered?.rootPath).toBe("/repo");
       expect(calls).toEqual([
         ["-C", "/repo/packages/web", "rev-parse", "--show-toplevel"],
-        [
-          "-C",
-          "/repo/packages/web",
-          "--git-dir=.",
-          "rev-parse",
-          "--is-bare-repository",
-          "--absolute-git-dir",
-        ],
-        [
-          "-C",
-          "/repo/packages/web",
-          "--git-dir=.git",
-          "rev-parse",
-          "--is-bare-repository",
-          "--absolute-git-dir",
-        ],
         ["-C", "/repo/packages/web", "rev-parse", "--show-toplevel"],
         ["-C", "/repo", "remote", "-v"],
+        ["-C", "/repo", "config", "--get-regexp", "^remote\\..*\\.gh-resolved$"],
       ]);
     }).pipe(Effect.provide(Layer.merge(TestClock.layer(), layerResolver)));
   });

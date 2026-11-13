@@ -268,10 +268,13 @@ describe("ServerBrowserContexts", () => {
 
     expect(deletionsBeforeClose).toBe(0);
     expect(human.close).toHaveBeenCalledTimes(1);
-    expect(launches.rm).toHaveBeenCalledExactlyOnceWith("/test/profiles/work%2Fteam", {
-      recursive: true,
-      force: true,
-    });
+    expect(launches.rm).toHaveBeenCalledExactlyOnceWith(
+      resolveWorkspaceFilePath("work%2Fteam", profilesDir),
+      {
+        recursive: true,
+        force: true,
+      },
+    );
     await pool.close();
   });
 

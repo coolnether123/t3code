@@ -5,7 +5,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { runMigrations } from "../Migrations.ts";
-import bootstrapThreadContextCompactions from "./052_BootstrapThreadContextCompactions.ts";
+import bootstrapThreadContextCompactions from "./052_BootstrapThreadContextCompactions.fixture.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
 

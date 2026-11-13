@@ -2,7 +2,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Layer from "effect/Layer";
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId, ThreadId, TurnId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { HttpServer } from "effect/http";
 import * as NetAddress from "effect/net/NetAddress";
@@ -231,6 +231,12 @@ it.effect("only a trusted touch restores an expired token with its original scop
     expect(yield* registry.resolve(token)).toEqual(scope);
     timestamp += 101;
     expect(yield* registry.resolve(token)).toBeUndefined();
+    const parentTurnId = TurnId.make("turn-resumed");
+    yield* registry.touch(threadId, undefined, parentTurnId);
+    expect(yield* registry.resolve(token)).toEqual({
+      ...scope,
+      thread: { ...scope?.thread, parentTurnId },
+    });
   }),
 );
 

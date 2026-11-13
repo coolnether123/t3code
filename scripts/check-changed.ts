@@ -186,7 +186,7 @@ const TEST = /\.test\.[cm]?[jt]sx?$/;
 // CI runs the .github/scripts tests with `node --test`; vitest passes a failing node:test file.
 const NODE_TEST = /^\.github[/\\]scripts[/\\]/;
 export const splitTests = (tests: Iterable<string>) => {
-  const all = [...tests];
+  const all = [...new Set(Array.from(tests, (file) => file.replaceAll("\\", "/")))];
   return {
     vitestTests: all.filter((file) => !NODE_TEST.test(file)),
     nodeTests: all.filter((file) => NODE_TEST.test(file)),
@@ -229,8 +229,8 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   // macOS counts its file cache as used, so available memory there would
   // starve a large Mac. Elsewhere availableMemory() honors a cgroup limit.
   const platform = yield* HostProcess.Platform;
-  const batches = (files: ReadonlyArray<string>) =>
-    platform === "win32" ? checkFileBatches(files) : [files];
+  const batches = (files: ReadonlyArray<string>, maxFiles = Number.POSITIVE_INFINITY) =>
+    platform === "win32" ? checkFileBatches(files, 16_000, maxFiles) : [files];
   const concurrency = Option.getOrElse(
     yield* override("concurrency", input.concurrency, "CHECK_CHANGED_CONCURRENCY"),
     () =>
@@ -522,7 +522,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
       : []),
     // From the repo root, the root vite.config.ts hands each file to its package's config.
     ...(vitestTests.length > 0
-      ? batches(vitestTests).map((batch, index) => ({
+      ? batches(vitestTests, 40).map((batch, index) => ({
           ...command(`test ${index + 1} (${batch.length} files)`, [
             "test",
             "run",

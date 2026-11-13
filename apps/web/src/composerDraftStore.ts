@@ -11,6 +11,7 @@ import {
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
   EnvironmentId,
+  MODEL_SLUG_ALIASES_BY_PROVIDER,
   ModelSelection,
   ProjectId,
   ProviderInstanceId,
@@ -1340,20 +1341,24 @@ function withFallbackInstanceOptions(input: {
   );
   const requestedModel = input.optionSelections?.[requestedInstanceId]?.model;
   // Static aliases are shared across instances; exact custom slugs and catalog aliases are not.
-  const modelIdentity = (instanceId: ProviderInstanceId, model: string | undefined) => {
-    const isCustom =
-      input.providers
-        .find((provider) => provider.instanceId === instanceId)
-        ?.models.some((entry) => entry.slug === model && entry.isCustom) ||
-      readInstanceCustomModels(input.settings, instanceId, input.selectedProvider).some(
-        (entry) => entry.slug === model,
-      );
-    return isCustom ? model : normalizeModelSlug(model, input.selectedProvider);
+  const isCustomModel = (instanceId: ProviderInstanceId, model: string | undefined) =>
+    input.providers
+      .find((provider) => provider.instanceId === instanceId)
+      ?.models.some((entry) => entry.slug === model && entry.isCustom) ||
+    readInstanceCustomModels(input.settings, instanceId, input.selectedProvider).some(
+      (entry) => entry.slug === model,
+    );
+  const modelIdentity = (model: string | undefined) => {
+    const slug = normalizeCustomModelSlug(model);
+    const aliases = MODEL_SLUG_ALIASES_BY_PROVIDER[input.selectedProvider];
+    return slug && aliases && Object.hasOwn(aliases, slug) ? aliases[slug] : slug;
   };
   const sameModel =
     requestedModel === input.selectedModel ||
-    modelIdentity(requestedInstanceId, requestedModel) ===
-      modelIdentity(selectedInstanceId, input.selectedModel);
+    (requestedModel !== undefined &&
+      !isCustomModel(requestedInstanceId, requestedModel) &&
+      !isCustomModel(selectedInstanceId, input.selectedModel) &&
+      modelIdentity(requestedModel) === modelIdentity(input.selectedModel));
   if (!requestedOptions || requestedProvider?.driver !== input.selectedProvider || !sameModel) {
     return modelOptions;
   }

@@ -1519,6 +1519,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         allowNonZeroExit: true,
       });
       let cleaned = yield* clean;
+      let workspaceEmpty = false;
       // Removing a new .gitignore exposes the files it hid; clean again until nothing is left.
       for (
         let pass = 1;
@@ -1526,9 +1527,14 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         pass++
       ) {
         yield* recreateWorkspace;
+        workspaceEmpty = yield* fileSystem.readDirectory(input.cwd).pipe(
+          Effect.map((entries) => entries.length === 0),
+          Effect.orElseSucceed(() => false),
+        );
+        if (workspaceEmpty) break;
         cleaned = yield* clean;
       }
-      if (cleaned.exitCode === 0 && /^Removing /m.test(cleaned.stdout)) {
+      if (!workspaceEmpty && cleaned.exitCode === 0 && /^Removing /m.test(cleaned.stdout)) {
         yield* recreateWorkspace;
         const remaining = yield* execute({
           operation,

@@ -2466,10 +2466,20 @@ describe("orphan worktree reports", () => {
     ([platform, field]) =>
       runCleanupTest(
         Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          let upper = "";
           const fixture = yield* cleanupFixture().pipe(
             Effect.provideService(HostProcess.Platform, platform),
+            Effect.provideService(FileSystem.FileSystem, {
+              ...fs,
+              realPath: (target) =>
+                platform === "linux" && target === upper
+                  ? fs.realPath(path.join(target, "missing"))
+                  : fs.realPath(target),
+            }),
           );
-          const upper = fixture.worktree.toUpperCase();
+          upper = fixture.worktree.toUpperCase();
           yield* fixture.openTerminal(
             field === "cwd"
               ? { cwd: upper, worktreePath: null }
@@ -2490,10 +2500,21 @@ describe("orphan worktree reports", () => {
     (platform) =>
       runCleanupTest(
         Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          let upper = "";
           const fixture = yield* cleanupFixture().pipe(
             Effect.provideService(HostProcess.Platform, platform),
+            Effect.provideService(FileSystem.FileSystem, {
+              ...fs,
+              realPath: (target) =>
+                platform === "linux" && target === upper
+                  ? fs.realPath(path.join(target, "missing"))
+                  : fs.realPath(target),
+            }),
           );
-          fixture.setOpenSessionCwd(fixture.worktree.toUpperCase());
+          upper = fixture.worktree.toUpperCase();
+          fixture.setOpenSessionCwd(upper);
           const report = yield* fixture.service.runNow;
           expect(report.entries[0]).toMatchObject(
             platform === "win32"

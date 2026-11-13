@@ -6,12 +6,12 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
 import Workers from "./forkWorkersMigration.fixture.ts";
-import Compatibility from "./Migrations/050_ProjectionThreadsActiveOrderKeyCompatibility.ts";
-import Compactions from "./Migrations/051_ProjectionThreadContextCompactions.ts";
-import BootstrapCompactions from "./Migrations/052_BootstrapThreadContextCompactions.ts";
-import PromptIndex from "./Migrations/053_PromptUsageMessageIndex.ts";
-import IdentityIndex from "./Migrations/054_UserMessageIdentityIndex.ts";
-import PromptWords from "./Migrations/055_PromptWordIndex.ts";
+import Compatibility from "./Migrations/050_ProjectionThreadsActiveOrderKeyCompatibility.fixture.ts";
+import Compactions from "./Migrations/051_ProjectionThreadContextCompactions.fixture.ts";
+import BootstrapCompactions from "./Migrations/052_BootstrapThreadContextCompactions.fixture.ts";
+import PromptIndex from "./Migrations/053_PromptUsageMessageIndex.fixture.ts";
+import IdentityIndex from "./Migrations/054_UserMessageIdentityIndex.fixture.ts";
+import PromptWords from "./Migrations/055_PromptWordIndex.fixture.ts";
 import MessageContext from "./Migrations/051_ProjectionThreadMessageContext.ts";
 import ThreadPullRequests from "./Migrations/050_ProjectionThreadPullRequests.ts";
 

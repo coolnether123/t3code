@@ -2005,11 +2005,17 @@ it.layer(
             }
             yield* Effect.gen(function* () {
               const registry = yield* ProviderRegistry.ProviderRegistry;
-              assert.strictEqual((yield* registry.getProviders)[0]?.status, failedProvider.status);
-              assert.strictEqual(
-                (yield* readProviderStatusCache(filePath))?.status,
-                failedProvider.status,
-              );
+              const expectedModels = hasCache
+                ? [customModel, ...cachedProvider.models]
+                : failedProvider.models;
+              for (const provider of [
+                (yield* registry.getProviders)[0],
+                yield* readProviderStatusCache(filePath),
+              ]) {
+                assert.strictEqual(provider?.status, hasCache ? "warning" : "error");
+                assert.strictEqual(provider?.checkedAt, failedProvider.checkedAt);
+                assert.deepStrictEqual(provider?.models, expectedModels);
+              }
             }).pipe(
               Effect.provide(
                 ProviderRegistry.layer.pipe(
@@ -4248,6 +4254,7 @@ it.layer(
               "cursor",
               "fx",
               "grok",
+              "kiro",
               "muse",
               "opencode",
               "pi",

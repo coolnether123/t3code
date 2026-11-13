@@ -282,6 +282,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
             next.set(tokenHash, {
               ...record,
               lastAlive: alive,
+              expired: false,
               scope: {
                 ...record.scope,
                 thread: {
