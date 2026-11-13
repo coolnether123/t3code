@@ -2,6 +2,7 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off - Host-side device automation uses Node subprocess and filesystem APIs directly.
 
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -31,14 +32,17 @@ const REPO_ROOT = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import
 
 const log = (scope: string, message: string) => NodeProcess.stderr.write(`[${scope}] ${message}\n`);
 
-/** This machine's Tailscale address (100.64.0.0/10), which pool devices reach it on. */
-function tailnetAddress(): string {
-  for (const addresses of Object.values(NodeOS.networkInterfaces())) {
-    for (const address of addresses ?? []) {
-      const [first, second] = address.address.split(".").map(Number);
-      if (address.family === "IPv4" && first === 100 && second! >= 64 && second! < 128)
-        return address.address;
-    }
+/** This machine's Tailscale address, which pool devices reach it on. */
+async function tailnetAddress(): Promise<string> {
+  // Other VPNs share 100.64.0.0/10, so ask Tailscale instead of matching interface ranges.
+  // The macOS app bundles its CLI without putting a launcher on PATH.
+  for (const cli of ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]) {
+    const stdout = await run(cli, ["ip", "-4"]).then(
+      (result) => result.stdout,
+      () => "",
+    );
+    const address = stdout.trim().split("\n")[0];
+    if (address) return address;
   }
   throw new Error("No Tailscale IPv4 address: pool devices reach Metro and the fixture over it.");
 }
@@ -172,7 +176,7 @@ async function main() {
     throw new Error(
       "Set SIMLOCK_AGENT_DEVICE_URL (<gateway>/v1/agent-device) and AGENT_DEVICE_DAEMON_AUTH_TOKEN (a Simlock agent token) to run on the device pool.",
     );
-  const host = tailnetAddress();
+  const host = await tailnetAddress();
 
   const runId = new Date().toISOString().replaceAll(/[:.]/g, "-");
   const outputDirectory = NodePath.join(REPO_ROOT, "artifacts/mobile-e2e", runId);
@@ -223,8 +227,15 @@ async function main() {
       ],
       {
         cwd: NodePath.join(REPO_ROOT, "apps/mobile"),
-        env: { ...NodeProcess.env, APP_VARIANT: "development", CI: "1" },
-        stdio: ["ignore", "ignore", "inherit"],
+        // Lazily fetched chunks (dynamic import()) sometimes arrive broken on the pool's Android
+        // emulators and throw SyntaxErrors; release builds have no lazy chunks either.
+        env: { ...NodeProcess.env, APP_VARIANT: "development", CI: "1", EXPO_NO_METRO_LAZY: "1" },
+        // The app's console output arrives through Metro; keep it with the run.
+        stdio: [
+          "ignore",
+          NodeFS.openSync(NodePath.join(outputDirectory, "metro.log"), "w"),
+          "inherit",
+        ],
         // Its own group, so stopping it also stops the expo child that owns the port.
         detached: true,
       },

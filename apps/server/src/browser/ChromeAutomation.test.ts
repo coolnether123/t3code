@@ -1,6 +1,7 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -211,21 +212,21 @@ const makeFakeBrowser = (input: {
 
 const provideTestServices = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.gen(function* () {
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* SecureRandom.SecureRandom;
     return yield* effect.pipe(
-      Effect.provideService(Crypto.Crypto, {
+      Effect.provideService(SecureRandom.SecureRandom, {
         ...crypto,
-        randomUUIDv4: ((options?: { readonly format?: "hex" | "bytes" }) =>
+        uuidV4: ((options?: { readonly format?: "string" | "bytes" }) =>
           options?.format === "bytes"
-            ? crypto.randomUUIDv4(options)
-            : Effect.succeed("test")) as Crypto.Crypto["randomUUIDv4"],
+            ? crypto.uuidV4({ format: "bytes" })
+            : Effect.succeed("test")) as typeof crypto.uuidV4,
       }),
     );
   }).pipe(
     Effect.provide(
       ServerConfig.layerTest(process.cwd(), {
         prefix: "t3-chrome-automation-test-",
-      }).pipe(Layer.provideMerge(NodeServices.layer)),
+      }).pipe(Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
     ),
   );
 
@@ -883,14 +884,14 @@ it.effect("discards previous refs when snapshot collection fails", () =>
 it.effect("does not reuse tab identities across server service lifetimes", () =>
   provideTestServices(
     Effect.gen(function* () {
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       let instance = 0;
       const cryptoWithFreshIds = {
         ...crypto,
-        randomUUIDv4: ((options?: { readonly format?: "hex" | "bytes" }) =>
+        uuidV4: ((options?: { readonly format?: "string" | "bytes" }) =>
           options?.format === "bytes"
-            ? crypto.randomUUIDv4(options)
-            : Effect.sync(() => `instance-${++instance}`)) as Crypto.Crypto["randomUUIDv4"],
+            ? crypto.uuidV4({ format: "bytes" })
+            : Effect.sync(() => `instance-${++instance}`)) as typeof crypto.uuidV4,
       };
       const page = makeFakePage({
         url: "https://form.test",
@@ -899,12 +900,12 @@ it.effect("does not reuse tab identities across server service lifetimes", () =>
       });
       const fake = makeFakeBrowser({ pages: [page] });
       const first = yield* ChromeAutomationModule.make({ adapter: fake.adapter }).pipe(
-        Effect.provideService(Crypto.Crypto, cryptoWithFreshIds),
+        Effect.provideService(SecureRandom.SecureRandom, cryptoWithFreshIds),
       );
       const firstSnapshot = yield* first.snapshot();
       yield* first.stop();
       const second = yield* ChromeAutomationModule.make({ adapter: fake.adapter }).pipe(
-        Effect.provideService(Crypto.Crypto, cryptoWithFreshIds),
+        Effect.provideService(SecureRandom.SecureRandom, cryptoWithFreshIds),
       );
       const secondSnapshot = yield* second.snapshot();
       assert.notEqual(firstSnapshot.tabId, secondSnapshot.tabId);

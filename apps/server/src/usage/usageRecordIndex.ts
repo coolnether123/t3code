@@ -1,21 +1,4 @@
-/**
- * One transcript's usage, priced once and indexed by time.
- *
- * A summary read used to decode and re-price every record of every transcript
- * in its window. A transcript's records only change when the transcript does,
- * so they are priced when it is read and folded into groups that share every
- * bucket dimension (model, tier, session, turn, run). Each group keeps sorted
- * timestamps and prefix sums, so any window, day or hour reads a group with two
- * binary searches.
- *
- * Records whose de-duplication key also appears in another transcript are kept
- * as individual priced records. The aggregator resolves those in file order
- * exactly as it resolves raw records, so a copied event is still counted once.
- *
- * Pure: pricing is passed in, and nothing here reads the filesystem or clock.
- *
- * @module usageRecordIndex
- */
+// Shared deduplication keys remain individual records so the aggregator can resolve copies in file order.
 import type { UsageTokenTotals, UsageCategoryCost } from "@t3tools/contracts";
 
 import type { PricedUsage } from "./usagePricing.ts";
@@ -24,6 +7,7 @@ import type { UsageRecord } from "./usageTranscripts.ts";
 /** A record together with the prices it had when its transcript was indexed. */
 export interface PricedRecord {
   readonly record: UsageRecord;
+  readonly originalModel?: string;
   readonly costUsd: number;
   readonly costSource: PricedUsage["costSource"];
   readonly cacheSavingsUsd: number;
@@ -49,6 +33,7 @@ const PROVIDER_REPORTED = 8;
 export interface IndexedGroup {
   readonly provider: UsageRecord["provider"];
   readonly model: string;
+  readonly originalModel?: string;
   readonly sourcePath?: string;
   readonly sessionId: string;
   readonly nativeSessionId?: string;
@@ -190,7 +175,7 @@ export function buildTranscriptUsageIndex(
       shared.push(priced);
       continue;
     }
-    const key = groupKey(priced.record);
+    const key = JSON.stringify([groupKey(priced.record), priced.originalModel]);
     let members = byGroup.get(key);
     if (members === undefined) {
       members = [];
@@ -238,6 +223,9 @@ export function buildTranscriptUsageIndex(
       provider: first.provider,
       ...(first.sourcePath === undefined ? {} : { sourcePath: first.sourcePath }),
       model: first.model,
+      ...(members[0]!.originalModel === undefined
+        ? {}
+        : { originalModel: members[0]!.originalModel }),
       sessionId: first.sessionId,
       ...(first.nativeSessionId === undefined ? {} : { nativeSessionId: first.nativeSessionId }),
       ...(first.turnId === undefined ? {} : { turnId: first.turnId }),
@@ -258,14 +246,7 @@ export function buildTranscriptUsageIndex(
   };
 }
 
-/**
- * Which de-duplication keys more than one transcript holds.
- *
- * Counts only grow toward "shared" while a transcript is held: when a key gains
- * its second holder, the first holder's index folded that record into its sums
- * and must be rebuilt, which `register` reports. A key that drops back to one
- * holder stays on the exact per-record path until that holder is rebuilt.
- */
+// A second holder requires rebuilding the first index; a remaining holder stays on the per-record path until rebuilt.
 export class DedupeKeyRegistry {
   readonly #holders = new Map<number, number>();
   readonly #soleHolder = new Map<number, string>();

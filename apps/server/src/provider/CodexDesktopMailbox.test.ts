@@ -206,6 +206,10 @@ describe("CodexDesktopMailbox", () => {
     await withMailbox(async (root) => {
       const layout = createCodexDesktopMailboxLayout(root);
       const watchers: Array<NodeEvents.EventEmitter & { closed: boolean; close: () => void }> = [];
+      let watcherReady!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        watcherReady = resolve;
+      });
       const failingWatch = () => {
         const watcher = Object.assign(new NodeEvents.EventEmitter(), {
           closed: false,
@@ -214,10 +218,11 @@ describe("CodexDesktopMailbox", () => {
           },
         });
         watchers.push(watcher);
+        if (watchers.length === 3) watcherReady();
         return watcher;
       };
       const waiting = waitForCodexDesktopMailboxChange(layout, 20, failingWatch);
-      await new Promise((resolve) => setImmediate(resolve));
+      await ready;
       watchers[0]?.emit(
         "error",
         Object.assign(new Error("too many open files"), { code: "EMFILE" }),

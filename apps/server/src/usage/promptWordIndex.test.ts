@@ -84,7 +84,7 @@ layer("derived prompt word index", (it) => {
           updated_at: now,
         }));
         for (let offset = 0; offset < many.length; offset += 200)
-          yield* sql`INSERT INTO projection_thread_messages ${sql.insert(many.slice(offset, offset + 200))}`;
+          yield* sql`INSERT INTO projection_thread_messages ${sql.insert([many[offset]!, ...many.slice(offset + 1, offset + 200)])}`;
         const warming = yield* readPromptWordIndex(sql, input, now, "projection_thread_messages");
         assert.include(warming.coverage.reasons, "index-warming");
         assert.isNull(warming.totals.averageWordsPerPrompt);

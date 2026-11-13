@@ -123,7 +123,9 @@ export const makeProviderUsageReader = Effect.gen(function* () {
           sources = yield* reader.scan({ ...input, instances });
         } else {
           const directories = yield* Effect.forEach(
-            (yield* Effect.forEach(instances, reader.directories)).flat(),
+            (yield* Effect.forEach(instances, (instance) =>
+              reader.directories(instance, { awaitRefresh: input.awaitRefresh }),
+            )).flat(),
             (directory) =>
               fileSystem.realPath(directory.dir).pipe(
                 Effect.orElseSucceed(
@@ -148,7 +150,8 @@ export const makeProviderUsageReader = Effect.gen(function* () {
               seen.add(dir);
               return true;
             }),
-            Effect.fnUntraced(function* ({ dir, fileName }) {
+            Effect.fnUntraced(function* ({ dir, fileName, refreshing }) {
+              if (refreshing) return { dir, volumeId: "", files: [], refreshing };
               const exists = yield* fileSystem.exists(dir).pipe(Effect.orElseSucceed(() => false));
               const sourceKey = `${reader.provider}\0${dir}`;
               const previousSource = sourceCache.get(sourceKey);
@@ -218,13 +221,12 @@ export const makeProviderUsageReader = Effect.gen(function* () {
                         parsed.resumed && cached !== undefined
                           ? [...cached.records, ...parsed.records]
                           : parsed.records;
-                      const seen = new Set<string>();
                       const entry: CachedFile = {
                         size: file.size,
                         mtimeMs: file.mtimeMs,
                         provider: reader.provider,
-                        records: dedupeWithinFile(records, seen),
-                        tailRecords: dedupeWithinFile(parsed.tailRecords, seen),
+                        records: dedupeWithinFile(records),
+                        tailRecords: parsed.tailRecords,
                         malformedRecords: parsed.malformedRecords,
                         position: parsed.position,
                       };
@@ -235,10 +237,26 @@ export const makeProviderUsageReader = Effect.gen(function* () {
                   })),
                 { concurrency: 4 },
               );
+              const livePaths = new Set(listing.files.map((file) => file.path));
+              const replacedPaths = new Set<string>();
+              for (const file of parsed) {
+                if (
+                  file.parsed === null ||
+                  "failed" in file.parsed ||
+                  !file.path.endsWith(".jsonl.zst")
+                )
+                  continue;
+                const originalPath = file.path.slice(0, -4);
+                if (livePaths.has(originalPath)) continue;
+                replacedPaths.add(originalPath);
+                if (transcripts.delete(originalPath)) dirty = true;
+              }
+              const currentFiles = parsed.filter((file) => !replacedPaths.has(file.path));
               const failed =
                 listing.failedPaths +
-                parsed.filter((file) => file.parsed === null || "failed" in file.parsed).length;
-              const malformedRecords = parsed.reduce(
+                currentFiles.filter((file) => file.parsed === null || "failed" in file.parsed)
+                  .length;
+              const malformedRecords = currentFiles.reduce(
                 (sum, file) => sum + (file.parsed?.malformedRecords ?? 0),
                 0,
               );
@@ -246,7 +264,7 @@ export const makeProviderUsageReader = Effect.gen(function* () {
                 dir,
                 volumeId,
                 malformedRecords,
-                files: parsed.flatMap((file) =>
+                files: currentFiles.flatMap((file) =>
                   file.parsed === null
                     ? []
                     : [

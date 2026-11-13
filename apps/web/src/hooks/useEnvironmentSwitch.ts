@@ -118,6 +118,7 @@ export function useEnvironmentSwitch() {
     }
   };
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Resume navigation when external environment shells finish loading.
   useEffect(() => {
     if (pendingValue.current === null || !shellsBootstrapped) return;
     switchEnvironment(pendingValue.current);

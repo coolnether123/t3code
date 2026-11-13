@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import { MuseUsageHome } from "@t3tools/provider-muse/server";
@@ -6,18 +7,22 @@ import { MuseUsageHome } from "@t3tools/provider-muse/server";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeZlib from "node:zlib";
 
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   Environment as HostProcessEnvironment,
   HomeDirectory as HostHomeDirectory,
+  Hostname as HostHostname,
 } from "@t3tools/shared/HostProcess";
 import {
   UsageDay,
   UsageSummary as UsageSummarySchema,
+  USAGE_CONTRACT_VERSION,
   UsageReport as UsageReportSchema,
   ProviderDriverKind,
+  ProviderInstanceId,
   type UsageReportInput,
   type UsageSummary,
   type UsageSummaryInput,
@@ -41,6 +46,9 @@ import * as ServerSettings from "../serverSettings.ts";
 import { vi } from "vite-plus/test";
 import * as UsageService from "./UsageService.ts";
 import { UsageScanStore } from "./usageScanStore.ts";
+
+const isUsageSummary = Schema.is(UsageSummarySchema);
+const isUsageReport = Schema.is(UsageReportSchema);
 
 const encodeProof = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
@@ -135,6 +143,8 @@ const serviceLayers = (input: {
   readonly prefix: string;
   readonly home: string;
   readonly configBaseDir?: string;
+  readonly hostname?: string;
+  readonly environment?: NodeJS.ProcessEnv;
   readonly settings: Parameters<typeof ServerSettings.layerTest>[0];
   readonly onRatesFetch?: () => void;
   readonly neverRates?: boolean;
@@ -142,12 +152,13 @@ const serviceLayers = (input: {
   readonly ratesDocument?: unknown;
 }) =>
   ServerConfig.layerTest(process.cwd(), input.configBaseDir ?? { prefix: input.prefix }).pipe(
-    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
     Layer.provideMerge(Layer.succeed(HostHomeDirectory, input.home)),
+    Layer.provideMerge(Layer.succeed(HostHostname, input.hostname ?? "test-host")),
     Layer.provideMerge(Layer.mock(AntigravityUsage.AntigravityUsage)({})),
     Layer.provideMerge(Layer.mock(CursorUsageAccounts.CursorUsageAccounts)({})),
     Layer.provideMerge(
-      Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.sync(() => undefined) }),
+      Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.succeedNone }),
     ),
     Layer.provideMerge(ServerSettings.layerTest(input.settings)),
     Layer.provideMerge(
@@ -172,7 +183,10 @@ const serviceLayers = (input: {
       ),
     ),
     Layer.provideMerge(
-      Layer.succeed(HostProcessEnvironment, { GROK_HOME: NodePath.join(input.home, "grok") }),
+      Layer.succeed(HostProcessEnvironment, {
+        GROK_HOME: NodePath.join(input.home, "grok"),
+        ...input.environment,
+      }),
     ),
   );
 
@@ -181,6 +195,188 @@ function totalOutputTokens(summary: { buckets: readonly { totals: { outputTokens
 }
 
 describe("UsageService", () => {
+  it.live("keeps provider usage available when a transcript is replaced by an archive", () =>
+    Effect.gen(function* () {
+      const { makeProviderUsageReader } = yield* Effect.promise(() =>
+        vi.importActual<typeof import("./usageProviderReaders.ts")>("./usageProviderReaders.ts"),
+      );
+      const { home, settings } = yield* setup;
+      const dir = NodePath.join(home, "pi-sessions");
+      const transcript = NodePath.join(dir, "session.jsonl");
+      const text = [
+        JSON.stringify({ type: "session", id: "pi-session" }),
+        JSON.stringify({
+          type: "usage",
+          id: "pi-usage",
+          timestamp: "2026-08-01T10:00:00Z",
+          provider: "anthropic",
+          model: "claude-fable-5",
+          usage: { input: 10, output: 7 },
+        }),
+        "",
+      ].join("\n");
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(dir);
+        await NodeFSP.writeFile(transcript, text);
+      });
+      const layers = serviceLayers({
+        prefix: "usage-provider-archive",
+        home,
+        settings: {
+          ...settings,
+          providerInstances: {
+            ...settings.providerInstances,
+            [ProviderInstanceId.make("pi")]: {
+              driver: ProviderDriverKind.make("pi"),
+              config: {},
+              environment: [{ name: "PI_CODING_AGENT_SESSION_DIR", value: dir, sensitive: false }],
+            },
+          },
+        },
+        configBaseDir: NodePath.join(home, "state"),
+      });
+      const read = () =>
+        Effect.gen(function* () {
+          const reader = yield* makeProviderUsageReader;
+          const settingsService = yield* ServerSettings.ServerSettingsService;
+          const currentSettings = yield* settingsService.getSettings;
+          const scan = () =>
+            reader({
+              settings: currentSettings,
+              windowStartMs: Date.parse("2026-07-31"),
+              retentionCutoffMs: Date.parse("2025-08-01"),
+              awaitRefresh: true,
+              providers: ["pi"],
+            });
+          const first = yield* scan();
+          assert.strictEqual(first[0]?.status ?? "ok", "ok");
+          assert.strictEqual(
+            first[0]?.files?.flatMap((file) => file.records)[0]?.totals.outputTokens,
+            7,
+            JSON.stringify(first),
+          );
+          return scan;
+        }).pipe(Effect.provide(layers));
+      const scan = yield* read();
+      yield* Effect.promise(async () => {
+        await NodeFSP.writeFile(transcript + ".zst", NodeZlib.zstdCompressSync(text));
+        await NodeFSP.unlink(transcript);
+      });
+      const archived = yield* scan();
+      assert.strictEqual(archived[0]?.status ?? "ok", "ok");
+      assert.lengthOf(archived[0]?.files ?? [], 1);
+      assert.strictEqual(archived[0]?.files?.[0]?.records[0]?.totals.outputTokens, 7);
+      const restarted = yield* read();
+      const persisted = yield* restarted();
+      assert.strictEqual(persisted[0]?.status ?? "ok", "ok");
+      assert.lengthOf(persisted[0]?.files ?? [], 1);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("keeps the first host identity across recreation and explicit override removal", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, claudeLine(1, 5)));
+      for (const [hostname, override, expected] of [
+        ["container-a", undefined, "container-a"],
+        ["container-b", undefined, "container-a"],
+        ["container-c", "physical-host", "physical-host"],
+        ["container-d", undefined, "container-a"],
+      ] as const) {
+        const summary = yield* Effect.gen(function* () {
+          const service = yield* UsageService.make;
+          return yield* service.readSummary(WINDOW);
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(
+            serviceLayers({
+              prefix: "usage-host-id",
+              home,
+              settings,
+              hostname,
+              configBaseDir: NodePath.join(home, "usage-host-id"),
+              environment: override === undefined ? {} : { T3CODE_HOST_ID: override },
+            }),
+          ),
+        );
+        const source = summary.sources.find((source) => source.fingerprint.provider === "claude");
+        assert.strictEqual(source?.fingerprint.hostId, expected);
+      }
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("concurrent initialization keeps one host identity across service recreation", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, claudeLine(1, 5)));
+      const prefix = "usage-host-id-race";
+      const hostIdPath = NodePath.join(home, prefix, "usage-host-id");
+      const bothRead = yield* Deferred.make<void>();
+      let reads = 0;
+      const summaries = yield* Effect.forEach(
+        ["container-a", "container-b"],
+        (hostname) =>
+          Effect.gen(function* () {
+            const fileSystem = yield* FileSystem.FileSystem;
+            let firstRead = true;
+            const service = yield* UsageService.make.pipe(
+              Effect.provideService(FileSystem.FileSystem, {
+                ...fileSystem,
+                readFileString: (path, encoding) =>
+                  Effect.gen(function* () {
+                    if (path !== hostIdPath || !firstRead) {
+                      return yield* fileSystem.readFileString(path, encoding);
+                    }
+                    firstRead = false;
+                    // Both instances observe the missing file before either can create it.
+                    const result = yield* Effect.exit(fileSystem.readFileString(path, encoding));
+                    reads += 1;
+                    if (reads === 2) yield* Deferred.succeed(bothRead, undefined);
+                    yield* Deferred.await(bothRead);
+                    return yield* result;
+                  }),
+              }),
+            );
+            return yield* service.readSummary(WINDOW);
+          }).pipe(
+            Effect.scoped,
+            Effect.provide(
+              serviceLayers({
+                prefix,
+                home,
+                settings,
+                hostname,
+                configBaseDir: NodePath.join(home, prefix),
+              }),
+            ),
+          ),
+        { concurrency: "unbounded" },
+      );
+      const persisted = yield* Effect.promise(() => NodeFSP.readFile(hostIdPath, "utf8"));
+      const hostId = persisted.trim();
+      assert.include(["container-a", "container-b"], hostId);
+      const restarted = yield* Effect.gen(function* () {
+        const service = yield* UsageService.make;
+        return yield* service.readSummary(WINDOW);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          serviceLayers({
+            prefix,
+            home,
+            settings,
+            hostname: "container-c",
+            configBaseDir: NodePath.join(home, prefix),
+          }),
+        ),
+      );
+      for (const summary of [...summaries, restarted]) {
+        const source = summary.sources.find((source) => source.fingerprint.provider === "claude");
+        assert.strictEqual(source?.fingerprint.hostId, hostId);
+      }
+    }).pipe(Effect.scoped),
+  );
+
   it.live("retains reconciled Codex usage and diagnostics through restart and repair", () =>
     Effect.gen(function* () {
       const { home, settings } = yield* setup;
@@ -248,6 +444,8 @@ describe("UsageService", () => {
       const service = yield* UsageService.make.pipe(
         Effect.provide(serviceLayers({ prefix: "usage-contract-seven", home, settings })),
       );
+      const current = yield* service.readSummary(WINDOW);
+      assert.strictEqual(current.contractVersion, USAGE_CONTRACT_VERSION);
       const summary = yield* service.readSummary({
         ...WINDOW,
         clientContractVersion: 7,
@@ -257,14 +455,14 @@ describe("UsageService", () => {
         includeRepeatedInput: false,
       });
       assert.strictEqual(summary.contractVersion, 7);
-      assert.strictEqual(Schema.is(UsageSummarySchema)(summary), true);
+      assert.strictEqual(isUsageSummary(summary), true);
       assert.strictEqual(
         summary.buckets.some((bucket) => bucket.provider === "claude"),
         true,
       );
       const report = yield* service.readReport({ ...WINDOW, mode: "overview", refresh: false });
       assert.strictEqual(report.mode, "overview");
-      assert.strictEqual(Schema.is(UsageReportSchema)(report), true);
+      assert.strictEqual(isUsageReport(report), true);
     }).pipe(Effect.scoped),
   );
 
@@ -273,7 +471,13 @@ describe("UsageService", () => {
     () =>
       Effect.gen(function* () {
         const { settings, home } = yield* setup;
+        const environment: NodeJS.ProcessEnv = {
+          T3_OTIS_USAGE_ORIGIN: "http://127.0.0.1:5197",
+          T3_OTIS_USAGE_MODE: "dual",
+          T3_OTIS_USAGE_TOKEN: "synthetic-token",
+        };
         const service = yield* UsageService.make.pipe(
+          Effect.provideService(HostProcessEnvironment, environment),
           Effect.provide(serviceLayers({ prefix: "otis-prompt-subscriber", home, settings })),
         );
         const input = {
@@ -351,6 +555,8 @@ describe("UsageService", () => {
         yield* Effect.promise(() => NodeFSP.writeFile(receipt, proof));
         vi.stubEnv("T3_OTIS_USAGE_MODE", "otis");
         vi.stubEnv("T3_OTIS_USAGE_PARITY_RECEIPT", receipt);
+        environment.T3_OTIS_USAGE_MODE = "otis";
+        environment.T3_OTIS_USAGE_PARITY_RECEIPT = receipt;
         assert.strictEqual((yield* read()).analytics?.parity, "cutover-verified");
         assert.strictEqual(localReads, 1);
         assert.isUndefined((yield* read(true)).analytics);

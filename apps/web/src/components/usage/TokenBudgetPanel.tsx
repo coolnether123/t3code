@@ -189,13 +189,13 @@ export function TokenBudgetPanel({
                     {result ? `≈ ${formatTokens(result.total)}` : "Pending"}
                   </td>
                   <td className="text-right font-mono text-xs tabular-nums">
-                    {result ? formatTokens(result.input) : "—"}
+                    {result ? formatTokens(result.input) : "-"}
                   </td>
                   <td className="text-right font-mono text-xs tabular-nums">
-                    {result ? formatTokens(result.output) : "—"}
+                    {result ? formatTokens(result.output) : "-"}
                   </td>
                   <td className="text-right font-mono text-xs tabular-nums">
-                    {result ? `$${result.perMillion.toFixed(4)}` : "—"}
+                    {result ? `$${result.perMillion.toFixed(4)}` : "-"}
                   </td>
                 </tr>
               );

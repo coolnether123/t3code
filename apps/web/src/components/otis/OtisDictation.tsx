@@ -22,6 +22,7 @@ export function OtisDictation({
   const speech = useRef<ReturnType<typeof createDeviceSpeech> | null>(null);
   const preparing = useRef(false);
   const abort = useRef<AbortController | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Stop the recording and request when the dictation control unmounts.
   useEffect(
     () => () => {
       const controller = abort.current;

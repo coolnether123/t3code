@@ -9,6 +9,8 @@ import { describe, expect, it } from "vite-plus/test";
 import { readOtisPromptReport, selectPromptReport } from "./otisPromptSubscriber.ts";
 import { validPromptCutoverReceipt } from "./promptSubscriberState.ts";
 
+const decodeOtisPromptReport = Schema.decodeUnknownSync(OtisPromptReport);
+
 const decodeLocalReport = Schema.decodeUnknownSync(UsageReportPrompts);
 
 const input: UsageReportInput = {
@@ -155,7 +157,7 @@ describe("Otis prompt subscriber compatibility", () => {
       words: report.words.map(row),
       keyword: row(report.keyword!),
     };
-    const decoded = Schema.decodeUnknownSync(OtisPromptReport)(JSON.parse(JSON.stringify(report)));
+    const decoded = decodeOtisPromptReport(JSON.parse(JSON.stringify(report)));
     const matched = selectPromptReport(input, decoded, sqliteLocal);
     expect(matched.analytics?.parity).toBe("matched");
     expect(matched.analytics?.differences).toEqual([]);

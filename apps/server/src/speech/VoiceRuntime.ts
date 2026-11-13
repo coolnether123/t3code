@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ThreadId } from "@t3tools/contracts";
 import * as ServerConfig from "../config.ts";
@@ -9,6 +10,10 @@ import { callOperator } from "./callOperator.ts";
 import { CallReplyBuffer } from "./operatorProtocol.ts";
 import { HoldTurnGuard } from "./hold.ts";
 import { lookupVoiceAgenda } from "./voiceLookups.ts";
+
+class VoiceEventError extends Schema.TaggedError<VoiceEventError>()("VoiceEventError", {
+  cause: Schema.Unknown,
+}) {}
 
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -46,7 +51,10 @@ export const layer = Layer.effectDiscard(
             owner?.role === "voice" ? holds.accept(event, reply.raw) : { event, stop: false };
           if (!accepted) return;
           const next = accepted.event;
-          const link = yield* Effect.tryPromise(() => calls.event(next, reply.raw));
+          const link = yield* Effect.tryPromise({
+            try: () => calls.event(next, reply.raw),
+            catch: (cause) => new VoiceEventError({ cause }),
+          });
           if (
             link?.role === "voice" &&
             (event.type === "turn.started" ||
@@ -67,7 +75,10 @@ export const layer = Layer.effectDiscard(
               yield* Effect.sleep(5_000);
               const expired = holds.expire(event);
               if (!expired) return;
-              const link = yield* Effect.tryPromise(() => calls.event(expired.event, reply.raw));
+              const link = yield* Effect.tryPromise({
+                try: () => calls.event(expired.event, reply.raw),
+                catch: (cause) => new VoiceEventError({ cause }),
+              });
               if (link?.role === "voice")
                 yield* threads.recordVoiceEvent(link, expired.event, reply.raw);
               replies.accept(expired.event);

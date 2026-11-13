@@ -1,5 +1,6 @@
 import type {
   EnvironmentId,
+  UsageModelFilter,
   UsageSummaryInput,
   UsageSummary,
   ServerProvider,
@@ -13,6 +14,14 @@ import { executeAtomQuery, runAtomCommand, squashAtomCommandFailure } from "./ru
 import type { createServerEnvironmentAtoms } from "./server.ts";
 
 const isEnvironmentRpcUnavailable = Schema.is(EnvironmentRpcUnavailableError);
+
+/** The Usage tab asks each environment with that environment's configured model filter. */
+export function usageSummaryInput(
+  input: UsageSummaryInput,
+  modelFilter: UsageModelFilter | undefined,
+): UsageSummaryInput {
+  return modelFilter === undefined ? input : { ...input, modelFilter };
+}
 
 export function needsCursorKeychainAccess(
   summary: UsageSummary | null,
@@ -88,7 +97,7 @@ export async function refreshUsage({
   registry: AtomRegistry.AtomRegistry;
   server: Pick<
     ReturnType<typeof createServerEnvironmentAtoms>,
-    "usageSummary" | "refreshUsageRates"
+    "usageSummary" | "refreshUsageRates" | "usageModelFilterAtom"
   >;
   presentations: Pick<ReturnType<typeof createEnvironmentPresentationAtoms>, "presentationAtom">;
   environmentIds: readonly EnvironmentId[];
@@ -96,7 +105,10 @@ export async function refreshUsage({
 }): Promise<void> {
   await Promise.all(
     environmentIds.map(async (environmentId) => {
-      const query = server.usageSummary({ environmentId, input });
+      const query = server.usageSummary({
+        environmentId,
+        input: usageSummaryInput(input, registry.get(server.usageModelFilterAtom(environmentId))),
+      });
       const presentation = presentations.presentationAtom(environmentId);
       const controller = new AbortController();
       const abortWhenDisconnected = () => {

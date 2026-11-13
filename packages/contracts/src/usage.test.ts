@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import { UsageReportInput, UsageSourceFingerprint, UsageSummaryInput } from "./usage.ts";
 
 const decode = Schema.decodeUnknownSync(UsageSummaryInput);
+const decodeFingerprint = Schema.decodeSync(UsageSourceFingerprint);
 const base = {
   timeZone: "UTC",
   sinceDay: "2026-08-01",
@@ -12,7 +13,7 @@ const base = {
 
 it("accepts missing Grok source fingerprints reported by older Mac servers", () => {
   expect(
-    Schema.decodeSync(UsageSourceFingerprint)({
+    decodeFingerprint({
       hostId: "millie",
       provider: "grok",
       resolvedHomePath: "/Users/millie/.grok",

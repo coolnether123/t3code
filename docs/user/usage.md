@@ -76,6 +76,20 @@ cost, split by token type and by speed. These estimates are not your subscriptio
 split, such as a provider-reported cost for a model without public rates, shows as **Other**.
 Select a model under **Breakdown** to see its trend, cache hit rate, and cost per million tokens.
 
+Totals depend on the history available on each server. Grok turns without a saved completed-turn
+record are missing from the totals.
+Text generation (thread titles, commit messages, PR text, branch names and review guides) is not in
+the totals for Codex or Claude Code 2.0.63 and newer, because those runs save no session history.
+
+OpenCode reads its SQLite database and older JSON history. Antigravity reads local conversation
+databases, including T3-managed profiles. Set `OPENCODE_DATA_DIR` or `ANTIGRAVITY_DATA_DIR` on the
+server to read a different data directory; comma-separated paths read multiple directories.
+
+Cursor reads account usage from Cursor's API for the account you signed in with in T3 or set as
+`CURSOR_API_KEY`. This includes headless T3 sessions and desktop usage across machines; the same
+account counts once across connected environments. T3 does not estimate missing tokens from
+conversation text.
+
 Usage includes each configured account's history, including disabled accounts. Custom homes follow
 the account's home setting or its `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or `GROK_HOME` environment
 variable. Pi reads `~/.pi/agent/sessions`, or the `sessions` directory under
@@ -90,6 +104,12 @@ depend on each project's working directory and cannot be reliably discovered by 
 sharing a history directory count once.
 
 Choose **Limits** for subscription windows and banked resets, or **Cost** and **Tokens** for local history. The provider filter controls the providers included in the charts and totals. Cost and token breakdowns show input, cache reads, cache writes and output. Speed costs show standard, fast and ultrafast usage when the provider records that information.
+The server saves its first hostname in `<T3 home>/usage-host-id`, so a recreated container keeps
+its usage identity when T3 home is persisted. Set `T3CODE_HOST_ID` to choose the identity
+explicitly.
+
+When your app and server support different providers, usage totals may cover only the providers
+your app understands. Update the app to include newly supported providers.
 
 Use **Past 24h** for an hourly chart covering the exact rolling 24-hour period. The **7 days**,
 **30 days**, **90 days**, **120 days**, and **1 year** ranges use daily resolution. Cost and token
@@ -123,7 +143,31 @@ cache rate; storage duration, long-lived cache premiums, audio/image-specific ra
 are not reconstructed from token totals. Provider-reported costs may themselves be estimates from
 the local harness. A subscription's quota percentage is not a dollar balance.
 
-## Subscription limits
+## Show only some models
+
+To count only some models, or to leave some out, add `usageModelFilter` to the server's
+`settings.json` in its `userdata` directory, such as `~/.t3/userdata/settings.json`:
+
+```json
+{
+  "usageModelFilter": {
+    "include": [{ "provider": "claude", "model": "orbit-1" }, { "model": "orbit-2" }],
+    "exclude": [{ "model": "drift-9" }]
+  }
+}
+```
+
+`include` keeps only the listed models and `exclude` leaves the listed models out. `provider` is
+one of `claude`, `codex`, `cursor`, `grok`, `opencode`, `antigravity`, `pi`, or `muse`; omit it
+to match a model ID from any provider. Use the model ID that Usage shows without **Map to**, such
+as a provider-prefixed ID for Pi. Filters apply before **Map to**, so a model you leave out is not
+counted under its mapped name. Usage applies each environment's own filter. Remove the setting to
+show every model again.
+
+If the setting is invalid, Usage ignores it and shows every model, and the next save of any other
+setting removes it from `settings.json`.
+
+## Track subscription limits
 
 **Usage → Limits** pools every subscription account it can see per provider, so with several Codex
 or Claude accounts across your enabled environments and hubs you read one number per window rather than a
@@ -140,16 +184,41 @@ Claude resets are not available when the server runs on macOS, where Claude keep
 Keychain. On narrow screens, numbered rows below
 the bar show each account's quota, countdown, and credits. Tap a row to open its details.
 
+The same account signed in on more than one environment, or reported by a hub as well, counts once.
+Filter with the environment dropdown to see what a single machine has.
+
+When a Claude or Codex account has no overall weekly quota left, its pooled session contribution
+shows 0% left. The next refill depends on both reset times: an exhausted session must also reset,
+and a partly spent session may only regain its unused portion when the week resets. Missing or
+stale reset times have no refill estimate; refresh Limits for a new reading. Claude's
+model-specific weekly allowances keep their reported values.
+
+Opening Limits checks the selected connected environments automatically. Each client waits at
+least five minutes between automatic checks of an environment, including after a failed check.
+If a window still looks stale, refresh Limits to re-check every provider and hub.
+
+Pick `/usage-limits` from the composer's command menu, or send it as a message, to check the
+current model's limits without leaving the conversation. The result opens above the composer and
+closes when you dismiss it or send your next message. It uses the same snapshot as **Usage → Limits**, so it does not run the agent or refresh
+anything. The command is offered only for providers that appear under **Usage → Limits**.
+
+To keep them in view on web and desktop, turn on **Usage limits** in **Settings → Appearance → Thread details**, or right-click the thread details card.
+The bottom of the thread details card then shows how much is left in each limit window of the
+current provider account. Some windows, such as a weekly Opus limit, count only one model. Hover a
+row to see when it resets and your pace. Turn on **Context window** to also show the thread's
+context use against the model's limit. A tick on the bar marks where the provider compacts
+automatically, when it reports that point.
+
 OpenCode Go reports its session, weekly, and monthly allowance when OpenCode runs locally in
 the environment. T3 cannot report limits for external OpenCode servers because their credentials
 belong to the remote server. Limits need an OpenCode Go API key, or an OpenCode Console connected
 in OpenCode with an API key. A Console browser sign-in alone does not report them. You can also add
 your Go API key as `OPENCODE_API_KEY` in the OpenCode instance's **Environment variables**, then
 refresh provider status. Cursor reports
-its monthly allowance, including separate Auto and API usage, using the CLI login or
-`CURSOR_AUTH_TOKEN`. On macOS, this includes the default Keychain login after you enable Cursor
-usage. Keychain login is used for limits only with Cursor's default API endpoint. If you configure
-a custom Cursor endpoint, use an explicit token or file-based CLI login for limits.
+its monthly allowance, including separate Auto and API usage, for `CURSOR_AUTH_TOKEN` when it is set,
+otherwise for the account you signed in with in T3 or set as `CURSOR_API_KEY`.
+Sign-in and API keys report limits only with Cursor's default API endpoint. If you configure a custom
+Cursor endpoint, use an explicit `CURSOR_AUTH_TOKEN` for limits.
 
 ## Review repeated input
 
@@ -504,3 +573,41 @@ The power monitor is separate and does not contribute to Codex quota totals.
 The reset-cycle arrows update the chart, API-equivalent value, and token planner together. Older cycles are calculated from their recorded transcript interval. Local Qwen sessions do not count toward the OpenAI subscription conversion. Refresh keeps the selected cycle. Incomplete transcript reads retry automatically with a bounded backoff; complete saved calculations remain available while newer data is being read.
 
 On Windows, Claude usage also includes Claude Desktop local-agent sessions from the app data directory.
+Grok reports the remaining subscription allowance and reset time for its current billing period
+after signing in with `grok login`. Explicit `XAI_API_KEY` connections and custom authentication
+or endpoint configurations do not report subscription limits.
+
+Muse Code reports its session and weekly windows and its tier once the Muse CLI has run in a thread.
+Until then it shows no limits. Readings are not kept across a server restart.
+
+API-key accounts may not report subscription limits. This also applies to Claude connections
+using a proxy through `ANTHROPIC_AUTH_TOKEN`.
+
+## Connect a CLIProxyAPI hub
+
+To see pooled accounts, open **Settings → Providers → Usage providers → Add hub**. Choose the
+environment that will connect to the hub and enter its URL and management key.
+
+The hub's Codex, Claude, xAI (shown as Grok) and Antigravity accounts appear under **Usage → Limits**;
+accounts for other providers are not read. Codex accounts show banked reset credits; select an
+account and choose **Use reset** to redeem one. No hub plugin is required.
+
+This connection supplies usage information; configure
+the provider separately to send agent requests through the hub. Remove the hub from the same
+settings section when you no longer need it.
+
+## Subscription usage widget
+
+Add **Subscription usage** from your iOS or Android widget gallery to see remaining Codex and
+Claude quotas. Tap it to open **Usage → Limits**; on Android this works while T3 is running in
+the background, otherwise open the app from the launcher. On iOS, use **Edit Widget** to choose
+Session, Weekly, or both for each provider. Reopen T3 to refresh expired readings.
+
+## Keyboard shortcuts
+
+On web and desktop, open Usage from the command palette. While on Usage,
+press `C`, `T`, or `L` for Cost, Tokens, or Limits while not typing in a field.
+Use `Ctrl+Shift+1/2/3/4` (`Cmd+Shift+1/2/3/4` on macOS) for the past
+24 hours, 7 days, 30 days, or 90 days. Period shortcuts do nothing on Limits.
+Press `Escape` to return to the previous page. Customize these shortcuts in
+**Settings → Keybindings**.

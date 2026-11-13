@@ -235,7 +235,7 @@ export class ThreadVoiceSession {
     const request = { ...input, callId: this.saved!.callId };
     const send = async () => {
       if (request.callId !== this.saved?.callId)
-        throw new VoiceRequestError("The call changed. Your words remain queued.", false);
+        throw VoiceRequestError.new("The call changed. Your words remain queued.", false);
       const controller = new AbortController();
       let timeout: ReturnType<typeof setTimeout> | undefined;
       let aborted: (() => void) | undefined;
@@ -244,7 +244,7 @@ export class ThreadVoiceSession {
           // @effect-diagnostics-next-line globalTimers:off -- Bound transports that may ignore cancellation.
           timeout = setTimeout(
             () => {
-              const error = new VoiceRequestError(
+              const error = VoiceRequestError.new(
                 "Voice request timed out. Retrying; your words are saved.",
                 true,
               );
@@ -351,7 +351,7 @@ export class ThreadVoiceSession {
     this.audioNeedsTap = true;
     if (this.recovering) return;
     this.failed(
-      new VoiceRequestError("Audio paused by the phone. Stop other audio, then tap Retry.", false),
+      VoiceRequestError.new("Audio paused by the phone. Stop other audio, then tap Retry.", false),
     );
   }
   async start(options: CallOptions, messages: readonly Message[]) {
@@ -1302,7 +1302,7 @@ export class ThreadVoiceSession {
         attempt.abort();
         await Promise.allSettled(chunks);
         if (playbackFailed && !signal.aborted)
-          throw new VoiceRequestError(
+          throw VoiceRequestError.new(
             "Audio playback failed. Check the audio device, then retry.",
             false,
           );

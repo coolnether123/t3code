@@ -1,10 +1,8 @@
-import { act } from "react";
-import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { act, fakeTimers, render } from "../../../test/render";
 import { UsagePaceChart } from "./UsagePaceChart";
 
-afterEach(() => vi.restoreAllMocks());
 describe("weekly pace chart", () => {
   const samples = [
     {
@@ -14,19 +12,17 @@ describe("weekly pace chart", () => {
     },
   ];
   it("zooms, pans and restores the complete cycle with keyboard and buttons", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const onRangeChange = vi.fn();
     const rows = [
       samples[0]!,
       { ...samples[0]!, observedAt: "2026-09-02T00:00:00.000Z", remainingPercent: 40 },
     ];
-    vi.spyOn(Date, "now").mockReturnValue(Date.parse(rows[1]!.observedAt));
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () =>
-        root.render(<UsagePaceChart samples={rows} onRangeChange={onRangeChange} />),
+    using _now = vi.spyOn(Date, "now").mockReturnValue(Date.parse(rows[1]!.observedAt));
+    {
+      await using screen = await render(
+        <UsagePaceChart samples={rows} onRangeChange={onRangeChange} />,
       );
+      const { container } = screen;
       const button = (label: string) =>
         Array.from(container.querySelectorAll("button")).find((b) => b.textContent === label)!;
       await act(async () => button("6h").click());
@@ -49,13 +45,9 @@ describe("weekly pace chart", () => {
       );
       expect(onRangeChange.mock.lastCall![0]).toBeNull();
       expect(container.querySelector('[aria-label="Visible chart range"]')).toBeNull();
-    } finally {
-      await act(async () => root.unmount());
-      vi.unstubAllGlobals();
     }
   });
   it("zooms a dragged range and clears it when moving to another reset cycle", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const onRangeChange = vi.fn();
     const rows = [
       samples[0]!,
@@ -66,18 +58,19 @@ describe("weekly pace chart", () => {
         resetsAt: "2026-09-10T00:00:00.000Z",
       },
     ];
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () =>
-        root.render(<UsagePaceChart samples={rows} onRangeChange={onRangeChange} />),
+    {
+      await using screen = await render(
+        <UsagePaceChart samples={rows} onRangeChange={onRangeChange} />,
       );
+      const { container } = screen;
       await act(async () =>
         container.querySelector<HTMLButtonElement>('[aria-label="Previous reset cycle"]')!.click(),
       );
       const plot = container.querySelector<SVGSVGElement>('svg[role="img"]')!;
       plot.setPointerCapture = vi.fn();
-      vi.spyOn(plot, "getBoundingClientRect").mockReturnValue({ left: 0, width: 100 } as DOMRect);
+      using _rect = vi
+        .spyOn(plot, "getBoundingClientRect")
+        .mockReturnValue({ left: 0, width: 100 } as DOMRect);
       await act(async () =>
         plot.dispatchEvent(
           new PointerEvent("pointerdown", { clientX: 25, button: 0, bubbles: true }),
@@ -97,13 +90,10 @@ describe("weekly pace chart", () => {
         container.querySelector<HTMLButtonElement>('[aria-label="Next reset cycle"]')!.click(),
       );
       expect(container.querySelector('[aria-label="Visible chart range"]')).toBeNull();
-    } finally {
-      await act(async () => root.unmount());
-      vi.unstubAllGlobals();
     }
   });
   it("renders quota, target, projection and time without transcript costs", () => {
-    vi.spyOn(Date, "now").mockReturnValue(Date.parse(samples[0]!.observedAt));
+    using _now = vi.spyOn(Date, "now").mockReturnValue(Date.parse(samples[0]!.observedAt));
     const markup = renderToStaticMarkup(<UsagePaceChart samples={samples} />);
     expect(markup).toContain("80%");
     expect(markup).toContain("Pace to reset");
@@ -115,7 +105,9 @@ describe("weekly pace chart", () => {
     expect(markup).not.toContain("Unavailable");
   });
   it("does not show a stale reading as a live forecast", () => {
-    vi.spyOn(Date, "now").mockReturnValue(Date.parse(samples[0]!.observedAt) + 16 * 60_000);
+    using _now = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(Date.parse(samples[0]!.observedAt) + 16 * 60_000);
     const markup = renderToStaticMarkup(<UsagePaceChart samples={samples} />);
     expect(markup).toContain("Reading is stale");
     expect(markup).toContain("Last run-out estimate");
@@ -127,7 +119,7 @@ describe("weekly pace chart", () => {
       { ...samples[0]!, observedAt: "2026-09-02T00:00:00.000Z", remainingPercent: 50 },
       { ...samples[0]!, observedAt: "2026-09-02T01:00:00.000Z", remainingPercent: 49 },
     ];
-    vi.spyOn(Date, "now").mockReturnValue(Date.parse(rows[2]!.observedAt));
+    using _now = vi.spyOn(Date, "now").mockReturnValue(Date.parse(rows[2]!.observedAt));
     const markup = renderToStaticMarkup(<UsagePaceChart samples={rows} />);
     const container = document.createElement("div");
     container.innerHTML = markup;
@@ -141,37 +133,35 @@ describe("weekly pace chart", () => {
     expect(container.querySelector("details")?.open).toBe(false);
   });
   it("accepts a new reading between clock ticks without a stale warning", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    vi.useFakeTimers();
+    using _timers = fakeTimers();
     const started = Date.parse(samples[0]!.observedAt);
     vi.setSystemTime(started);
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsagePaceChart samples={samples} />));
+    {
+      await using screen = await render(<UsagePaceChart samples={samples} />);
+      const { container } = screen;
       vi.setSystemTime(started + 20_000);
       const refreshed = [
         ...samples,
-        { ...samples[0]!, observedAt: new Date(Date.now()).toISOString(), remainingPercent: 79 },
+        {
+          ...samples[0]!,
+          observedAt: new Date(started + 20_000).toISOString(),
+          remainingPercent: 79,
+        },
       ];
-      await act(async () => root.render(<UsagePaceChart samples={refreshed} />));
+      await screen.rerender(<UsagePaceChart samples={refreshed} />);
       expect(container.textContent).toContain("79%");
       expect(container.textContent).toContain("Updated");
       expect(container.textContent).not.toContain("Reading is stale");
-    } finally {
-      await act(async () => root.unmount());
-      vi.useRealTimers();
-      vi.unstubAllGlobals();
     }
   });
   it("uses an announced deadline without claiming usage was reset", () => {
-    vi.spyOn(Date, "now").mockReturnValue(Date.parse(samples[0]!.observedAt));
+    using _now = vi.spyOn(Date, "now").mockReturnValue(Date.parse(samples[0]!.observedAt));
     const markup = renderToStaticMarkup(
       <UsagePaceChart
         samples={samples}
         news={{
           status: "ready",
-          checkedAt: Date.now(),
+          checkedAt: Date.parse(samples[0]!.observedAt),
           announcement: {
             publishedAt: "2026-08-30T20:00:00Z",
             targetAt: "2026-08-31T01:00:00Z",
@@ -192,57 +182,53 @@ describe("weekly pace chart", () => {
   });
   it("shows an API-cost switch and explains why incomplete or stale data cannot project", () => {
     const at = Date.parse(samples[0]!.observedAt);
-    vi.spyOn(Date, "now").mockReturnValue(at);
+    using _now = vi.spyOn(Date, "now").mockReturnValue(at);
     const sparse = renderToStaticMarkup(<UsagePaceChart samples={samples} />);
     expect(sparse).toContain('aria-label="Show API cost pace"');
     expect(sparse).toContain("complete, priced costs");
     expect(sparse).not.toContain('aria-label="API cost projection"');
-    vi.spyOn(Date, "now").mockReturnValue(at + 16 * 60_000);
+    _now.mockReturnValue(at + 16 * 60_000);
     const stale = renderToStaticMarkup(<UsagePaceChart samples={samples} />);
     expect(stale).toContain("API cost pace needs a fresh account reading.");
   });
   it("lets the user hide and restore the API projection without changing recorded usage", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const at = Date.parse(samples[0]!.observedAt);
-    vi.spyOn(Date, "now").mockReturnValue(at);
+    using _now = vi.spyOn(Date, "now").mockReturnValue(at);
     const rows = Array.from({ length: 7 }, (_, index) => ({
       ...samples[0]!,
       observedAt: new Date(at - (6 - index) * 3_600_000).toISOString(),
       remainingPercent: [83, 82, 81, 81, 81, 81, 81][index]!,
     }));
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () =>
-        root.render(
-          <UsagePaceChart
-            samples={rows}
-            apiPace={{
-              interval: {
-                id: "pace",
-                sinceTime: rows[0]!.observedAt,
-                untilTime: rows.at(-1)!.observedAt,
-              },
-              remainingValueUsd: 50,
-              models: [
-                {
-                  model: "gpt-5.6-luna",
-                  costUsd: 60,
-                  unpricedRecords: 0,
-                  totals: {
-                    uncachedInputTokens: 0,
-                    cachedInputTokens: 0,
-                    cacheCreationTokens: 0,
-                    outputTokens: 50e6,
-                    reasoningTokens: 0,
-                  },
+    {
+      await using screen = await render(
+        <UsagePaceChart
+          samples={rows}
+          apiPace={{
+            interval: {
+              id: "pace",
+              sinceTime: rows[0]!.observedAt,
+              untilTime: rows.at(-1)!.observedAt,
+            },
+            remainingValueUsd: 50,
+            models: [
+              {
+                model: "gpt-5.6-luna",
+                costUsd: 60,
+                unpricedRecords: 0,
+                totals: {
+                  uncachedInputTokens: 0,
+                  cachedInputTokens: 0,
+                  cacheCreationTokens: 0,
+                  outputTokens: 50e6,
+                  reasoningTokens: 0,
                 },
-              ],
-            }}
-            manualResets={{ availableCount: 3, verified: true }}
-          />,
-        ),
+              },
+            ],
+          }}
+          manualResets={{ availableCount: 3, verified: true }}
+        />,
       );
+      const { container } = screen;
       const toggle = container.querySelector<HTMLInputElement>(
         'input[aria-label="Show API cost pace"]',
       )!;
@@ -264,15 +250,11 @@ describe("weekly pace chart", () => {
       )!;
       await act(async () => recorded.click());
       expect(container.querySelector('[aria-label="API cost projection"]')).toBeNull();
-    } finally {
-      await act(async () => root.unmount());
-      vi.unstubAllGlobals();
     }
   });
   it("uses time-positioned future hit testing and returns to recorded values with keyboard", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const at = Date.parse("2026-08-31T00:00:00.000Z");
-    vi.spyOn(Date, "now").mockReturnValue(at + 30 * 60_000);
+    using _now = vi.spyOn(Date, "now").mockReturnValue(at + 30 * 60_000);
     const rows = [
       {
         ...samples[0]!,
@@ -285,12 +267,11 @@ describe("weekly pace chart", () => {
         remainingPercent: 80,
       },
     ];
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsagePaceChart samples={rows} />));
+    {
+      await using screen = await render(<UsagePaceChart samples={rows} />);
+      const { container } = screen;
       const plot = container.querySelector('svg[role="img"]')!;
-      vi.spyOn(plot, "getBoundingClientRect").mockReturnValue({
+      using _rect = vi.spyOn(plot, "getBoundingClientRect").mockReturnValue({
         left: 0,
         top: 0,
         width: 100,
@@ -312,13 +293,9 @@ describe("weekly pace chart", () => {
       );
       expect(tooltip.textContent).toContain("Recorded");
       expect(tooltip.textContent).not.toContain("Projection");
-    } finally {
-      await act(async () => root.unmount());
-      vi.unstubAllGlobals();
     }
   });
   it("browses saved cycles one at a time and returns to the live cycle", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const rows = [
       { ...samples[0]!, observedAt: "2026-08-30T00:00:00.000Z", remainingPercent: 70 },
       { ...samples[0]!, observedAt: "2026-08-30T02:00:00.000Z", remainingPercent: 50 },
@@ -343,15 +320,12 @@ describe("weekly pace chart", () => {
         resetsAt: "2026-09-06T06:00:00.000Z",
       },
     ];
-    vi.spyOn(Date, "now").mockReturnValue(Date.parse(rows.at(-1)!.observedAt));
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () =>
-        root.render(
-          <UsagePaceChart samples={rows} manualResets={{ availableCount: 3, verified: true }} />,
-        ),
+    using _now = vi.spyOn(Date, "now").mockReturnValue(Date.parse(rows.at(-1)!.observedAt));
+    {
+      await using screen = await render(
+        <UsagePaceChart samples={rows} manualResets={{ availableCount: 3, verified: true }} />,
       );
+      const { container } = screen;
       const previous = container.querySelector<HTMLButtonElement>(
         '[aria-label="Previous reset cycle"]',
       )!;
@@ -392,9 +366,6 @@ describe("weekly pace chart", () => {
       expect(container.querySelector('[aria-label="Even pace"]')).not.toBeNull();
       expect(container.textContent).toContain("80%");
       expect(next.disabled).toBe(true);
-    } finally {
-      await act(async () => root.unmount());
-      vi.unstubAllGlobals();
     }
   });
 });

@@ -24,7 +24,7 @@ import {
   type ProviderRespondToRequestInput,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -103,7 +103,7 @@ interface Session {
 const make = Effect.gen(function* () {
   const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const ownerScope = yield* Scope.Scope;
   const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const adapterEvents = yield* PubSub.unbounded<{
@@ -112,7 +112,7 @@ const make = Effect.gen(function* () {
   }>();
   const sessions = new Map<ThreadId, Session>();
   const lock = yield* Semaphore.make(1);
-  const uuid = crypto.randomUUIDv4().pipe(Effect.orDie);
+  const uuid = crypto.uuidV4().pipe(Effect.orDie);
   const decodeEvent = Schema.decodeUnknownEffect(ProviderRuntimeEvent);
   const sessionView = (threadId: ThreadId, session: Session): ProviderSession => ({
     provider: session.runtime.driver,
@@ -376,8 +376,8 @@ const make = Effect.gen(function* () {
           ),
         ),
     ),
-    sendTurn: (input) =>
-      Effect.gen(function* () {
+    sendTurn: Effect.fn("AuxiliaryProviderSessions.sendTurn")(
+      function* (input: ProviderSendTurnInput) {
         const session = yield* requireSession(input.threadId, "start a turn in");
         if (session.status !== "ready")
           return yield* new AuxiliarySessionError({
@@ -454,48 +454,61 @@ const make = Effect.gen(function* () {
           turnId,
           resumeCursor: { threadId: session.providerThread.nativeThreadRef?.nativeId },
         };
-      }).pipe(
-        Effect.mapError((cause) =>
-          isAuxiliarySessionError(cause)
-            ? cause
-            : new AuxiliarySessionError({
-                operation: "start a turn in",
-                threadId: input.threadId,
-                cause,
-              }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isAuxiliarySessionError(cause)
+              ? cause
+              : new AuxiliarySessionError({
+                  operation: "start a turn in",
+                  threadId: input.threadId,
+                  cause,
+                }),
+          ),
         ),
-      ),
-    interruptTurn: (input) =>
-      Effect.gen(function* () {
+    ),
+    interruptTurn: Effect.fn("AuxiliaryProviderSessions.interruptTurn")(
+      function* (input: ProviderInterruptTurnInput) {
         const session = yield* requireSession(input.threadId, "interrupt");
         if (session.turnId === undefined) return;
         yield* session.runtime.interruptTurn({
           providerThread: session.providerThread,
           providerTurnId: ProviderTurnId.make(input.turnId ?? session.turnId),
         });
-      }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new AuxiliarySessionError({ operation: "interrupt", threadId: input.threadId, cause }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError(
+            (cause) =>
+              new AuxiliarySessionError({
+                operation: "interrupt",
+                threadId: input.threadId,
+                cause,
+              }),
+          ),
         ),
-      ),
-    respondToRequest: (input) =>
-      Effect.gen(function* () {
+    ),
+    respondToRequest: Effect.fn("AuxiliaryProviderSessions.respondToRequest")(
+      function* (input: ProviderRespondToRequestInput) {
         const session = yield* requireSession(input.threadId, "answer an approval in");
         yield* session.runtime.respondToRuntimeRequest({
           requestId: RuntimeRequestId.make(input.requestId),
           decision: input.decision,
         });
-      }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new AuxiliarySessionError({
-              operation: "answer an approval in",
-              threadId: input.threadId,
-              cause,
-            }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError(
+            (cause) =>
+              new AuxiliarySessionError({
+                operation: "answer an approval in",
+                threadId: input.threadId,
+                cause,
+              }),
+          ),
         ),
-      ),
+    ),
   });
 });
 

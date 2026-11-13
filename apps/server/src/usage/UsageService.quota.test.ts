@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import { MuseUsageHome } from "@t3tools/provider-muse/server";
@@ -24,10 +25,10 @@ const testLayer = Layer.mergeAll(
   Layer.succeed(CodexUsageHistory.CodexUsageHistory, {
     resolve: () => Effect.succeed(new Map()),
   }),
-  Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.sync(() => undefined) }),
+  Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.succeedNone }),
   ServerSettings.layerTest(),
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-quota-service-test-" }),
-).pipe(Layer.provideMerge(NodeServices.layer));
+).pipe(Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
 
 vi.mock("./usageQuotaHistory.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./usageQuotaHistory.ts")>()),
@@ -180,6 +181,7 @@ describe("history-only usage requests", () => {
         Effect.provideService(FileSystem.FileSystem, { ...fs, readFileString }),
         Effect.provideService(HttpClient.HttpClient, HttpClient.make(request)),
       );
+      readFileString.mockClear();
       const result = yield* service.readSummary({
         sinceDay: UsageDay.make("2026-07-01"),
         untilDay: UsageDay.make("2026-08-30"),

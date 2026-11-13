@@ -13,6 +13,7 @@ export function OtisButton({
   onOpen: (thread: ScopedThreadRef) => unknown;
 }) {
   const abort = useRef<AbortController | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Cancel the in-flight request when the button unmounts.
   useEffect(() => () => abort.current?.abort(), []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();

@@ -8,7 +8,7 @@ import {
   PositiveInt,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
-import { UsageModelPriceOverride } from "./settings.ts";
+import { UsageModelPriceOverride } from "./usagePricing.ts";
 
 /** Bump for incompatible UsageSummary changes; skipped unknown array variants need no bump. */
 export const USAGE_CONTRACT_VERSION = 8 as const;
@@ -98,6 +98,8 @@ export const UsageBucket = Schema.Struct({
   costSource: UsageCostSource,
   records: NonNegativeInt,
   unpricedRecords: NonNegativeInt,
+  /** Absent from older servers; merges then estimate it from the unpriced record share. */
+  unpricedTokens: Schema.optional(NonNegativeInt),
   sessions: NonNegativeInt,
 });
 export type UsageBucket = typeof UsageBucket.Type;
@@ -115,6 +117,7 @@ export const UsageSourceStatus = Schema.Literals(["ok", "missing", "partial", "f
 export type UsageSourceStatus = typeof UsageSourceStatus.Type;
 
 export const UsageSource = Schema.Struct({
+  action: Schema.optionalKey(Schema.Literal("enableCursorKeychain")),
   fingerprint: UsageSourceFingerprint,
   status: UsageSourceStatus,
   scannedFiles: NonNegativeInt,
@@ -123,7 +126,6 @@ export const UsageSource = Schema.Struct({
   /** Total this count; bucket counts double-count sessions spanning days or models. */
   distinctSessions: NonNegativeInt,
   message: Schema.NullOr(TrimmedNonEmptyString),
-  action: Schema.optionalKey(Schema.Literal("enableCursorKeychain")),
   /** Cached response during refresh; repeat with awaitRefresh for fresh data. */
   refreshing: Schema.optionalKey(Schema.Literal(true)),
 });
@@ -234,6 +236,22 @@ export const UsageQuotaCostSnapshot = Schema.Struct({
   models: Schema.optional(UsageQuotaCost.fields.models),
 });
 export type UsageQuotaCostSnapshot = typeof UsageQuotaCostSnapshot.Type;
+/**
+ * Matches a provider's original model ID, before usage model aliases apply. Omit provider to
+ * match any; a string provider lets older clients carry selectors for providers they lack.
+ */
+export const UsageModelSelector = Schema.Struct({
+  provider: Schema.optional(TrimmedNonEmptyString),
+  model: TrimmedNonEmptyString,
+});
+export type UsageModelSelector = typeof UsageModelSelector.Type;
+
+/** Keeps records matching `include` (all when omitted) and not matching `exclude`. */
+export const UsageModelFilter = Schema.Struct({
+  include: Schema.optional(Schema.Array(UsageModelSelector)),
+  exclude: Schema.optional(Schema.Array(UsageModelSelector)),
+});
+export type UsageModelFilter = typeof UsageModelFilter.Type;
 
 export const UsageSummaryInput = Schema.Struct({
   /**
@@ -273,6 +291,9 @@ export const UsageSummaryInput = Schema.Struct({
   /** Whose subscription the quota intervals measure. Defaults to Codex. */
   quotaProvider: Schema.optional(Schema.Literals(["codex", "claude"])),
   awaitRefresh: Schema.optional(Schema.Boolean),
+  /** Accept an immediate answer from the last scan; its sources are marked refreshing. */
+  provisional: Schema.optional(Schema.Boolean),
+  modelFilter: Schema.optional(UsageModelFilter),
 });
 export type UsageSummaryInput = typeof UsageSummaryInput.Type;
 
@@ -447,6 +468,8 @@ export const UsageSummary = Schema.Struct({
   quotaCosts: Schema.optional(Schema.Array(UsageQuotaCost)),
   quotaCostSnapshots: Schema.optional(Schema.Array(UsageQuotaCostSnapshot)),
   repeatedInput: Schema.optional(UsageRepeatedInputSummary),
+  /** The filter the server applied; absent means unfiltered, including servers that predate filters. */
+  modelFilter: Schema.optional(UsageModelFilter),
 });
 export type UsageSummary = typeof UsageSummary.Type;
 

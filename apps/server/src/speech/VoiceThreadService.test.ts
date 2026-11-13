@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -84,7 +85,7 @@ const dependencies = Layer.mergeAll(
 );
 const layer = VoiceThreadService.layer.pipe(
   Layer.provideMerge(dependencies),
-  Layer.provideMerge(NodeServices.layer),
+  Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
 const seed = Effect.gen(function* () {
   const sink = yield* EventSink.EventSinkV2;
@@ -466,7 +467,7 @@ it.effect.each(["session", "turn"] as const)(
         Effect.provide(
           VoiceThreadService.layer.pipe(
             Layer.provideMerge(testDependencies),
-            Layer.provideMerge(NodeServices.layer),
+            Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
           ),
         ),
       );
@@ -798,7 +799,7 @@ it.effect(
               Layer.mock(Auxiliary.AuxiliaryProviderSessions)({}),
             ),
           ),
-          Layer.provideMerge(NodeServices.layer),
+          Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
         ),
       ),
     );

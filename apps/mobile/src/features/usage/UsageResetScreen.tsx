@@ -10,15 +10,7 @@ import {
 } from "@t3tools/client-runtime/publicResetHistory";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { refreshCodexMonitor } from "@t3tools/client-runtime/usageRefresh";
-import {
-  AppState,
-  Linking,
-  Pressable,
-  RefreshControl,
-  ScrollView,
-  Switch,
-  View,
-} from "react-native";
+import { AppState, Linking, Pressable, ScrollView, Switch, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { formatTokens, formatUsd, makeWindow } from "@t3tools/shared/usageFormat";
 import {
@@ -32,6 +24,7 @@ import {
   retainQuotaValueSnapshots,
   type QuotaValueSnapshot,
 } from "@t3tools/shared/usageQuota";
+import { RefreshControl } from "../../components/ui/RefreshControl";
 import { AppText as Text } from "../../components/ui/AppText";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useUsage } from "../../state/usage";
@@ -55,6 +48,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
     status: "loading",
   });
   const publicHistoryWatcher = useRef<ReturnType<typeof watchPublicResetHistory> | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Subscribe to public reset announcements while mounted.
   useEffect(() => {
     const watcher = watchResetAnnouncements(setNews);
     newsWatcher.current = watcher;
@@ -63,6 +57,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
       newsWatcher.current = null;
     };
   }, []);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Subscribe to public reset history while mounted.
   useEffect(() => {
     const watcher = watchPublicResetHistory(setPublicHistory);
     publicHistoryWatcher.current = watcher;
@@ -77,6 +72,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
   const [showTracking, setShowTracking] = useState(false);
   const history = useUsage(historyInput);
   const refreshHistory = useEffectEvent(() => history.refresh());
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Refresh server history on a timer and when the app becomes active.
   useEffect(() => {
     const timer = setInterval(refreshHistory, 60_000);
     const subscription = AppState.addEventListener("change", (state) => {
@@ -147,12 +143,16 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
     historicalPeriods,
     selectedWithSavedCosts,
   );
-  const [snapshots, setSnapshots] = useState<ReadonlyMap<string, QuotaValueSnapshot>>(
-    () => new Map(),
-  );
-  useEffect(() => {
-    setSnapshots((previous) => retainQuotaValueSnapshots(previous, currentValues));
-  }, [currentValues]);
+  const inputs = [history.environments, costs.environments, tracker, selectedIds] as const;
+  const [snapshotState, setSnapshotState] = useState<{
+    inputs: typeof inputs;
+    snapshots: ReadonlyMap<string, QuotaValueSnapshot>;
+  }>(() => ({ inputs, snapshots: retainQuotaValueSnapshots(new Map(), currentValues) }));
+  let snapshots = snapshotState.snapshots;
+  if (inputs.some((input, index) => input !== snapshotState.inputs[index])) {
+    snapshots = retainQuotaValueSnapshots(snapshots, currentValues);
+    setSnapshotState({ inputs, snapshots });
+  }
   const values = currentValues.map((current, index) => {
     const value = quotaValueWithSnapshot(current, snapshots);
     const previous = index > 0 ? currentValues[index - 1] : undefined;
@@ -204,7 +204,6 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
   };
 
   const current = values.at(-1);
-  const completed = values.slice(0, -1);
   return (
     <View className="flex-1 bg-sheet">
       <NativeStackScreenOptions options={{ title: "Codex monitor" }} />

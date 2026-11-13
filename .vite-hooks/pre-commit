@@ -1,1 +1,6 @@
-vp staged --concurrent 1
+merge_head=$(git rev-parse --git-path MERGE_HEAD)
+if [ -f "$merge_head" ]; then
+  vp staged --diff="$(git rev-parse MERGE_HEAD)" --no-stash --concurrent 1
+else
+  vp staged --no-stash --concurrent 1
+fi

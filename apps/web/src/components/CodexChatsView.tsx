@@ -194,6 +194,7 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
   const selectedThreadIdRef = useRef<string | null>(null);
   const sendGenerationRef = useRef(0);
   const historyScrollRef = useRef<HTMLDivElement>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Async host requests read the latest committed selection.
   useEffect(() => {
     selectedThreadIdRef.current = selectedThreadId;
   }, [selectedThreadId]);
@@ -276,6 +277,7 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
     setHistoryState(selectedThreadId ? "loading" : "idle");
   }
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Fetch status from the external Codex host.
   useEffect(() => {
     let cancelled = false;
     void api
@@ -297,6 +299,7 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
     };
   }, [api]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Debounce searches sent to the external host.
   useEffect(() => {
     const timeout = window.setTimeout(() => void loadThreads(), search ? 180 : 0);
     return () => window.clearTimeout(timeout);
@@ -352,16 +355,19 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
     }
   };
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Load the selected thread from the external host.
   useEffect(() => {
     void loadHistory(false);
   }, [loadHistory]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Poll the external host while the thread is running.
   useEffect(() => {
     if (!selectedThread || !shouldPollCodexThread(selectedThread.status)) return;
     const interval = window.setInterval(() => void loadHistory(), POLL_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [loadHistory, selectedThread]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Cancel host polling timers on unmount.
   useEffect(() => {
     return () => {
       if (requestPollRef.current !== null) window.clearInterval(requestPollRef.current);

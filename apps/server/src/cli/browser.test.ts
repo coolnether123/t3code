@@ -28,7 +28,10 @@ const fakeSpawner = (host: { readonly font?: string; readonly missingLibrary?: b
   const spawner = ChildProcessSpawner.make((command) =>
     Effect.gen(function* () {
       if (!ChildProcess.isStandardCommand(command)) return yield* Effect.die("Unexpected pipeline");
-      commands.push([command.command, ...command.args]);
+      commands.push([
+        command.command,
+        ...command.args.map((arg) => (typeof arg === "string" ? arg : "<redacted>")),
+      ]);
       if (command.command === "apt-get" && command.args.includes("fonts-liberation")) font = FONT;
       if (command.command === "fc-match" && font === undefined) {
         return yield* PlatformError.systemError({
@@ -112,7 +115,7 @@ it.effect("setup in a root shell warns that the server cannot run as root", () =
       Effect.provideService(HostProcess.Environment, { SUDO_USER: "root" }),
     );
     const output = (yield* TestConsole.logLines).join("\n");
-    expect(output).toContain("Chrome will not start its sandbox as root");
+    expect(output).toContain("Chrome's sandbox cannot start");
     expect(output).not.toContain("ready");
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestConsole.layer))),
 );

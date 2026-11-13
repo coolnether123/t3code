@@ -37,6 +37,7 @@ export function UsageLimitCards({
   readonly onShowOnly: (provider: LimitProvider) => void;
 }) {
   const [now, setNow] = useState(Date.now);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Keep displayed limit times in step with the clock.
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => window.clearInterval(timer);

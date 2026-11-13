@@ -7,6 +7,7 @@ import * as DeviceService from "../../../device/DeviceService.ts";
 import * as ServerConfig from "../../../config.ts";
 import { expect, it } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -48,7 +49,14 @@ import { PeerLinks } from "../../../peer/PeerLinks.ts";
 
 import { RemoteDelegation } from "../../../peer/RemoteDelegation.ts";
 
+import * as AssetSigner from "../../../assets/AssetSigner.ts";
+import * as ProjectCloneTracker from "../../../project/ProjectCloneTracker.ts";
+import * as PullRequestService from "../../../pullRequest/PullRequestService.ts";
+
 const layerStubServices = Layer.mergeAll(
+  Layer.mock(AssetSigner.AssetSigner)({}),
+  Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({}),
+  Layer.mock(PullRequestService.PullRequestService)({}),
   Layer.mock(RemoteDelegation)({}),
   Layer.mock(PeerLinks)({}),
   Layer.mock(PeerLinkRequests)({}),
@@ -186,6 +194,7 @@ it.effect("production mcp layer lists worktree tools over http", () =>
           Layer.provide(NodeServices.layer),
         ),
         NodeServices.layer,
+        NodeCrypto.layer,
       ),
     ),
   ),

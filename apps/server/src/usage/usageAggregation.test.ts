@@ -57,6 +57,18 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   };
 }
 
+it("merges progressing Claude copies across files without counting a message twice", () => {
+  const partial = record({ dedupeKey: "progressing-message" });
+  const complete = record({
+    dedupeKey: "progressing-message",
+    totals: { ...partial.totals, outputTokens: 200 },
+  });
+  const { buckets, duplicatesDropped } = aggregate([partial, complete]);
+  expect(duplicatesDropped).toBe(1);
+  expect(buckets).toHaveLength(1);
+  expect(buckets[0]).toMatchObject({ records: 1, totals: { outputTokens: 200 } });
+});
+
 function aggregate(
   records: readonly UsageRecord[],
   timeZone = "UTC",

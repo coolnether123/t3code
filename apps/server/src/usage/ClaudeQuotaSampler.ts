@@ -1,17 +1,4 @@
-/**
- * ClaudeQuotaSampler — saves Claude subscription readings for the usage
- * reset monitor, the way the Codex Limits collector does for Codex.
- *
- * Reads the account's session and weekly windows on the provider health-check
- * interval, whether or not Claude is enabled for chats or any client is open,
- * and appends them to `usage-claude-quota-history.json`. Like other background
- * work it pauses while the host is suspended or constrained by the user's
- * locked, low-power, or battery settings. A reading never sends a prompt.
- * While readings are unavailable (for example, the CLI is signed out) it
- * retries on a slower cadence instead of spawning the CLI every interval.
- *
- * @module usage/ClaudeQuotaSampler
- */
+// Background quota sampling pauses with host constraints and retries unavailable readings less often.
 import {
   ClaudeSettings,
   DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL,

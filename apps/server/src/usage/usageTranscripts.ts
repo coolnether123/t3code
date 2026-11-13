@@ -8,7 +8,7 @@
  */
 import type { UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
 import * as CodexUsage from "../provider/Drivers/codexUsage.ts";
-import { CLAUDE_SYNTHETIC_MODEL } from "../provider/Drivers/claudeUsage.ts";
+import * as ClaudeUsage from "../provider/Drivers/claudeUsage.ts";
 import { normalizeServiceTier } from "./codexServiceTier.ts";
 
 export interface UsageRecord {
@@ -16,6 +16,7 @@ export interface UsageRecord {
   readonly timestampMs: number;
   readonly model: string;
   readonly rateModel?: string;
+  readonly cacheCreation1hTokens?: number;
   readonly speed?: "standard" | "fast" | "ultrafast";
   readonly sourcePath?: string;
   /** Internal aggregation/dedupe identity; may be synthetic for imported chats. */
@@ -87,74 +88,20 @@ export function totalTokens(totals: UsageTokenTotals): number {
 export function mightCarryUsage(line: string, provider: UsageProviderKind): boolean {
   if (provider === "claude") return line.includes('"usage"');
   if (provider === "gemini") return line.includes('"tokens"');
-  return line.includes('"token_count"');
+  return line.includes('"token_count"') || line.includes('"token_usage_record"');
 }
 
 /* Claude Code                                                                */
 
-/**
- * Parses one line of a Claude Code transcript.
- *
- * T3 Code writes one record per assistant *content block*, and every one of
- * those records repeats the same complete `usage` object for the parent
- * message. Summing them overcounts by roughly 2.4x on a real workload, so the
- * caller must drop repeats by `dedupeKey` and keep the first.
- */
+export function parseClaudeRecords(line: string): readonly UsageRecord[] {
+  return ClaudeUsage.parseClaudeLine(line).map((record) => {
+    const nativeSessionId = knownNativeSessionId(record.sessionId);
+    return { ...record, ...(nativeSessionId === undefined ? {} : { nativeSessionId }) };
+  });
+}
+
 export function parseClaudeLine(line: string): UsageRecord | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return null;
-  }
-  if (typeof parsed !== "object" || parsed === null) return null;
-
-  const record = parsed as Record<string, unknown>;
-  if (record["type"] !== "assistant") return null;
-
-  const message = record["message"];
-  if (typeof message !== "object" || message === null) return null;
-  const messageRecord = message as Record<string, unknown>;
-
-  const usage = messageRecord["usage"];
-  if (typeof usage !== "object" || usage === null) return null;
-  const usageRecord = usage as Record<string, unknown>;
-
-  const timestampMs = parseTimestampMs(record["timestamp"]);
-  if (timestampMs === null) return null;
-
-  const model = typeof messageRecord["model"] === "string" ? messageRecord["model"] : "";
-  if (model.length === 0 || model === CLAUDE_SYNTHETIC_MODEL) return null;
-
-  const messageId = typeof messageRecord["id"] === "string" ? messageRecord["id"] : null;
-  const requestId = typeof record["requestId"] === "string" ? record["requestId"] : null;
-  // Matches ccusage: prefer the message/request pair, fall back to whichever
-  // half exists. Records with neither cannot be de-duplicated.
-  const dedupeKey =
-    messageId === null && requestId === null ? null : `${messageId ?? ""}:${requestId ?? ""}`;
-
-  const cost = record["costUSD"];
-  const sessionId = typeof record["sessionId"] === "string" ? record["sessionId"] : "";
-  const nativeSessionId = knownNativeSessionId(sessionId);
-
-  return {
-    provider: "claude",
-    speed: usageRecord["speed"] === "fast" ? "fast" : "standard",
-    timestampMs,
-    model,
-    sessionId,
-    ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
-    totals: {
-      uncachedInputTokens: int(usageRecord["input_tokens"]),
-      cachedInputTokens: int(usageRecord["cache_read_input_tokens"]),
-      cacheCreationTokens: int(usageRecord["cache_creation_input_tokens"]),
-      outputTokens: int(usageRecord["output_tokens"]),
-      // Anthropic folds thinking tokens into output and does not break them out.
-      reasoningTokens: 0,
-    },
-    reportedCostUsd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
-    dedupeKey,
-  };
+  return parseClaudeRecords(line)[0] ?? null;
 }
 
 /* Gemini CLI                                                                 */
@@ -268,16 +215,7 @@ export function parseAntigravityTokenCache(
 
 /* OpenCode                                                                   */
 
-/**
- * Parses one OpenCode assistant message from its SQLite session store.
- *
- * OpenCode 1.x stores fresh input, cache reads, cache writes, visible output,
- * and reasoning as disjoint counters. Its own `opencode stats` command adds
- * reasoning to output when computing the total, so we do the same while
- * retaining reasoning as the output subset expected by the usage contract.
- * The recorded cost is authoritative: it includes OpenCode's provider/model
- * pricing configuration, including explicit zero-cost local and free models.
- */
+// OpenCode output excludes reasoning; add it while retaining reasoning as the contract subset.
 export function parseOpenCodeMessageValue(
   parsed: unknown,
   input: {
@@ -367,16 +305,20 @@ export function initialCodexScanState(): CodexScanState {
 
 /** Keeps native run attribution while the provider parser owns counter reconciliation. */
 export function parseCodexLine(line: string, state: CodexScanState): UsageRecord | null {
+  return parseCodexRecords(line, state)[0] ?? null;
+}
+
+export function parseCodexRecords(line: string, state: CodexScanState): readonly UsageRecord[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
   } catch {
-    return null;
+    return [];
   }
-  if (typeof parsed !== "object" || parsed === null) return null;
+  if (typeof parsed !== "object" || parsed === null) return [];
   const envelope = parsed as Record<string, unknown>;
   const payload = envelope["payload"];
-  if (typeof payload !== "object" || payload === null) return null;
+  if (typeof payload !== "object" || payload === null) return [];
   const fields = payload as Record<string, unknown>;
   const providerState = state.providerState ?? CodexUsage.initialCodexScanState();
   if (envelope["type"] === "turn_context") {
@@ -387,7 +329,7 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     state.serviceTier = normalizeServiceTier(fields["service_tier"] ?? fields["serviceTier"]);
     state.turnId = turnId;
   }
-  const record = CodexUsage.parseCodexLine(line, providerState);
+  const records = CodexUsage.parseCodexLine(line, providerState);
   state.providerState = providerState;
   state.model = providerState.model;
   state.sessionId = providerState.sessionId;
@@ -395,32 +337,36 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
   state.sawSessionMeta = providerState.sawSessionMeta;
   state.suppressingForkCopies = providerState.suppressingForkCopies;
   state.forkCopyAnchorMs = providerState.forkCopyAnchorMs;
-  if (record === null) return null;
-  const info = fields["info"];
-  const tier =
-    normalizeServiceTier(
-      (typeof info === "object" && info !== null
-        ? (info as Record<string, unknown>)["service_tier"]
-        : undefined) ?? fields["service_tier"],
-    ) ??
-    (providerState.sawThreadSettings
-      ? record.speed === "fast"
-        ? "priority"
-        : record.speed === "ultrafast"
-          ? "ultrafast"
-          : "default"
-      : state.serviceTier);
-  const nativeSessionId = knownNativeSessionId(record.sessionId);
-  return {
-    ...record,
-    ...(state.turnId === undefined ? {} : { turnId: state.turnId }),
-    ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
-    ...(tier === undefined ? {} : { serviceTier: tier, serviceTierSource: "transcript" as const }),
-    dedupeKey:
-      record.sessionId.length > 0
-        ? `codex:${record.sessionId}:${record.timestampMs}:${JSON.stringify(record.totals)}`
-        : null,
-  };
+  return records.map((record) => {
+    const info = fields["info"];
+    const tier =
+      normalizeServiceTier(
+        (typeof info === "object" && info !== null
+          ? (info as Record<string, unknown>)["service_tier"]
+          : undefined) ?? fields["service_tier"],
+      ) ??
+      (providerState.sawThreadSettings
+        ? record.speed === "fast"
+          ? "priority"
+          : record.speed === "ultrafast"
+            ? "ultrafast"
+            : "default"
+        : state.serviceTier);
+    const nativeSessionId = knownNativeSessionId(record.sessionId);
+    return {
+      ...record,
+      ...(state.turnId === undefined ? {} : { turnId: state.turnId }),
+      ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
+      ...(tier === undefined
+        ? {}
+        : { serviceTier: tier, serviceTierSource: "transcript" as const }),
+      dedupeKey:
+        record.dedupeKey ??
+        (record.sessionId.length > 0
+          ? `codex:${record.sessionId}:${record.timestampMs}:${JSON.stringify(record.totals)}`
+          : null),
+    };
+  });
 }
 
 export { EMPTY_TOTALS };

@@ -7,6 +7,9 @@ import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 import * as NodeSqlite from "node:sqlite";
 import * as NodeCrypto from "node:crypto";
+import * as NodeStream from "node:stream";
+import * as NodeUtil from "node:util";
+import * as NodeZlib from "node:zlib";
 
 import type { UsageProviderKind } from "@t3tools/contracts";
 
@@ -15,8 +18,8 @@ import {
   initialGeminiScanState,
   mightCarryUsage,
   parseAntigravityTokenCache,
-  parseClaudeLine,
-  parseCodexLine,
+  parseClaudeRecords,
+  parseCodexRecords,
   parseGeminiLine,
   parseGeminiValue,
   parseOpenCodeMessageValue,
@@ -279,7 +282,8 @@ export async function listTranscriptFilesBounded(
         : provider === "gemini"
           ? (name.startsWith("session-") && (name.endsWith(".json") || name.endsWith(".jsonl"))) ||
             name === "tokens_cache.json"
-          : name.endsWith(".jsonl");
+          : name.endsWith(".jsonl") ||
+            ((provider === "codex" || provider === "claude") && name.endsWith(".jsonl.zst"));
   const inventoryKey = `${provider}\u0000${root}`;
   const deadline = now() + maxDurationMs;
   const expired = () => now() >= deadline;
@@ -454,6 +458,35 @@ export interface TranscriptReadResult {
   /** `nextByte` remains inside an oversized record and is not a parser cursor. */
   readonly discardingLine: boolean;
   readonly codexState?: CodexScanState;
+  readonly decodedSize?: number;
+}
+
+const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
+const decompressArchive = NodeUtil.promisify(NodeZlib.zstdDecompress);
+
+async function readArchiveSnapshot(filePath: string): Promise<Buffer> {
+  const file = await NodeFSP.open(filePath, "r");
+  try {
+    const stats = await file.stat();
+    if (stats.size > MAX_ARCHIVE_BYTES) throw new Error("Archive exceeds scan limit");
+    const compressed = Buffer.allocUnsafe(stats.size);
+    let offset = 0;
+    while (offset < compressed.length) {
+      const { bytesRead } = await file.read(compressed, offset, compressed.length - offset, offset);
+      if (bytesRead === 0) throw new Error("Archive changed during scan");
+      offset += bytesRead;
+    }
+    if ((await file.stat()).size !== stats.size) throw new Error("Archive changed during scan");
+    return await decompressArchive(compressed, { maxOutputLength: MAX_ARCHIVE_BYTES });
+  } finally {
+    await file.close();
+  }
+}
+
+function* snapshotChunks(snapshot: Buffer, start = 0, end = snapshot.length): Generator<Buffer> {
+  for (let offset = start; offset < end; offset += 64 * 1024) {
+    yield snapshot.subarray(offset, Math.min(end, offset + 64 * 1024));
+  }
 }
 
 export interface RepeatedInputReadOptions extends Omit<
@@ -527,6 +560,7 @@ const PREFIX_MARKER_BYTES = 4 * 1024;
 const CODEX_LINE_RELEVANCE: OversizedLineRelevance = {
   prefixMarkers: [
     '"type":"token_count"',
+    '"type":"token_usage_record"',
     '"type":"turn_context"',
     '"type":"session_meta"',
     '"type":"thread_settings_applied"',
@@ -547,6 +581,7 @@ async function readCompleteJsonlLines(
   >,
   visit: (line: string) => void,
   relevance: OversizedLineRelevance,
+  snapshot?: Buffer,
 ): Promise<JsonlReadProgress> {
   const start = options.startByte ?? 0;
   const end = options.endByte;
@@ -595,10 +630,19 @@ async function readCompleteJsonlLines(
     finishDiscarding();
     return bytes.subarray(lineEnd + 1);
   };
-  const input = NodeFS.createReadStream(filePath, {
-    ...(start === 0 ? {} : { start }),
-    ...(end === undefined ? {} : { end }),
-  });
+  const input =
+    snapshot === undefined
+      ? NodeFS.createReadStream(filePath, {
+          ...(start === 0 ? {} : { start }),
+          ...(end === undefined ? {} : { end }),
+        })
+      : NodeStream.Readable.from(
+          snapshotChunks(
+            snapshot,
+            start,
+            Math.min(snapshot.length, end === undefined ? snapshot.length : end + 1),
+          ),
+        );
   for await (const chunk of input) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     const remaining = discardingLine ? discardUntilLineEnd(bytes) : bytes;
@@ -627,10 +671,13 @@ async function readCompleteJsonlLines(
   if (discardingLine && end !== undefined) {
     const sourceEnd = options.sourceSize === undefined ? undefined : options.sourceSize - 1;
     if (sourceEnd === undefined || sourceEnd > end) {
-      const rest = NodeFS.createReadStream(filePath, {
-        start: end + 1,
-        ...(sourceEnd === undefined ? {} : { end: sourceEnd }),
-      });
+      const rest =
+        snapshot === undefined
+          ? NodeFS.createReadStream(filePath, {
+              start: end + 1,
+              ...(sourceEnd === undefined ? {} : { end: sourceEnd }),
+            })
+          : NodeStream.Readable.from(snapshotChunks(snapshot, end + 1));
       for await (const chunk of rest) {
         discardUntilLineEnd(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
         if (!discardingLine) break;
@@ -708,6 +755,9 @@ export async function readTranscriptRecords(
   try {
     const start = options.startByte ?? 0;
     const end = options.endByte;
+    const snapshot = filePath.endsWith(".jsonl.zst")
+      ? await readArchiveSnapshot(filePath)
+      : undefined;
     if (end !== undefined && end < start) {
       return provider === "codex"
         ? { records, nextByte: start, discardedLines: 0, discardingLine: false, codexState }
@@ -715,7 +765,7 @@ export async function readTranscriptRecords(
     }
     const progress = await readCompleteJsonlLines(
       filePath,
-      options,
+      snapshot === undefined ? options : { ...options, sourceSize: snapshot.length },
       (line) => {
         if (provider === "codex") {
           if (
@@ -726,18 +776,22 @@ export async function readTranscriptRecords(
           ) {
             return;
           }
-          const record = parseCodexLine(line, codexState);
-          if (record !== null) records.push(record);
+          records.push(...parseCodexRecords(line, codexState));
           return;
         }
 
         if (!mightCarryUsage(line, provider)) return;
-        const record = parseClaudeLine(line);
-        if (record !== null) records.push(record);
+        records.push(...parseClaudeRecords(line));
       },
       provider === "codex" ? CODEX_LINE_RELEVANCE : CLAUDE_LINE_RELEVANCE,
+      snapshot,
     );
-    return provider === "codex" ? { records, ...progress, codexState } : { records, ...progress };
+    return {
+      records,
+      ...progress,
+      ...(provider === "codex" ? { codexState } : {}),
+      ...(snapshot === undefined ? {} : { decodedSize: snapshot.length }),
+    };
   } catch {
     return null;
   }
@@ -765,12 +819,24 @@ export async function readRepeatedInputRecords(
   if (end !== undefined && end < start) return { observations, gaps, parserState };
 
   try {
+    const snapshot = filePath.endsWith(".jsonl.zst")
+      ? await readArchiveSnapshot(filePath)
+      : undefined;
     const lines = NodeReadline.createInterface({
-      input: NodeFS.createReadStream(filePath, {
-        encoding: "utf8",
-        ...(start === 0 ? {} : { start }),
-        ...(end === undefined ? {} : { end }),
-      }),
+      input:
+        snapshot === undefined
+          ? NodeFS.createReadStream(filePath, {
+              encoding: "utf8",
+              ...(start === 0 ? {} : { start }),
+              ...(end === undefined ? {} : { end }),
+            })
+          : NodeStream.Readable.from(
+              snapshotChunks(
+                snapshot,
+                start,
+                Math.min(snapshot.length, (end ?? snapshot.length - 1) + 1),
+              ),
+            ),
       crlfDelay: Infinity,
     });
     const parseOptions: ParseCodexRepeatedInputOptions = {

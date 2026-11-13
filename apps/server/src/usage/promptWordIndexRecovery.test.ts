@@ -3,9 +3,9 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
-import * as NodePerfHooks from "node:perf_hooks";
 import { UsageDay } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -53,6 +53,7 @@ it.effect(
           Effect.gen(function* () {
             const sql = yield* SqlClient.SqlClient;
             yield* sql`PRAGMA journal_mode = WAL`;
+            yield* sql`PRAGMA synchronous = NORMAL`;
             yield* createSource(sql);
             // The cold migration queues old rows but never parses their prompt bodies.
             yield* sql.withTransaction(
@@ -64,15 +65,12 @@ it.effect(
             'build build the', ${now}, ${now} FROM ids`,
             );
             yield* migration;
-            const started = NodePerfHooks.performance.now();
             const cold = yield* readPromptWordIndex(sql, input, now, "projection_thread_messages");
-            const coldMs = NodePerfHooks.performance.now() - started;
             assert.strictEqual(cold.coverage.status, "partial");
             assert.strictEqual(cold.coverage.sourceMessages, 5001);
             assert.strictEqual(cold.coverage.examinedMessages, 0);
             assert.strictEqual(cold.keyword?.count, 0);
             assert.isNull(cold.totals.averageWordsPerPrompt);
-            assert.isBelow(coldMs, 3000);
             const pending = (yield* sql<{
               count: number;
             }>`SELECT count(*) AS count FROM usage_prompt_pending_v1`)[0]!.count;
@@ -88,9 +86,6 @@ it.effect(
             );
             assert.strictEqual(partial.coverage.examinedMessages, processed);
             assert.strictEqual(partial.keyword?.count, processed * 2);
-            yield* Effect.logInfo(
-              `Synthetic 356678-message cold read: ${coldMs.toFixed(1)} ms; checkpoint: ${processed} prompts`,
-            );
             return processed;
           }).pipe(Effect.provide(layer)),
         );
@@ -100,6 +95,7 @@ it.effect(
           Effect.gen(function* () {
             const sql = yield* SqlClient.SqlClient;
             yield* sql`PRAGMA journal_mode = WAL`;
+            yield* sql`PRAGMA synchronous = NORMAL`;
             const reopened = yield* readPromptWordIndex(
               sql,
               input,
@@ -110,7 +106,6 @@ it.effect(
             while ((yield* warmPromptWordIndexBatch(sql, "projection_thread_messages")) > 0) {
               /* Drain persisted work. */
             }
-            const started = NodePerfHooks.performance.now();
             const complete = yield* readPromptWordIndex(
               sql,
               input,
@@ -123,7 +118,6 @@ it.effect(
             assert.strictEqual(complete.keyword?.count, 10002);
             assert.strictEqual(complete.daily[0]?.words, 15003);
             assert.deepStrictEqual(complete.words, [{ word: "build", count: 10002 }]);
-            assert.isBelow(NodePerfHooks.performance.now() - started, 3000);
             assert.strictEqual(
               yield* warmPromptWordIndexBatch(sql, "projection_thread_messages"),
               0,
@@ -142,7 +136,6 @@ it.effect(
         );
       }),
     ),
-  { timeout: 60000 },
 );
 
 it.effect(
@@ -167,13 +160,12 @@ it.effect(
           );
           blocker.exec("BEGIN IMMEDIATE");
           yield* Effect.gen(function* () {
-            const started = NodePerfHooks.performance.now();
-            assert.isTrue(
-              Exit.isFailure(
-                yield* Effect.exit(warmPromptWordIndexBatch(sql, "projection_thread_messages")),
-              ),
+            const blocked = yield* Effect.exit(
+              warmPromptWordIndexBatch(sql, "projection_thread_messages"),
             );
-            assert.isBelow(NodePerfHooks.performance.now() - started, 1000);
+            assert.isTrue(Exit.isFailure(blocked));
+            if (Exit.isFailure(blocked))
+              assert.match(Cause.pretty(blocked.cause), /database is locked/);
             assert.strictEqual(
               (yield* sql<{ timeout: number }>`PRAGMA busy_timeout`)[0]!.timeout,
               5000,

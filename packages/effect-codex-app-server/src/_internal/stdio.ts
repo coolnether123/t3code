@@ -18,10 +18,14 @@ import {
 
 const encoder = new TextEncoder();
 
-export const makeChildStdio = (handle: ChildProcessSpawner.ChildProcessHandle) =>
+export const makeChildStdio = (
+  handle: Pick<ChildProcessSpawner.ChildProcessHandle, "stdin" | "stdout">,
+  stderrDrained: Effect.Effect<void> = Effect.void,
+) =>
   Stdio.make({
     args: Effect.succeed([]),
-    stdin: handle.stdout,
+    // Finish stderr separately from the protocol's exit-status deadline.
+    stdin: handle.stdout.pipe(Stream.onEnd(stderrDrained)),
     stdout: () =>
       Sink.mapInput(handle.stdin, (chunk: string | Uint8Array) =>
         typeof chunk === "string" ? encoder.encode(chunk) : chunk,
@@ -51,6 +55,14 @@ export const makeInMemoryStdio = Effect.fn("makeInMemoryStdio")(function* () {
     output,
   };
 });
+
+const STDERR_TAIL_MAX_CHARS = 8_192;
+export const appendStderrTail = (current: string, chunk: string): string => {
+  const next = `${current}${chunk}`;
+  return next.length <= STDERR_TAIL_MAX_CHARS ? next : next.slice(-STDERR_TAIL_MAX_CHARS);
+};
+
+export { codexStderrExcerpt as stderrExcerpt } from "./diagnostics.ts";
 
 type ChildProcessTerminationHandle = Pick<
   ChildProcessSpawner.ChildProcessHandle,
@@ -115,60 +127,56 @@ function flushSanitizedStderrLine(state: ForwardedStderrState): string | undefin
   return state.remainder.length > 0 ? sanitizeCodexDiagnosticText(state.remainder) : undefined;
 }
 
-export const captureChildStderr = (
+export const captureChildStderr = Effect.fn("CodexAppServer.captureChildStderr")(function* (
   stderr: Stream.Stream<Uint8Array, unknown>,
   onChunk?: (chunk: string) => Effect.Effect<void, never>,
-): Effect.Effect<CodexAppServerStderrCapture, never, Scope.Scope> =>
-  Effect.gen(function* () {
-    const state = yield* Ref.make<CodexAppServerStderrDiagnostics>({
-      stderr: "",
-      stderrTruncated: false,
-    });
-    const completed = yield* Deferred.make<void>();
-    const forwardedState = yield* Ref.make<ForwardedStderrState>({
-      remainder: "",
-      omitted: false,
-    });
-    const forwardChunk = (chunk: string) =>
-      onChunk
-        ? Ref.modify(forwardedState, (state) => {
-            const next = takeSanitizedStderrLines(state, chunk);
-            return [next.chunks, next.state] as const;
-          }).pipe(Effect.flatMap((chunks) => Effect.forEach(chunks, onChunk, { discard: true })))
-        : Effect.void;
-    const finishForwarding = onChunk
-      ? Ref.get(forwardedState).pipe(
-          Effect.flatMap((state) => {
-            const finalChunk = flushSanitizedStderrLine(state);
-            return finalChunk === undefined ? Effect.void : onChunk(finalChunk);
-          }),
-        )
-      : Effect.void;
-    yield* stderr.pipe(
-      Stream.decodeText(),
-      Stream.runForEach((chunk) =>
-        Ref.update(state, (current) => {
-          const next = appendBoundedCodexDiagnostic(current.stderr, chunk);
-          return {
-            stderr: next.value,
-            stderrTruncated: current.stderrTruncated || next.truncated,
-          };
-        }).pipe(Effect.andThen(forwardChunk(chunk))),
-      ),
-      Effect.ignore,
-      Effect.ensuring(
-        finishForwarding.pipe(
-          Effect.andThen(Deferred.succeed(completed, undefined)),
-          Effect.asVoid,
-        ),
-      ),
-      Effect.forkScoped,
-    );
-    return {
-      snapshot: Ref.get(state),
-      completion: Deferred.await(completed),
-    } satisfies CodexAppServerStderrCapture;
+): Effect.fn.Return<CodexAppServerStderrCapture, never, Scope.Scope> {
+  const state = yield* Ref.make<CodexAppServerStderrDiagnostics>({
+    stderr: "",
+    stderrTruncated: false,
   });
+  const completed = yield* Deferred.make<void>();
+  const forwardedState = yield* Ref.make<ForwardedStderrState>({
+    remainder: "",
+    omitted: false,
+  });
+  const forwardChunk = (chunk: string) =>
+    onChunk
+      ? Ref.modify(forwardedState, (state) => {
+          const next = takeSanitizedStderrLines(state, chunk);
+          return [next.chunks, next.state] as const;
+        }).pipe(Effect.flatMap((chunks) => Effect.forEach(chunks, onChunk, { discard: true })))
+      : Effect.void;
+  const finishForwarding = onChunk
+    ? Ref.get(forwardedState).pipe(
+        Effect.flatMap((state) => {
+          const finalChunk = flushSanitizedStderrLine(state);
+          return finalChunk === undefined ? Effect.void : onChunk(finalChunk);
+        }),
+      )
+    : Effect.void;
+  yield* stderr.pipe(
+    Stream.decodeText(),
+    Stream.runForEach((chunk) =>
+      Ref.update(state, (current) => {
+        const next = appendBoundedCodexDiagnostic(current.stderr, chunk);
+        return {
+          stderr: next.value,
+          stderrTruncated: current.stderrTruncated || next.truncated,
+        };
+      }).pipe(Effect.andThen(forwardChunk(chunk))),
+    ),
+    Effect.ignore,
+    Effect.ensuring(
+      finishForwarding.pipe(Effect.andThen(Deferred.succeed(completed, undefined)), Effect.asVoid),
+    ),
+    Effect.forkScoped,
+  );
+  return {
+    snapshot: Ref.get(state),
+    completion: Deferred.await(completed),
+  } satisfies CodexAppServerStderrCapture;
+});
 
 export const readFinalChildStderr = (
   capture: CodexAppServerStderrCapture,

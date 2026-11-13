@@ -1,5 +1,3 @@
-import { needsCursorKeychainAccess } from "@t3tools/client-runtime/state/usage";
-import { resolveUsageAccess } from "@t3tools/client-runtime/state/usage-access";
 import { environmentSession } from "./session";
 // Merge summaries from connected environments; raw transcripts stay on their source machine.
 import { useAtomValue } from "@effect/atom-react";
@@ -12,8 +10,9 @@ import {
   type UsageSummary,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
+import { needsCursorKeychainAccess, usageSummaryInput } from "@t3tools/client-runtime/state/usage";
+import { resolveUsageAccess } from "@t3tools/client-runtime/state/usage-access";
 import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
-import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
@@ -42,7 +41,7 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
       const sessionResult = get(environmentSession.sessionStateAtom(environmentId));
       const access = resolveUsageAccess({
         connectionPhase: presentation.connection.phase,
-        session: Option.getOrNull(AsyncResult.value(sessionResult)),
+        session: AsyncResult.getOrElse(sessionResult, () => null),
         hasSessionError: sessionResult._tag === "Failure",
       });
       if (!access.canReadDiagnostics) {
@@ -51,13 +50,21 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
           label: presentation.entry.target.label,
           isConnected: presentation.connection.phase === "connected",
           ...access,
-          summary: null,
           needsCursorKeychainAccess: false,
+          summary: null,
         });
         continue;
       }
-      const result = get(serverEnvironment.usageSummary({ environmentId, input }));
-      const summary = Option.getOrNull(AsyncResult.value(result));
+      const result = get(
+        serverEnvironment.usageSummary({
+          environmentId,
+          input: usageSummaryInput(
+            input,
+            get(serverEnvironment.usageModelFilterAtom(environmentId)),
+          ),
+        }),
+      );
+      const summary = AsyncResult.getOrElse(result, () => null);
       statuses.push({
         environmentId,
         label: presentation.entry.target.label,
@@ -65,11 +72,11 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
         isConnected: presentation.connection.phase === "connected",
         canReadDiagnostics: true,
         error: result._tag === "Failure" ? "This environment could not report usage." : null,
-        summary,
         needsCursorKeychainAccess: needsCursorKeychainAccess(
           summary,
           get(serverEnvironment.providersValueAtom(environmentId)),
         ),
+        summary,
       });
     }
     return statuses;
@@ -129,7 +136,7 @@ export function useUsage(
             ...environment,
             isPending: false,
             error: result._tag === "Failure" ? "This environment could not report usage." : null,
-            summary: Option.getOrNull(AsyncResult.value(result)),
+            summary: AsyncResult.getOrElse(result, () => null),
           };
         }),
       );
@@ -174,6 +181,7 @@ export function useUsage(
             /\bdeferred\b|response budget|complete-line chunks/i.test(source.message ?? ""),
         )),
   );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Retry deferred server reads on a timer while this window is active.
   useEffect(() => {
     if (retry.current.windowKey !== windowKey)
       retry.current = { windowKey, failures: 0, attempts: 0 };

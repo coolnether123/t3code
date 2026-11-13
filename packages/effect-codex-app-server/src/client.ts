@@ -1,4 +1,5 @@
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -45,6 +46,7 @@ export class CodexAppServerClient extends Context.Service<
   CodexAppServerClient,
   {
     readonly raw: CodexAppServerClientRaw;
+    readonly awaitTermination: Effect.Effect<never, CodexError.CodexAppServerError>;
     readonly request: <M extends CodexRpc.ClientRequestMethod>(
       method: M,
       payload: CodexRpc.ClientRequestParamsByMethod[M],
@@ -90,12 +92,14 @@ type ServerNotificationHandler = (
   payload: unknown,
 ) => Effect.Effect<void, CodexError.CodexAppServerError>;
 
-const V2TurnStartParamsWithCollaborationMode = CodexSchema.V2TurnStartParams.pipe(
+/** The generated `turn/start` schema omits these fields; this is what the wire accepts. */
+export const V2TurnStartParams = CodexSchema.V2TurnStartParams.pipe(
   Schema.fieldsAssign({
     collaborationMode: Schema.optionalKey(CodexSchema.ClientRequest__CollaborationMode),
     additionalContext: Schema.optionalKey(
       Schema.Record(Schema.String, CodexSchema.V2TurnStartParams__AdditionalContextEntry),
     ),
+    cyberAccessProgram: Schema.optionalKey(CodexSchema.V2TurnStartParams__CyberAccessProgram),
   }),
 );
 
@@ -107,6 +111,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
   ) => Effect.Effect<CodexError.CodexAppServerError>,
 ): Effect.fn.Return<CodexAppServerClient["Service"], never, Scope.Scope> {
   const requestHandlers = new Map<string, ServerRequestHandler>();
+  const termination = yield* Deferred.make<never, CodexError.CodexAppServerError>();
   const notificationHandlers = new Map<string, Array<ServerNotificationHandler>>();
   let unknownRequestHandler:
     | ((method: string, params: unknown) => Effect.Effect<unknown, CodexError.CodexAppServerError>)
@@ -136,7 +141,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     | Schema.Codec<CodexRpc.ClientRequestParamsByMethod[M], CodexRpc.ClientRequestParamsByMethod[M]>
     | undefined =>
     method === "turn/start"
-      ? (V2TurnStartParamsWithCollaborationMode as never)
+      ? (V2TurnStartParams as never)
       : (CodexRpc.CLIENT_REQUEST_PARAMS[method] as never);
 
   const getClientRequestResponseSchema = <M extends CodexRpc.ClientRequestMethod>(
@@ -157,6 +162,29 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
       >
     | undefined => CodexRpc.CLIENT_NOTIFICATION_PARAMS[method] as never;
 
+  // A notification the schema rejects has no reply to fail, so it is dropped.
+  // A Codex build that drifted from the generated schema repeats the bad shape
+  // on every frame, so each distinct failure is warned about once per client.
+  const warnedDecodeFailures = new Set<string>();
+  const warnUndecodableNotification = (error: CodexError.CodexAppServerProtocolParseError) => {
+    const key = `${error.method}\n${error.issueKinds?.join(",")}`;
+    if (warnedDecodeFailures.has(key)) {
+      return Effect.void;
+    }
+    warnedDecodeFailures.add(key);
+    return Effect.logWarning("Dropped a Codex App Server notification that failed to decode").pipe(
+      Effect.annotateLogs({
+        operation: error.operation,
+        ...(error.method === undefined ? {} : { method: error.method }),
+        ...(error.issueCount === undefined ? {} : { issueCount: error.issueCount }),
+        ...(error.issueKinds === undefined ? {} : { issueKinds: error.issueKinds }),
+        ...(error.maximumPathDepth === undefined
+          ? {}
+          : { maximumPathDepth: error.maximumPathDepth }),
+      }),
+    );
+  };
+
   const dispatchNotification = (
     notification: CodexProtocol.CodexAppServerIncomingNotification,
   ): Effect.Effect<void, never> => {
@@ -169,11 +197,8 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     const handlers = notificationHandlers.get(notification.method) ?? [];
 
     if (schema) {
-      return decodeNotificationPayload<unknown, unknown>(
-        notification.method,
-        schema,
-        notification.params,
-      ).pipe(
+      return decodeNotificationPayload(notification.method, schema, notification.params).pipe(
+        Effect.tapError(warnUndecodableNotification),
         Effect.flatMap((decoded) =>
           Effect.forEach(handlers, (handler) => handler(decoded), { discard: true }),
         ),
@@ -214,6 +239,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     ...(options.logger ? { logger: options.logger } : {}),
     onNotification: dispatchNotification,
     onRequest: dispatchRequest,
+    onTermination: (error) => Deferred.fail(termination, error).pipe(Effect.asVoid),
   });
 
   const request = <M extends CodexRpc.ClientRequestMethod>(
@@ -241,6 +267,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     );
 
   return CodexAppServerClient.of({
+    awaitTermination: Deferred.await(termination),
     raw: {
       notifications: transport.incomingNotifications,
       requests: transport.incomingRequests,
@@ -293,19 +320,21 @@ export const layerChildProcess = (
 const makeChildProcessClient = Effect.fn(
   "effect-codex-app-server/CodexAppServerClient.makeChildProcessClient",
 )(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: CodexAppServerClientOptions) {
-  return yield* makeChildProcessStdioClient(handle, makeChildStdio(handle), options);
+  return yield* makeChildProcessStdioClient(handle, undefined, options);
 });
 
 const makeChildProcessStdioClient = Effect.fn(
   "effect-codex-app-server/CodexAppServerClient.makeChildProcessStdioClient",
 )(function* (
   handle: ChildProcessSpawner.ChildProcessHandle,
-  stdio: Stdio.Stdio,
+  stdio: Stdio.Stdio | undefined,
   options: CodexAppServerClientOptions,
 ) {
   const stderr = yield* captureChildStderr(handle.stderr, options.onStderr);
-  return yield* make(stdio, options, (context) =>
-    makeTerminationError(handle, context, readFinalChildStderr(stderr)),
+  return yield* make(
+    stdio ?? makeChildStdio(handle, readFinalChildStderr(stderr).pipe(Effect.asVoid)),
+    options,
+    (context) => makeTerminationError(handle, context, stderr.snapshot),
   );
 });
 

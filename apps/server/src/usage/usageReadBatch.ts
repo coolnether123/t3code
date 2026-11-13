@@ -1,4 +1,8 @@
-import type { UsageSummary, UsageSummaryInput } from "@t3tools/contracts";
+import {
+  USAGE_CONTRACT_VERSION,
+  type UsageSummary,
+  type UsageSummaryInput,
+} from "@t3tools/contracts";
 
 /** Only day/model queries can be projected without losing attribution. */
 export function usageReadBatchKey(input: UsageSummaryInput): string {
@@ -7,7 +11,7 @@ export function usageReadBatchKey(input: UsageSummaryInput): string {
     timeZone: input.timeZone,
     resolution: input.resolution ?? "day",
     quotaProvider: input.quotaProvider ?? "codex",
-    clientContractVersion: input.clientContractVersion ?? 5,
+    clientContractVersion: input.clientContractVersion ?? USAGE_CONTRACT_VERSION,
     sessionIds: input.sessionIds,
     runIds: input.runIds,
     turnIds: input.turnIds,

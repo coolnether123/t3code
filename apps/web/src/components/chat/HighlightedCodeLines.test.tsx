@@ -1,5 +1,4 @@
-import { act } from "react";
-import { create, type ReactTestRenderer } from "react-test-renderer";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { renderToStaticMarkup } from "react-dom/server";
 import { getSharedHighlighter } from "@pierre/diffs";
 import { toHtml } from "hast-util-to-html";
@@ -28,6 +27,7 @@ describe("highlighted code lines", () => {
   });
 
   it("retains completed line component identity as new lines arrive", async () => {
+    // oxlint-disable-next-line t3code/require-disposable-render -- This Node test uses react-test-renderer rather than the browser renderer.
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const highlighter = await getSharedHighlighter({
       langs: ["typescript"],

@@ -1,25 +1,16 @@
 // @effect-diagnostics globalDate:off
-/**
- * Folds parsed transcript records into `(day, hourStart?, provider, model)`
- * buckets.
- *
- * `Intl.DateTimeFormat` is the only reliable way to resolve a wall-clock day in
- * an arbitrary IANA zone, and it takes a `Date`. That is why the raw `Date`
- * construction is allowed here; nothing in this module reads the clock.
- *
- * Pure, so the bucketing and de-duplication rules are testable without touching
- * the filesystem or the network.
- *
- * @module usageAggregation
- */
+// Intl.DateTimeFormat requires Date to resolve an IANA wall-clock day; this module never reads the clock.
 import type {
   UsageBucket,
   UsageCategoryCost,
   UsageDay,
+  UsageModelFilter,
+  UsageModelSelector,
   UsageResolution,
   UsageTokenTotals,
 } from "@t3tools/contracts";
 
+import { mergeUsageCopies } from "./usageCopies.ts";
 import { addTotals, EMPTY_TOTALS, type UsageRecord } from "./usageTranscripts.ts";
 import { priceUsageRecord, type RateTable } from "./usagePricing.ts";
 import {
@@ -184,6 +175,7 @@ export interface AggregateOptions {
   readonly untilDay: string;
   readonly rates: RateTable;
   readonly priceOverrides?: RateTable;
+  readonly modelFilter?: UsageModelFilter;
   readonly resolution?: UsageResolution;
   readonly sinceTimeMs?: number;
   readonly untilTimeMs?: number;
@@ -211,6 +203,41 @@ export function resolveModelAliases(
   return resolved;
 }
 
+/** Matches original IDs, so an alias cannot pull excluded usage into a kept model. */
+function keepsUsageRecord(
+  filter: UsageModelFilter | undefined,
+  record: Pick<UsageRecord, "provider" | "model">,
+): boolean {
+  if (filter === undefined) return true;
+  const model = record.model.trim();
+  const matches = (selector: UsageModelSelector) =>
+    selector.model === model &&
+    (selector.provider === undefined || selector.provider === record.provider);
+  return (filter.include?.some(matches) ?? true) && !(filter.exclude?.some(matches) ?? false);
+}
+
+const selectorKey = (selector: UsageModelSelector) =>
+  JSON.stringify([selector.provider ?? null, selector.model]);
+
+const canonicalSelectors = (selectors: readonly UsageModelSelector[]) =>
+  [...new Map(selectors.map((selector) => [selectorKey(selector), selector]))]
+    // Code-unit order, so servers in different locales echo the same form.
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([, selector]) => selector);
+
+/** Equal filters get one form, so they share scans and clients can compare echoed filters. */
+export function canonicalModelFilter(
+  filter: UsageModelFilter | undefined,
+): UsageModelFilter | undefined {
+  if (filter === undefined) return undefined;
+  const exclude = filter.exclude?.length ? canonicalSelectors(filter.exclude) : undefined;
+  if (filter.include === undefined && exclude === undefined) return undefined;
+  return {
+    ...(filter.include === undefined ? {} : { include: canonicalSelectors(filter.include) }),
+    ...(exclude === undefined ? {} : { exclude }),
+  };
+}
+
 export interface AggregateResult {
   readonly buckets: readonly UsageBucket[];
   /** Records dropped because an earlier record carried the same dedupe key. */
@@ -228,7 +255,7 @@ export interface AggregateResult {
  */
 export class UsageAggregator {
   readonly #buckets = new Map<string, MutableBucket>();
-  readonly #seen = new Set<string>();
+  readonly #seen = new Map<string, PricedRecord>();
   readonly #toDay: (timestampMs: number) => string;
   readonly #hourlyWindow: { readonly sinceTimeMs: number; readonly untilTimeMs: number } | null;
   readonly #dailyWindow: DailyWindowIndex | null;
@@ -268,6 +295,7 @@ export class UsageAggregator {
     const priced = priceUsageRecord(this.#options.rates, record, this.#options.priceOverrides);
     return {
       record,
+      originalModel: input.model,
       costUsd: priced.costUsd,
       costSource: priced.costSource,
       categoryCostUsd: priced.categoryCostUsd,
@@ -293,13 +321,22 @@ export class UsageAggregator {
    * can derive per-window facts (distinct sessions, for one) from the records
    * that landed rather than everything the mtime prefilter happened to admit.
    */
-  add(record: UsageRecord): boolean {
+  add(input: UsageRecord, sourcePath?: string): boolean {
+    if (!keepsUsageRecord(this.#options.modelFilter, input)) return false;
+    const record = sourcePath === undefined ? input : { ...input, sourcePath };
     return this.addPriced(this.price(record));
   }
 
   /** `add` for a record priced when its transcript was indexed. */
   addPriced(priced: PricedRecord): boolean {
     const { record } = priced;
+    if (
+      !keepsUsageRecord(this.#options.modelFilter, {
+        provider: record.provider,
+        model: priced.originalModel ?? record.model,
+      })
+    )
+      return false;
     if (!this.#accepts(record)) return false;
 
     if (
@@ -323,27 +360,22 @@ export class UsageAggregator {
     // copy from another transcript. The scan admits boundary files by mtime,
     // so this ordering is observable for resumed and forked sessions.
     if (record.dedupeKey !== null) {
-      if (this.#seen.has(record.dedupeKey)) {
+      const held = this.#seen.get(record.dedupeKey);
+      if (held !== undefined) {
         this.#duplicatesDropped += 1;
+        const merged = mergeUsageCopies(held.record, record);
+        if (merged !== held.record) {
+          const updated = this.price({ ...merged, model: held.originalModel ?? merged.model });
+          const originalDay = this.#toDay(held.record.timestampMs);
+          this.#contribute(held, originalDay, -1);
+          this.#contribute(updated, originalDay, 1);
+          this.#seen.set(record.dedupeKey, updated);
+        }
         return false;
       }
-      this.#seen.add(record.dedupeKey);
+      this.#seen.set(record.dedupeKey, priced);
     }
-
-    this.#accumulate(this.#bucketFor(record, day, this.#hourStart(record.timestampMs)), {
-      totals: record.totals,
-      costUsd: priced.costUsd,
-      cacheSavingsUsd: priced.cacheSavingsUsd,
-      categoryCostUsd: priced.categoryCostUsd ?? null,
-      fastCostUsd: priced.fastCostUsd ?? 0,
-      ultrafastCostUsd: priced.ultrafastCostUsd ?? 0,
-      speedPremiumUsd: priced.speedPremiumUsd ?? 0,
-      records: 1,
-      unpricedRecords: priced.costSource === "unpriced" ? 1 : 0,
-      providerReportedRecords: priced.costSource === "providerReported" ? 1 : 0,
-      firstMs: record.timestampMs,
-      lastMs: record.timestampMs,
-    });
+    this.#contribute(priced, day, 1);
     return true;
   }
 
@@ -353,6 +385,13 @@ export class UsageAggregator {
    * groups hold no key another transcript shares, so they skip the dedupe pass.
    */
   addGroup(group: IndexedGroup): boolean {
+    if (
+      !keepsUsageRecord(this.#options.modelFilter, {
+        provider: group.provider,
+        model: group.originalModel ?? group.model,
+      })
+    )
+      return false;
     if (!this.#accepts(group)) return false;
     const { sinceTimeMs, untilTimeMs } = this.window();
     const start = lowerBound(group.timestamps, sinceTimeMs);
@@ -387,6 +426,38 @@ export class UsageAggregator {
       position = next;
     }
     return end > start;
+  }
+
+  #contribute(priced: PricedRecord, day: string, sign: 1 | -1): void {
+    const { record } = priced;
+    this.#accumulate(this.#bucketFor(record, day, this.#hourStart(record.timestampMs)), {
+      totals: {
+        uncachedInputTokens: record.totals.uncachedInputTokens * sign,
+        cachedInputTokens: record.totals.cachedInputTokens * sign,
+        cacheCreationTokens: record.totals.cacheCreationTokens * sign,
+        outputTokens: record.totals.outputTokens * sign,
+        reasoningTokens: record.totals.reasoningTokens * sign,
+      },
+      costUsd: priced.costUsd * sign,
+      cacheSavingsUsd: priced.cacheSavingsUsd * sign,
+      categoryCostUsd:
+        priced.categoryCostUsd == null
+          ? null
+          : {
+              input: priced.categoryCostUsd.input * sign,
+              cacheRead: priced.categoryCostUsd.cacheRead * sign,
+              cacheWrite: priced.categoryCostUsd.cacheWrite * sign,
+              output: priced.categoryCostUsd.output * sign,
+            },
+      fastCostUsd: (priced.fastCostUsd ?? 0) * sign,
+      ultrafastCostUsd: (priced.ultrafastCostUsd ?? 0) * sign,
+      speedPremiumUsd: (priced.speedPremiumUsd ?? 0) * sign,
+      records: sign,
+      unpricedRecords: priced.costSource === "unpriced" ? sign : 0,
+      providerReportedRecords: priced.costSource === "providerReported" ? sign : 0,
+      firstMs: record.timestampMs,
+      lastMs: record.timestampMs,
+    });
   }
 
   #accepts(record: BucketDimensions): boolean {

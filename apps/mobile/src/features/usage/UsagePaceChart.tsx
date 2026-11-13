@@ -28,7 +28,7 @@ export function UsagePaceChart({
   const [recorded, setRecorded] = useState(false);
   const [showRecentPace, setShowRecentPace] = useState(true);
   const colors = useProviderColors();
-  useEffect(() => setNow(Date.now()), [samples]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Keep the forecast clock current while the chart is mounted.
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 60_000);
     return () => clearInterval(timer);

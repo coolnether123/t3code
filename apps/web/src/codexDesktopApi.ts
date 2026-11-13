@@ -12,13 +12,15 @@ import { HttpBody, HttpClient, HttpClientRequest } from "effect/http";
 import { resolvePrimaryEnvironmentHttpUrl } from "./environments/primary";
 import * as PrimaryEnvironmentHttp from "./environments/primary/httpLayer";
 
-export class CodexDesktopApiError extends Error {
-  readonly status: number | null;
-
-  constructor(message: string, status: number | null = null) {
-    super(message);
-    this.name = "CodexDesktopApiError";
-    this.status = status;
+export class CodexDesktopApiError extends Schema.TaggedError<CodexDesktopApiError>()(
+  "CodexDesktopApiError",
+  {
+    message: Schema.String,
+    status: Schema.NullOr(Schema.Number),
+  },
+) {
+  static new(message: string, status: number | null = null) {
+    return new CodexDesktopApiError({ message, status });
   }
 }
 
@@ -108,7 +110,7 @@ async function readJson(
       },
     );
   } catch (cause) {
-    throw new CodexDesktopApiError(
+    throw CodexDesktopApiError.new(
       cause instanceof Error ? cause.message : "Could not reach the Codex host.",
     );
   }
@@ -117,7 +119,7 @@ async function readJson(
   if (!response.ok) {
     const detail =
       typeof payload?.error === "string" ? payload.error : `Request failed (${response.status}).`;
-    throw new CodexDesktopApiError(detail, response.status);
+    throw CodexDesktopApiError.new(detail, response.status);
   }
   return payload;
 }
@@ -125,8 +127,8 @@ async function readJson(
 function decode<A>(schema: Schema.Schema<A>, payload: unknown, endpoint: string): A {
   try {
     return Schema.decodeUnknownSync(schema as never)(payload) as A;
-  } catch (cause) {
-    throw new CodexDesktopApiError(`Codex host returned an invalid response for ${endpoint}.`);
+  } catch {
+    throw CodexDesktopApiError.new(`Codex host returned an invalid response for ${endpoint}.`);
   }
 }
 

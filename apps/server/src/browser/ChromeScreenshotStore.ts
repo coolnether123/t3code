@@ -16,12 +16,12 @@ export const makeChromeScreenshotStore = Effect.fn("ChromeScreenshotStore.make")
     screenshot: ChromeAutomationScreenshot,
   ) {
     const invalid = () =>
-      new ChromeAutomationError(
+      ChromeAutomationError.new(
         "screenshot",
         "Chrome returned an invalid or oversized PNG screenshot.",
       );
     if (screenshot.mimeType !== "image/png" || screenshot.data.length > 6_990_508)
-      return yield* Effect.fail(invalid());
+      return yield* invalid();
     const png = Buffer.from(screenshot.data, "base64");
     if (
       png.length < 45 ||
@@ -39,14 +39,14 @@ export const makeChromeScreenshotStore = Effect.fn("ChromeScreenshotStore.make")
       screenshot.width > 4096 ||
       screenshot.height > 4096
     )
-      return yield* Effect.fail(invalid());
+      return yield* invalid();
     let offset = 8;
     let hasPixels = false;
     let hasEnd = false;
     while (offset + 12 <= png.length) {
       const length = png.readUInt32BE(offset);
       const kind = png.toString("ascii", offset + 4, offset + 8);
-      if (length > png.length - offset - 12) return yield* Effect.fail(invalid());
+      if (length > png.length - offset - 12) return yield* invalid();
       if (kind === "IDAT") hasPixels = true;
       offset += length + 12;
       if (kind === "IEND") {
@@ -54,18 +54,19 @@ export const makeChromeScreenshotStore = Effect.fn("ChromeScreenshotStore.make")
         break;
       }
     }
-    if (!hasPixels || !hasEnd) return yield* Effect.fail(invalid());
+    if (!hasPixels || !hasEnd) return yield* invalid();
     const attachmentId = createAttachmentId(threadId);
     if (attachmentId === null)
-      return yield* Effect.fail(
-        new ChromeAutomationError("screenshot", "Screenshot thread ownership is unavailable."),
+      return yield* ChromeAutomationError.new(
+        "screenshot",
+        "Screenshot thread ownership is unavailable.",
       );
     const filePath = path.join(config.attachmentsDir, `${attachmentId}.png`);
     yield* fileSystem
       .writeFile(filePath, png, { flag: "wx" })
       .pipe(
-        Effect.mapError(
-          () => new ChromeAutomationError("screenshot", "The screenshot could not be saved."),
+        Effect.mapError(() =>
+          ChromeAutomationError.new("screenshot", "The screenshot could not be saved."),
         ),
       );
     return {

@@ -23,6 +23,8 @@ import {
   voiceControls,
 } from "./operatorProtocol.ts";
 
+const decodeProviderRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
+
 describe("silent call control", () => {
   it("keeps hold markers and their partial prefixes out of spoken prose", () => {
     for (let length = 1; length <= "<otis-hold/>".length; length++)
@@ -107,7 +109,7 @@ async function fixture() {
   operator.bind(ports);
   await operator.configure("chat", models);
   const event = (sessionId: string, type: string, turnId: string, payload: unknown = {}) =>
-    Schema.decodeUnknownSync(ProviderRuntimeEvent)({
+    decodeProviderRuntimeEvent({
       type,
       eventId: `${type}-${turnId}-${JSON.stringify(payload)}`,
       provider: "codex",

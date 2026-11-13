@@ -15,6 +15,13 @@ import { withCodexAppServerClient } from "../provider/CodexProvider.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { appendCodexQuotaSampleFile, codexWeeklyQuotaSample } from "./codexQuotaSampler.ts";
 
+class CodexQuotaWriteError extends Schema.TaggedError<CodexQuotaWriteError>()(
+  "CodexQuotaWriteError",
+  {
+    cause: Schema.Unknown,
+  },
+) {}
+
 export const CODEX_CREDIT_HISTORY_FILE = "usage-codex-quota-history.json";
 const decodeSettings = Schema.decodeUnknownEffect(CodexSettings);
 
@@ -49,9 +56,11 @@ export const make = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     const sample = codexWeeklyQuotaSample(response, DateTime.formatIso(DateTime.makeUnsafe(now)));
     if (sample === null) return;
-    yield* Effect.tryPromise(() =>
-      appendCodexQuotaSampleFile(path.join(config.stateDir, CODEX_CREDIT_HISTORY_FILE), sample),
-    );
+    yield* Effect.tryPromise({
+      try: () =>
+        appendCodexQuotaSampleFile(path.join(config.stateDir, CODEX_CREDIT_HISTORY_FILE), sample),
+      catch: (cause) => new CodexQuotaWriteError({ cause }),
+    });
   }).pipe(
     Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
     Effect.scoped,

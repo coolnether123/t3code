@@ -34,6 +34,7 @@ export interface ThreadVoiceHandle {
 }
 function CallStatusLine({ label }: { label: string }) {
   const [seconds, setSeconds] = useState(0);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Run the elapsed-time clock while this status is mounted.
   useEffect(() => {
     const started = Date.now();
     const timer = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 1000);
@@ -104,6 +105,7 @@ export function ThreadVoiceControls({
     savedDefaults,
   );
   const callbacks = useRef(props);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Give the external voice session the latest callbacks after each commit.
   useLayoutEffect(() => {
     callbacks.current = props;
   });
@@ -131,6 +133,7 @@ export function ThreadVoiceControls({
   const audioRef = useRef<ReturnType<typeof createBrowserAudio> | null>(null);
   const sessionRef = useRef<ThreadVoiceSession | null>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Load call configuration from the speech service and cancel stale requests.
   useEffect(() => {
     if (!canCall) return;
     const abort = new AbortController();
@@ -211,6 +214,7 @@ export function ThreadVoiceControls({
         );
     }
   };
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Own the audio session and reconnect listener for this thread.
   useLayoutEffect(() => {
     const audio = createBrowserAudio(() => session.audioInterrupted());
     audioRef.current = audio;
@@ -257,6 +261,7 @@ export function ThreadVoiceControls({
     }),
     [],
   );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Feed committed thread updates to the external voice session.
   useLayoutEffect(() => {
     sessionRef.current?.observe(
       messages,
@@ -268,10 +273,11 @@ export function ThreadVoiceControls({
   }, [messages, props.running, voiceRunning, latestTurnId, models]);
   const active = state !== "idle";
   const panelOpen = active || expanded;
-  // Keep the session mounted when the phone composer blurs or an approval arrives.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Keep the parent composer mounted while the external audio session or its panel is open.
   useEffect(() => {
     callbacks.current.onPanelOpenChange?.(panelOpen);
   }, [panelOpen]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Release the parent composer's panel ownership on unmount.
   useEffect(() => () => callbacks.current.onPanelOpenChange?.(false), []);
   const unheard = (call?.operatorUpdates ?? updates).filter(
     (update) => !update.heardAt && (update.status === "done" || update.status === "needs-Jared"),

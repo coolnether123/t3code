@@ -1,11 +1,10 @@
-import { useNavigation } from "@react-navigation/native";
 import { mergeRepeatedInputSummaries } from "@t3tools/shared/usageRepeatedInput";
 import { makeWindow } from "@t3tools/shared/usageFormat";
 import { useMemo, useState } from "react";
-import { Platform, Pressable, RefreshControl, ScrollView, View } from "react-native";
+import { Pressable, ScrollView, View } from "react-native";
+import { RefreshControl } from "../../components/ui/RefreshControl";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { AndroidScreenHeader } from "../../components/ui/AndroidScreenHeader";
 import { AppText as Text } from "../../components/ui/AppText";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useUsage } from "../../state/usage";
@@ -19,7 +18,6 @@ const WINDOW_OPTIONS = [
 ] as const;
 
 export function RepeatedInputRouteScreen() {
-  const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const [windowSelection, setWindowSelection] = useState(() => ({
     days: 30,
@@ -56,12 +54,6 @@ export function RepeatedInputRouteScreen() {
   return (
     <View collapsable={false} className="flex-1 bg-sheet">
       <NativeStackScreenOptions options={{ title: "Skills & repeated input" }} />
-      {Platform.OS === "android" ? (
-        <>
-          <NativeStackScreenOptions options={{ headerShown: false }} />
-          <AndroidScreenHeader title="Skills & repeated input" onBack={() => navigation.goBack()} />
-        </>
-      ) : null}
       <ScrollView
         contentInsetAdjustmentBehavior="automatic"
         showsVerticalScrollIndicator={false}

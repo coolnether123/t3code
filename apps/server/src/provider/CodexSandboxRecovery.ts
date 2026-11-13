@@ -379,23 +379,23 @@ export function shouldRecoverCodexSandboxExit(
   );
 }
 
-export function withCodexSandboxStartupRecovery<A, E, R>(input: {
+export const withCodexSandboxStartupRecovery = Effect.fn(
+  "CodexSandboxRecovery.withCodexSandboxStartupRecovery",
+)(function* <A, E, R>(input: {
   readonly run: () => Effect.Effect<A, E, R>;
   readonly homeDirectory?: string;
   readonly platform?: string;
-}): Effect.Effect<A, E, R> {
-  return Effect.gen(function* () {
-    const first = yield* Effect.result(input.run());
-    if (first._tag === "Success") return first.success;
-    if (!isConfirmedCorruptCodexSandboxExit(first.failure)) {
-      return yield* Effect.fail(first.failure);
-    }
+}) {
+  const first = yield* Effect.result(input.run());
+  if (first._tag === "Success") return first.success;
+  if (!isConfirmedCorruptCodexSandboxExit(first.failure)) {
+    return yield* Effect.fail(first.failure);
+  }
 
-    const recovery = yield* recoverCodexDenyReadAclState({
-      ...(input.homeDirectory === undefined ? {} : { homeDirectory: input.homeDirectory }),
-      ...(input.platform === undefined ? {} : { platform: input.platform }),
-    });
-    if (!recovery) return yield* Effect.fail(first.failure);
-    return yield* input.run();
+  const recovery = yield* recoverCodexDenyReadAclState({
+    ...(input.homeDirectory === undefined ? {} : { homeDirectory: input.homeDirectory }),
+    ...(input.platform === undefined ? {} : { platform: input.platform }),
   });
-}
+  if (!recovery) return yield* Effect.fail(first.failure);
+  return yield* input.run();
+});

@@ -2,6 +2,7 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeZlib from "node:zlib";
 
 import { describe, expect, it } from "@effect/vitest";
 
@@ -151,6 +152,89 @@ describe("selectTranscriptFilesForScan", () => {
 });
 
 describe("incremental transcript reads", () => {
+  it.each(["codex", "claude"] as const)(
+    "reads and resumes a compressed %s transcript using decoded offsets",
+    async (provider) => {
+      const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-zstd-"));
+      const plain = NodePath.join(directory, "session.jsonl");
+      const archive = `${plain}.zst`;
+      const lines =
+        provider === "codex"
+          ? [
+              {
+                timestamp: "2026-08-29T10:00:00Z",
+                type: "session_meta",
+                payload: { id: "session-a" },
+              },
+              {
+                timestamp: "2026-08-29T10:00:01Z",
+                type: "turn_context",
+                payload: { model: "gpt-5.6-sol", turn_id: "turn-a", service_tier: "fast" },
+              },
+              {
+                timestamp: "2026-08-29T10:00:02Z",
+                type: "event_msg",
+                payload: {
+                  type: "token_count",
+                  info: {
+                    last_token_usage: {
+                      input_tokens: 10,
+                      cached_input_tokens: 3,
+                      output_tokens: 2,
+                    },
+                  },
+                },
+              },
+            ]
+          : [
+              {
+                type: "assistant",
+                sessionId: "session-a",
+                timestamp: "2026-08-29T10:00:02Z",
+                message: {
+                  id: "message-a",
+                  model: "claude-sonnet-4-5",
+                  usage: { input_tokens: 10, output_tokens: 2 },
+                },
+              },
+            ];
+      const prefix = lines.map((line) => JSON.stringify(line)).join("\n") + "\n";
+      const contents = prefix + JSON.stringify(lines[lines.length - 1]) + "\n";
+      try {
+        await NodeFSP.writeFile(plain, contents);
+        await NodeFSP.writeFile(archive, NodeZlib.zstdCompressSync(Buffer.from(contents)));
+        const first = await readTranscriptRecords(archive, provider, {
+          endByte: Buffer.byteLength(prefix) - 1,
+        });
+        const second = await readTranscriptRecords(archive, provider, {
+          startByte: first!.nextByte,
+          ...(first!.codexState === undefined ? {} : { codexState: first!.codexState }),
+        });
+        const expected = await readTranscriptRecords(plain, provider);
+        expect(first?.decodedSize).toBe(Buffer.byteLength(contents));
+        expect(first?.nextByte).toBe(Buffer.byteLength(prefix));
+        expect([...(first?.records ?? []), ...(second?.records ?? [])]).toEqual(expected?.records);
+        expect(expected?.records.length).toBeGreaterThan(0);
+        await NodeFSP.writeFile(archive, "invalid");
+        expect(await readTranscriptRecords(archive, provider)).toBeNull();
+      } finally {
+        await NodeFSP.rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+  it("discovers archived JSONL transcripts", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-archive-"));
+    try {
+      const archive = NodePath.join(directory, "rollout.jsonl.zst");
+      await NodeFSP.writeFile(archive, "synthetic archive");
+      expect((await listTranscriptFiles(directory, 0, "codex")).map((entry) => entry.path)).toEqual(
+        [archive],
+      );
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("marks an inventory incomplete when its deadline has already elapsed", async () => {
     const directory = await NodeFSP.mkdtemp(
       NodePath.join(NodeOS.tmpdir(), "t3-usage-list-deadline-"),
@@ -629,6 +713,12 @@ describe("incremental transcript reads", () => {
       });
       expect(next?.observations).toHaveLength(1);
       expect(JSON.stringify(next?.observations)).not.toContain(skill);
+      const archive = `${path}.zst`;
+      await NodeFSP.writeFile(archive, NodeZlib.zstdCompressSync(Buffer.from(first + appended)));
+      const archived = await readRepeatedInputRecords(archive, { catalog });
+      const full = await readRepeatedInputRecords(path, { catalog });
+      expect(archived?.observations).toEqual(full?.observations);
+      expect(archived?.gaps).toEqual(full?.gaps);
     } finally {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }

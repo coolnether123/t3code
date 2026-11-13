@@ -1,5 +1,3 @@
-import { needsCursorKeychainAccess } from "@t3tools/client-runtime/state/usage";
-import { resolveUsageAccess } from "@t3tools/client-runtime/state/usage-access";
 import { environmentSession } from "./session";
 /**
  * Multi-environment usage state.
@@ -22,6 +20,8 @@ import {
   type UsageSummaryInput,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
+import { needsCursorKeychainAccess, usageSummaryInput } from "@t3tools/client-runtime/state/usage";
+import { resolveUsageAccess } from "@t3tools/client-runtime/state/usage-access";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStableCallback } from "../hooks/useStableCallback";
@@ -71,7 +71,7 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
       const sessionResult = get(environmentSession.sessionStateAtom(environmentId));
       const access = resolveUsageAccess({
         connectionPhase: presentation.connection.phase,
-        session: Option.getOrNull(AsyncResult.value(sessionResult)),
+        session: AsyncResult.getOrElse(sessionResult, () => null),
         hasSessionError: sessionResult._tag === "Failure",
       });
       if (!access.canReadDiagnostics) {
@@ -81,13 +81,21 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
           connection: presentation.connection,
           isConnected,
           ...access,
-          summary: null,
           needsCursorKeychainAccess: false,
+          summary: null,
         });
         continue;
       }
-      const result = get(serverEnvironment.usageSummary({ environmentId, input }));
-      const summary = Option.getOrNull(AsyncResult.value(result));
+      const result = get(
+        serverEnvironment.usageSummary({
+          environmentId,
+          input: usageSummaryInput(
+            input,
+            get(serverEnvironment.usageModelFilterAtom(environmentId)),
+          ),
+        }),
+      );
+      const summary = AsyncResult.getOrElse(result, () => null);
       statuses.push({
         environmentId,
         label: presentation.entry.target.label,
@@ -96,11 +104,11 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
         canReadDiagnostics: true,
         isConnected,
         error: result._tag === "Failure" ? "This environment could not report usage." : null,
-        summary,
         needsCursorKeychainAccess: needsCursorKeychainAccess(
           summary,
           get(serverEnvironment.providersValueAtom(environmentId)),
         ),
+        summary,
       });
     }
     return statuses;
@@ -182,6 +190,7 @@ export function useUsage(
   const refreshGeneration = useRef(0);
   const windowKeyRef = useRef(windowKey);
   const refreshAfterCommit = useRef<UsageView["refresh"] | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Async requests read the committed query window.
   useLayoutEffect(() => {
     windowKeyRef.current = windowKey;
   }, [windowKey]);
@@ -269,6 +278,7 @@ export function useUsage(
     void promise.then(settleInFlight, () => settleInFlight());
     return promise;
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Async request completion uses the committed refresh callback.
   useLayoutEffect(() => {
     refreshAfterCommit.current = refresh;
   }, [refresh]);
@@ -276,6 +286,7 @@ export function useUsage(
   // Route navigation can remount this view while its shared atom still holds a
   // transient disconnected result. Retry that result once on entry so mobile
   // users do not need to reload the whole browser tab.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Retry external environment requests after reconnects.
   useEffect(() => {
     const failedIds = environments
       .filter((environment) => environment.error !== null && !environment.isPending)
@@ -324,6 +335,7 @@ export function useUsage(
     delayedRetryTimers.current.set(retryKey, timer);
   }, [environments, refresh, windowKey]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Cancel external retry timers when the query window changes.
   useEffect(() => {
     const timers = delayedRetryTimers.current;
     return () => {
@@ -359,6 +371,7 @@ export function useUsage(
   // A bounded server scan intentionally returns partial data while its cache is
   // cold. Keep advancing that cache while the Usage page is mounted so totals
   // converge without asking the user to click Refresh once per 128 MiB batch.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Continue bounded external scans until their cache converges.
   useEffect(() => {
     const retry = deferredTranscriptRetry.current;
     if (retry.windowKey !== windowKey) {

@@ -1,12 +1,12 @@
-import { act } from "react";
-import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it } from "vite-plus/test";
 import {
   UsageDay,
   type UsageRepeatedInputCatalogItem,
   type UsageRepeatedInputSummary,
 } from "@t3tools/contracts";
+
+import { act, render } from "../../../test/render";
 
 import { RepeatedInputSection } from "./RepeatedInputSection";
 
@@ -105,21 +105,15 @@ const observedSkill: UsageRepeatedInputCatalogItem = {
   priceStatus: "estimated",
 };
 
-afterEach(() => vi.unstubAllGlobals());
-
 describe("RepeatedInputSection", () => {
   it("shows current skills without observations and retains historical payload revisions", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () =>
-        root.render(
-          <RepeatedInputSection
-            data={{ ...repeatedInput, catalog: [unobservedSkill, observedSkill] }}
-          />,
-        ),
+    {
+      await using screen = await render(
+        <RepeatedInputSection
+          data={{ ...repeatedInput, catalog: [unobservedSkill, observedSkill] }}
+        />,
       );
+      const { container } = screen;
       const catalog = container.querySelector(
         '[aria-labelledby="repeated-input-catalog-heading"]',
       )!;
@@ -162,15 +156,10 @@ describe("RepeatedInputSection", () => {
         ),
       ).not.toBeNull();
       expect(catalog.querySelector("table")?.textContent).toContain("gpt-5.6-luna58$0.12");
-    } finally {
-      await act(async () => root.unmount());
     }
   });
 
   it("paginates and searches all catalog revisions and filters observation status", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const container = document.createElement("div");
-    const root = createRoot(container);
     const catalog = [
       observedSkill,
       ...Array.from({ length: 36 }, (_, index) => ({
@@ -179,10 +168,11 @@ describe("RepeatedInputSection", () => {
         contentHash: `catalog-hash-${index}`,
       })),
     ];
-    try {
-      await act(async () =>
-        root.render(<RepeatedInputSection data={{ ...repeatedInput, catalog }} />),
+    {
+      await using screen = await render(
+        <RepeatedInputSection data={{ ...repeatedInput, catalog }} />,
       );
+      const { container } = screen;
       expect(container.querySelectorAll('[aria-label^="Catalog details for"]')).toHaveLength(12);
       expect(container.textContent).toContain("1 to 12 of 37 skill revisions");
       await act(async () =>
@@ -222,29 +212,23 @@ describe("RepeatedInputSection", () => {
       expect(container.textContent).toContain("1 to 12 of 36 skill revisions");
       expect(container.querySelector('[aria-label="Catalog details for unslop"]')).toBeNull();
       expect(container.querySelector('[aria-label="Details for unslop"]')).not.toBeNull();
-    } finally {
-      await act(async () => root.unmount());
     }
   });
 
   it("keeps separate file revisions with identical content independently expandable", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () =>
-        root.render(
-          <RepeatedInputSection
-            data={{
-              ...repeatedInput,
-              catalog: [
-                { ...unobservedSkill, fileRevisionHash: "revision-one" },
-                { ...unobservedSkill, fileRevisionHash: "revision-two" },
-              ],
-            }}
-          />,
-        ),
+    {
+      await using screen = await render(
+        <RepeatedInputSection
+          data={{
+            ...repeatedInput,
+            catalog: [
+              { ...unobservedSkill, fileRevisionHash: "revision-one" },
+              { ...unobservedSkill, fileRevisionHash: "revision-two" },
+            ],
+          }}
+        />,
       );
+      const { container } = screen;
       const rows = container.querySelectorAll<HTMLButtonElement>(
         '[aria-label="Catalog details for installed-only"]',
       );
@@ -269,8 +253,6 @@ describe("RepeatedInputSection", () => {
           .querySelector('[aria-label="Catalog details for installed-only"]')
           ?.getAttribute("aria-expanded"),
       ).toBe("false");
-    } finally {
-      await act(async () => root.unmount());
     }
   });
 
@@ -300,11 +282,9 @@ describe("RepeatedInputSection", () => {
   });
 
   it("reveals evidence and per-model attribution on demand", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<RepeatedInputSection data={repeatedInput} />));
+    {
+      await using screen = await render(<RepeatedInputSection data={repeatedInput} />);
+      const { container } = screen;
       const details = container.querySelector<HTMLButtonElement>(
         '[aria-label="Details for unslop"]',
       )!;
@@ -318,17 +298,13 @@ describe("RepeatedInputSection", () => {
       expect(container.querySelector("table")?.textContent).toContain("gpt-5.6-luna58$0.12");
       await act(async () => details.click());
       expect(container.querySelector("table")).toBeNull();
-    } finally {
-      await act(async () => root.unmount());
     }
   });
 
   it("switches comparison dimensions and metrics with selectable time periods", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<RepeatedInputSection data={repeatedInput} />));
+    {
+      await using screen = await render(<RepeatedInputSection data={repeatedInput} />);
+      const { container } = screen;
       await act(async () =>
         [...container.querySelectorAll("button")]
           .find((button) => button.textContent === "By model")!
@@ -359,24 +335,20 @@ describe("RepeatedInputSection", () => {
       await act(async () => bar.click());
       expect(bar.getAttribute("aria-pressed")).toBe("true");
       expect(container.textContent).toContain("interval totals are not daily rates");
-    } finally {
-      await act(async () => root.unmount());
     }
   });
 
   it("bounds a large revision list, searches beyond the first page, and clears filters", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const container = document.createElement("div");
-    const root = createRoot(container);
     const items = Array.from({ length: 2072 }, (_, index) => ({
       ...repeatedInput.items[0]!,
       displayName: `Skill ${index}`,
       contentHash: `hash-${index}`,
     }));
-    try {
-      await act(async () =>
-        root.render(<RepeatedInputSection data={{ ...repeatedInput, items }} />),
+    {
+      await using screen = await render(
+        <RepeatedInputSection data={{ ...repeatedInput, items }} />,
       );
+      const { container } = screen;
       expect(container.querySelectorAll('[aria-label^="Details for"]')).toHaveLength(12);
       expect(container.textContent).toContain("1 to 12 of 2,072 payloads");
       await act(async () =>
@@ -409,33 +381,27 @@ describe("RepeatedInputSection", () => {
         evidence.dispatchEvent(new Event("change", { bubbles: true }));
       });
       expect(container.textContent).toContain("No payloads match these filters");
-    } finally {
-      await act(async () => root.unmount());
     }
   });
 
   it("offers a touch-sized period selector for dense timelines", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () =>
-        root.render(
-          <RepeatedInputSection
-            data={{
-              ...repeatedInput,
-              totals: [
-                breakdown,
-                {
-                  ...breakdown,
-                  sinceDay: UsageDay.make("2026-09-03"),
-                  untilDay: UsageDay.make("2026-09-04"),
-                },
-              ],
-            }}
-          />,
-        ),
+    {
+      await using screen = await render(
+        <RepeatedInputSection
+          data={{
+            ...repeatedInput,
+            totals: [
+              breakdown,
+              {
+                ...breakdown,
+                sinceDay: UsageDay.make("2026-09-03"),
+                untilDay: UsageDay.make("2026-09-04"),
+              },
+            ],
+          }}
+        />,
       );
+      const { container } = screen;
       await act(async () =>
         [...container.querySelectorAll("button")]
           .find((button) => button.textContent === "Over time")!
@@ -453,8 +419,6 @@ describe("RepeatedInputSection", () => {
           .querySelector('[aria-label="Repeated input over time"] [aria-pressed="true"]')
           ?.getAttribute("aria-label"),
       ).toContain("2026-09-03 to 2026-09-04");
-    } finally {
-      await act(async () => root.unmount());
     }
   });
 

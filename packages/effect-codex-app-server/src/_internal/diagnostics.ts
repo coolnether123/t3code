@@ -1,7 +1,10 @@
 const ANSI_ESCAPE_CHAR = String.fromCharCode(27);
-const ANSI_ESCAPE_REGEX = new RegExp(`${ANSI_ESCAPE_CHAR}\\[[0-9;]*[A-Za-z]`, "g");
+const ANSI_ESCAPE_REGEX = new RegExp(
+  `(?:${ANSI_ESCAPE_CHAR}\\[|${String.fromCharCode(155)})[0-9;]*[A-Za-z]`,
+  "g",
+);
 const CONTROL_CHARACTER_REGEX = new RegExp(
-  String.raw`[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]`,
+  String.raw`[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]`,
   "g",
 );
 
@@ -63,3 +66,35 @@ export function appendBoundedCodexDiagnostic(
     truncated: true,
   };
 }
+
+const STDERR_EXCERPT_MAX_CHARS = 512;
+// `Error: …`, `TypeError: …`, `Error [ERR_MODULE_NOT_FOUND]: …`, `error: …`, `ERROR: …`, `fatal: …`
+const ERROR_LINE_PATTERN = /^(?:[a-z]*error|fatal)(?: ?\[[^\]]+\])?:\s*\S/i;
+const EXIT_SUMMARY_PATTERN = /\b(?:exit status|exit code|exited with code)\s+\d+\.?$/i;
+
+// Node launchers print the actionable error between a source excerpt and stack frames.
+export const codexStderrExcerpt = (tail: string): string | undefined => {
+  const lines = sanitizeCodexDiagnosticText(tail)
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/\s+/g, " "))
+    .filter((line) => line.length > 0);
+  const errorIndex = lines.findLastIndex((candidate) => ERROR_LINE_PATTERN.test(candidate));
+  const lineIndex =
+    errorIndex === -1 || EXIT_SUMMARY_PATTERN.test(lines.at(-1) ?? "")
+      ? lines.length - 1
+      : errorIndex;
+  const line = lines[lineIndex];
+  if (line === undefined) {
+    return undefined;
+  }
+  // Wrappers can print the actual failure before their generic exit-status summary.
+  const excerpt = EXIT_SUMMARY_PATTERN.test(line)
+    ? lines.slice(Math.max(0, lineIndex - 2), lineIndex + 1).join(" | ")
+    : line;
+  if (excerpt.length <= STDERR_EXCERPT_MAX_CHARS) {
+    return excerpt;
+  }
+  return excerpt !== line
+    ? `…${excerpt.slice(-(STDERR_EXCERPT_MAX_CHARS - 1))}`
+    : `${excerpt.slice(0, STDERR_EXCERPT_MAX_CHARS - 1)}…`;
+};

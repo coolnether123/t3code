@@ -20,6 +20,7 @@ export { VoiceRequestError } from "./errors.ts";
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(SpeechResponse));
 const encode = Schema.encodeSync(Schema.fromJsonString(SpeechRequest));
 const encodeResponse = Schema.encodeSync(Schema.fromJsonString(SpeechResponse));
+const isVoiceRequestError = Schema.is(VoiceRequestError);
 /** Reuse cookie, desktop bearer and refreshed request-bound relay authorization. */
 export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(function* (input: {
   onAudio?: (chunk: {
@@ -38,7 +39,7 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
   const body = yield* Effect.try({
     try: () => encode(input.request),
     catch: () =>
-      new VoiceRequestError("Local voice request validation failed. This is a client bug.", false),
+      VoiceRequestError.new("Local voice request validation failed. This is a client bug.", false),
   });
   // The voice route streams NDJSON outside the typed HTTP API, so it is signed and fetched by URL.
   // A refreshed relay credential can move the environment, so each attempt resolves it again.
@@ -74,7 +75,7 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
             const reader = response.body!.getReader();
             const decoder = new TextDecoder();
             let partial = "";
-            const result: typeof SpeechResponse.Type = {};
+            const result: SpeechResponse = {};
             try {
               for (;;) {
                 const chunk = await reader.read();
@@ -84,7 +85,7 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
                 for (const line of lines) {
                   if (!line.trim()) continue;
                   const frame = decode(line);
-                  if (frame.error) throw new VoiceRequestError(frame.error, true);
+                  if (frame.error) throw VoiceRequestError.new(frame.error, true);
                   if (frame.audio && frame.sampleRate) {
                     input.signal.throwIfAborted();
                     const generation =
@@ -93,12 +94,12 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
                     const speechId =
                       "speechId" in input.request ? input.request.speechId : undefined;
                     if (generation && frame.generation && frame.generation !== generation)
-                      throw new VoiceRequestError(
+                      throw VoiceRequestError.new(
                         "Speech response belongs to another generation.",
                         false,
                       );
                     if (speechId && frame.speechId && frame.speechId !== speechId)
-                      throw new VoiceRequestError(
+                      throw VoiceRequestError.new(
                         "Speech response belongs to another utterance.",
                         false,
                       );
@@ -110,7 +111,7 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
                         ...(frame.speechId ? { speechId: frame.speechId } : {}),
                       });
                     } catch {
-                      throw new VoiceRequestError(
+                      throw VoiceRequestError.new(
                         "Audio playback could not start. Check the audio device, then retry.",
                         false,
                       );
@@ -120,7 +121,7 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
                 if (chunk.done) break;
               }
               if (partial.trim() || !result.complete)
-                throw new VoiceRequestError("Speech stream ended before completion.", true);
+                throw VoiceRequestError.new("Speech stream ended before completion.", true);
             } finally {
               await reader.cancel().catch(() => {});
               reader.releaseLock();
@@ -133,10 +134,10 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
           return { status: response.status, text: await response.text() };
         },
         catch: (cause) =>
-          cause instanceof VoiceRequestError
+          isVoiceRequestError(cause)
             ? cause
             : cause instanceof SyntaxError || Schema.isSchemaError(cause)
-              ? new VoiceRequestError("Speech service returned invalid audio frames.", false)
+              ? VoiceRequestError.new("Speech service returned invalid audio frames.", false)
               : new RemoteEnvironmentAuthFetchError({
                   message:
                     "Cannot reach this chat's environment. Speech remains queued on this device.",
@@ -148,7 +149,7 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
   return yield* Effect.try({
     try: () => {
       if (result.status < 200 || result.status >= 300)
-        throw new VoiceRequestError(
+        throw VoiceRequestError.new(
           result.status === 404
             ? "This environment needs the voice update."
             : result.text.slice(0, 600) || "Voice request failed.",
@@ -157,9 +158,9 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
       return decode(result.text);
     },
     catch: (cause) =>
-      cause instanceof VoiceRequestError
+      isVoiceRequestError(cause)
         ? cause
-        : new VoiceRequestError(
+        : VoiceRequestError.new(
             "The environment returned an invalid voice response. Saved speech is retained.",
             false,
           ),
@@ -184,11 +185,9 @@ export function createVoiceRequestCommand<R, E>(
       const supervisor = yield* EnvironmentSupervisor;
       const prepared = yield* SubscriptionRef.get(supervisor.prepared);
       if (Option.isNone(prepared))
-        return yield* Effect.fail(
-          new VoiceRequestError(
-            "This environment is disconnected. Speech remains queued on this device.",
-            true,
-          ),
+        return yield* VoiceRequestError.new(
+          "This environment is disconnected. Speech remains queued on this device.",
+          true,
         );
       return yield* fetchEnvironmentSpeech({
         ...input,

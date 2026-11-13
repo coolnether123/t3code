@@ -3,7 +3,7 @@ import * as NodeOS from "node:os";
 import * as NodeNet from "node:net";
 import * as NodeStream from "node:stream";
 
-import * as NodeSocket from "@effect/platform-node/NodeSocket";
+import * as NodeWS from "@effect/platform-node/NodeWS";
 import type { CodexSettings } from "@t3tools/contracts";
 import {
   HomeDirectory as HostProcessHomeDirectory,
@@ -70,13 +70,7 @@ export const codexManagedCliPath = Effect.fn("codexManagedCliPath")(function* (
   return path.join(packageRoot, entrypoint ?? fallback);
 });
 
-/**
- * Starts the host's managed Codex daemon unless it reports itself running,
- * for example after a reboot or after the daemon exited and left its control
- * socket file behind. `daemon start` is idempotent and keeps the user's saved
- * daemon settings. A failure is left to the connection attempt, which reports
- * the actionable repair message.
- */
+// Daemon start is idempotent and retains saved settings; connection errors report repair guidance.
 export const ensureCodexDesktopDaemonStarted = Effect.fn("ensureCodexDesktopDaemonStarted")(
   function* (environment: NodeJS.ProcessEnv) {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -238,7 +232,7 @@ const toTransportError = (
 
 const textEncoder = new TextEncoder();
 
-const toMessageText = (data: NodeSocket.NodeWS.WebSocket.RawData): string => {
+const toMessageText = (data: NodeWS.WebSocket.RawData): string => {
   const decoder = new TextDecoder();
   if (typeof data === "string") return data;
   if (data instanceof Uint8Array) return decoder.decode(data);
@@ -254,14 +248,7 @@ const toMessageText = (data: NodeSocket.NodeWS.WebSocket.RawData): string => {
   return decoder.decode(output);
 };
 
-/**
- * Adapts `codex app-server proxy` to the line-oriented app-server client.
- *
- * The desktop proxy exposes the daemon's Unix WebSocket as a raw byte stream
- * on its own stdin/stdout. `ws` owns the HTTP Upgrade and WebSocket framing;
- * this adapter translates WebSocket message boundaries to the line-oriented
- * Effect child-process streams.
- */
+// The proxy exposes raw WebSocket bytes; this adapter translates messages to line-oriented streams.
 export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdio")(function* (
   child: DesktopDaemonChildProcess,
 ): Effect.fn.Return<Stdio.Stdio, CodexErrors.CodexAppServerTransportError, Scope.Scope> {
@@ -333,13 +320,13 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
     Effect.forkScoped,
   );
 
-  let socket: NodeSocket.NodeWS.WebSocket | undefined;
+  let socket: NodeWS.WebSocket | undefined;
   let handshakeOpen: (() => void) | undefined;
   let handshakeError: ((cause: unknown) => void) | undefined;
   let handshakeClose: (() => void) | undefined;
   let handshakeSettled = false;
   const terminateSocket = () => {
-    if (socket && socket.readyState !== NodeSocket.NodeWS.WebSocket.CLOSED) {
+    if (socket && socket.readyState !== NodeWS.WebSocket.CLOSED) {
       socket.terminate();
     }
     bridge?.destroy();
@@ -362,7 +349,7 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
   );
 
   const websocket = yield* Effect.callback<
-    NodeSocket.NodeWS.WebSocket,
+    NodeWS.WebSocket,
     CodexErrors.CodexAppServerTransportError
   >((resume) => {
     const failOpen = (cause: unknown) => {
@@ -381,7 +368,7 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
       resume(Effect.succeed(socket!));
     };
     try {
-      socket = new NodeSocket.NodeWS.WebSocket(CODEX_DESKTOP_DAEMON_WS_URL, {
+      socket = new NodeWS.WebSocket(CODEX_DESKTOP_DAEMON_WS_URL, {
         createConnection: (() => bridge!) as unknown as typeof NodeNet.createConnection,
         handshakeTimeout: CODEX_DESKTOP_DAEMON_HANDSHAKE_TIMEOUT_MS,
         perMessageDeflate: false,
@@ -407,7 +394,7 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
   const shutdownIncoming = () => {
     runFork(Queue.shutdown(incoming));
   };
-  const onMessage = (data: NodeSocket.NodeWS.WebSocket.RawData) => {
+  const onMessage = (data: NodeWS.WebSocket.RawData) => {
     const message = toMessageText(data).replace(/(?:\r\n|\n)$/, "");
     if (message.length === 0) return;
     runFork(Queue.offer(incoming, textEncoder.encode(`${message}\n`)).pipe(Effect.ignore));
@@ -433,7 +420,7 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
   };
   websocket.on("pong", onPong);
   yield* Effect.sync(() => {
-    if (websocket.readyState !== NodeSocket.NodeWS.WebSocket.OPEN) return;
+    if (websocket.readyState !== NodeWS.WebSocket.OPEN) return;
     if (awaitingPong) {
       onError(new Error("Codex desktop daemon stopped answering keepalive pings"));
       websocket.terminate();
@@ -450,7 +437,7 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
 
   const sendMessage = (message: string) =>
     Effect.callback<void, PlatformError.PlatformError>((resume) => {
-      if (websocket.readyState !== NodeSocket.NodeWS.WebSocket.OPEN) {
+      if (websocket.readyState !== NodeWS.WebSocket.OPEN) {
         resume(
           Effect.fail(
             PlatformError.systemError({
@@ -513,7 +500,7 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
       websocket.off("close", onClose);
       websocket.off("pong", onPong);
       shutdownIncoming();
-      if (websocket.readyState !== NodeSocket.NodeWS.WebSocket.CLOSED) websocket.terminate();
+      if (websocket.readyState !== NodeWS.WebSocket.CLOSED) websocket.terminate();
       bridge?.destroy();
     }),
   );

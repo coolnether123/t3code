@@ -54,7 +54,6 @@ export function CallModelSelectors(
                 model={selection.model}
                 modelOptions={selection.options}
                 allowPromptInjectedEffort={false}
-                planModeEnabled={false}
                 disabled={props.disabled ?? false}
                 onModelOptionsChange={(options) =>
                   select(role, { ...selection, ...(options ? { options } : { options: [] }) })

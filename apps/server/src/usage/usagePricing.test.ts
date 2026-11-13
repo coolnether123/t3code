@@ -1,7 +1,19 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { UsageTokenTotals } from "@t3tools/contracts";
 
-import { cacheSavingsUsd, lookupRate, parseRateTable, priceUsage } from "./usagePricing.ts";
+import {
+  cacheSavingsUsd,
+  lookupRate,
+  parseRateTable,
+  priceUsage,
+  priceUsageRecord,
+} from "./usagePricing.ts";
+
+const rate = (input: number, cacheRead?: number) => ({
+  input_cost_per_token: input,
+  output_cost_per_token: input * 5,
+  ...(cacheRead === undefined ? {} : { cache_read_input_token_cost: cacheRead }),
+});
 
 const tokens: UsageTokenTotals = {
   uncachedInputTokens: 100,
@@ -18,6 +30,24 @@ const opus = {
 };
 
 describe("usage pricing", () => {
+  it("prices one-hour Claude cache writes separately from five-minute writes", () => {
+    const table = parseRateTable({
+      "claude-opus-5": { ...opus, cache_creation_input_token_cost_above_1hr: 10e-6 },
+    });
+    const priced = priceUsageRecord(table, {
+      provider: "claude",
+      model: "claude-opus-5",
+      sessionId: "session",
+      timestampMs: 0,
+      dedupeKey: null,
+      reportedCostUsd: null,
+      cacheCreation1hTokens: 8,
+      totals: { ...tokens, uncachedInputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
+    });
+    expect(priced.costUsd).toBeCloseTo(2 * 6.25e-6 + 8 * 10e-6, 10);
+    expect(priced.categoryCostUsd?.cacheWrite).toBeCloseTo(priced.costUsd, 10);
+  });
+
   it("uses stable-family rates for documented Gemini preview IDs", () => {
     const rate = {
       inputCostPerToken: 1.25e-6,
@@ -201,5 +231,33 @@ describe("usage pricing", () => {
     });
     expect(rates.size).toBe(0);
     expect(priceUsage(rates, "gpt-5.3-codex-spark", tokens, null).costSource).toBe("unpriced");
+  });
+
+  it("prices a bare name at the model maker's rate when a reseller marks it up", () => {
+    const reseller = { "kyma/gemini-4-argon": rate(5.4e-6) };
+    const makers = {
+      "gemini/gemini-4-argon": rate(2e-6, 1e-7),
+      "vertex_ai/gemini-4-argon": rate(2e-6, 1e-7),
+    };
+
+    for (const document of [
+      { ...reseller, ...makers },
+      { ...makers, ...reseller },
+    ]) {
+      const table = parseRateTable(document);
+      expect(lookupRate(table, "gemini-4-argon")).toEqual(
+        lookupRate(table, "gemini/gemini-4-argon"),
+      );
+    }
+  });
+
+  it("leaves a bare name unpriced when model makers' own entries disagree", () => {
+    const table = parseRateTable({
+      "openai/example-model": rate(1),
+      "xai/example-model": rate(3),
+      "kyma/example-model": rate(1),
+    });
+
+    expect(lookupRate(table, "example-model")).toBeNull();
   });
 });

@@ -28,6 +28,7 @@ export function OtisChrome(props: {
   const [speaker, setSpeaker] = useState(true);
   const [seconds, setSeconds] = useState(0);
   const { setOpenMobile, toggleSidebar, isMobile } = useSidebar();
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Run the call duration clock while the call is active.
   useEffect(() => {
     if (!props.active) return;
     const started = Date.now();

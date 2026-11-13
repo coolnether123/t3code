@@ -1,45 +1,36 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
+import { act, fakeTimers, render } from "../../../test/render";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { CodexUsageButton } from "./CodexUsageButton";
 
-let root: Root;
-let container: HTMLDivElement;
-let button: HTMLButtonElement;
-const onOpen = vi.fn();
-
-beforeEach(async () => {
-  vi.useFakeTimers();
-  onOpen.mockReset();
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-  await act(async () => root.render(<CodexUsageButton onOpen={onOpen}>Codex</CodexUsageButton>));
-  button = container.querySelector("button")!;
-});
-afterEach(async () => {
-  await act(async () => root.unmount());
-  container.remove();
-  vi.useRealTimers();
-});
-
-const pointer = (type: string, init: PointerEventInit = {}) => {
-  button.dispatchEvent(
-    new PointerEvent(type, {
-      bubbles: true,
-      isPrimary: true,
-      pointerType: "touch",
-      button: 0,
-      clientX: 20,
-      clientY: 20,
-      ...init,
-    }),
+async function setup() {
+  await using stack = new AsyncDisposableStack();
+  const onOpen = vi.fn();
+  const screen = stack.use(
+    await render(<CodexUsageButton onOpen={onOpen}>Codex</CodexUsageButton>),
   );
-};
+  stack.use(fakeTimers());
+  const button = screen.container.querySelector("button")!;
+  const pointer = (type: string, init: PointerEventInit = {}) => {
+    button.dispatchEvent(
+      new PointerEvent(type, {
+        bubbles: true,
+        isPrimary: true,
+        pointerType: "touch",
+        button: 0,
+        clientX: 20,
+        clientY: 20,
+        ...init,
+      }),
+    );
+  };
+  return Object.assign(stack.move(), { screen, button, onOpen, pointer });
+}
 
 describe("Codex usage entry", () => {
-  it("disables Safari text selection and the native hold menu on the control", () => {
+  it("disables Safari text selection and the native hold menu on the control", async () => {
+    await using fixture = await setup();
+    const { button, onOpen } = fixture;
     const markup = renderToStaticMarkup(
       <CodexUsageButton onOpen={onOpen}>
         <span>Codex</span>
@@ -54,6 +45,8 @@ describe("Codex usage entry", () => {
     expect(onOpen).not.toHaveBeenCalled();
   });
   it("opens once after holding, without a second navigation on release", async () => {
+    await using fixture = await setup();
+    const { button, onOpen, pointer } = fixture;
     await act(async () => {
       pointer("pointerdown");
       vi.advanceTimersByTime(549);
@@ -68,6 +61,8 @@ describe("Codex usage entry", () => {
     expect(onOpen).toHaveBeenCalledTimes(1);
   });
   it("supports an ordinary tap and keyboard activation", async () => {
+    await using fixture = await setup();
+    const { button, onOpen, pointer } = fixture;
     await act(async () => {
       pointer("pointerdown");
       pointer("pointerup");
@@ -82,6 +77,8 @@ describe("Codex usage entry", () => {
     expect(onOpen).toHaveBeenCalledTimes(2);
   });
   it.each(["move", "cancel", "release"])("does not fire a hold after %s", async (reason) => {
+    await using fixture = await setup();
+    const { button, onOpen, pointer } = fixture;
     await act(async () => {
       pointer("pointerdown");
       if (reason === "move") pointer("pointermove", { clientY: 40 });
@@ -92,14 +89,18 @@ describe("Codex usage entry", () => {
     expect(onOpen).not.toHaveBeenCalled();
   });
   it("cleans up an outstanding hold when the row disappears", async () => {
+    await using fixture = await setup();
+    const { onOpen, pointer, screen } = fixture;
     await act(async () => {
       pointer("pointerdown");
-      root.render(null);
+      await screen.unmount();
     });
     await act(async () => vi.advanceTimersByTime(600));
     expect(onOpen).not.toHaveBeenCalled();
   });
   it("ignores a secondary finger or right mouse button", async () => {
+    await using fixture = await setup();
+    const { onOpen, pointer } = fixture;
     await act(async () => {
       pointer("pointerdown", { isPrimary: false });
       vi.advanceTimersByTime(600);

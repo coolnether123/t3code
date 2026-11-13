@@ -1,144 +1,233 @@
-import { AuthOrchestrationOperateScope, SpeechRequest, type CallRequest } from "@t3tools/contracts";
-import * as Effect from "effect/Effect";
-import * as Schema from "effect/Schema";
-import * as Stream from "effect/Stream";
+import { decodeSpeechPcmRequest } from "@t3tools/shared/speech";
 import {
-  HttpRouter,
-  HttpServerRequest,
-  HttpServerResponse,
-  HttpServerRespondable,
-} from "effect/http";
-import { authenticateRawRouteWithScope } from "../http.ts";
-import { proxySpeech, streamSpeech, speechInputMode, SpeechUnavailableError } from "./proxy.ts";
-import { ServerConfig } from "../config.ts";
-import { VoiceThreadService } from "./VoiceThreadService.ts";
+  AuthFilesystemReadScope,
+  AuthOrchestrationOperateScope,
+  AuthSettingsWriteScope,
+  type AuthEnvironmentScope,
+  EnvironmentAuthenticatedPrincipal,
+  EnvironmentHttpApi,
+  type EnvironmentSpeechModels,
+  EnvironmentVoiceBodyLimit,
+  SPEECH_MAX_OPTIONS_BYTES,
+} from "@t3tools/contracts";
+import * as ByteSize from "effect/ByteSize";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
-import { ProviderRegistry } from "../provider/ProviderRegistry.ts";
-import { CallService, verifyCallModel } from "./callService.ts";
-import { callStore } from "./callStore.ts";
-import { callOperator } from "./callOperator.ts";
-import { AuxiliaryProviderSessions } from "../provider/AuxiliaryProviderSessions.ts";
+import {
+  annotateEnvironmentRequest,
+  failEnvironmentInternal,
+  failEnvironmentInvalidRequest,
+  requireEnvironmentScope,
+} from "../auth/http.ts";
+import * as SpeechPostProcessing from "./postProcessing.ts";
+import * as CloudSpeech from "./CloudSpeech.ts";
+import * as SpeechService from "./SpeechService.ts";
 
-const decodeSpeechRequest = Schema.decodeUnknownEffect(Schema.fromJsonString(SpeechRequest));
+const MAX_TRANSCRIBE_BODY_BYTES = SpeechService.MAX_SPEECH_BYTES + SPEECH_MAX_OPTIONS_BYTES + 4;
+const parseAudio = Option.liftThrowable(decodeSpeechPcmRequest);
 
-class SpeechServiceError extends Schema.TaggedError<SpeechServiceError>()("SpeechServiceError", {
-  message: Schema.String,
-  recoverable: Schema.Boolean,
-}) {}
-
-export const speechRouteLayer = HttpRouter.add(
-  "POST",
-  "/api/voice",
+const bodyLimit = Layer.succeed(EnvironmentVoiceBodyLimit, (effect) =>
   Effect.gen(function* () {
-    yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
     const request = yield* HttpServerRequest.HttpServerRequest;
-    const text = yield* request.text;
-    if (text.length > 16_000_000)
-      return HttpServerResponse.text("Recording too large.", { status: 413 });
-    const input = yield* decodeSpeechRequest(text);
-    const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
-    const config = yield* ServerConfig;
-    const engine = yield* VoiceThreadService;
-    if (input.action === "otis.open")
-      return HttpServerResponse.jsonUnsafe({ threadId: yield* engine.openOtis() });
-    const providers = yield* ProviderRegistry;
-    const providerService = yield* AuxiliaryProviderSessions;
-    const calls = new CallService(
-      callStore(config.stateDir),
-      {
-        verify: async (options) => {
-          const snapshot = await runPromise(engine.snapshot(options.threadId));
-          if (!snapshot.projection.thread || snapshot.projection.thread.archivedAt)
-            throw new Error("Open an existing chat before starting a call.");
-          verifyCallModel(options, await runPromise(providers.getProviders));
-          return {
-            runtimeMode: snapshot.projection.thread.runtimeMode,
-            interactionMode: snapshot.projection.thread.interactionMode,
-          };
-        },
-        dispatch: (command) => runPromise(engine.dispatch(command)),
-        verifyVoice: async (selection) => {
-          const caps = await runPromise(providerService.getInstanceInfo(selection.instanceId));
-          if (caps.driverKind !== "claudeAgent")
-            throw new Error(
-              "This provider does not support tool-free voice sessions. It can still run as the background agent.",
-            );
-        },
-        speech: proxySpeech,
-        inputMode: (signal) =>
-          speechInputMode(
-            signal,
-            process.env.T3_CALL_STT_TENANT ?? "whisper-large-v3-turbo",
-            process.env.T3_CALL_FORCE_DEVICE_STT === "1",
-          ),
-        speechStream: streamSpeech,
-        tenants: [
-          process.env.T3_CALL_STT_TENANT ?? "whisper-large-v3-turbo",
-          process.env.T3_CALL_TTS_TENANT ?? "breeze-tts-2",
-        ],
-        ttsModel: process.env.T3_CALL_TTS_MODEL ?? "breeze-tts-2",
-      },
-      callOperator(config.stateDir),
-    );
-    if ("callId" in input && input.action === "call.speak" && input.streamAudio) {
-      // The response stream outlives the handler and cancels its own speech request.
-      // @effect-diagnostics-next-line abortControllerInEffect:off
-      const controller = new AbortController();
-      const body = Stream.fromAsyncIterable(
-        calls.speakStream(input, controller.signal),
-        () => new Error("Speech stream interrupted."),
-      ).pipe(
-        Stream.catch(() =>
-          Stream.succeed({ error: "Speech stream interrupted. Saved speech is retained." }),
-        ),
-        Stream.map((chunk) =>
-          new TextEncoder().encode(
-            `${JSON.stringify({
-              ...chunk,
-              ...(input.generation ? { generation: input.generation } : {}),
-              speechId: input.speechId,
-            })}\n`,
-          ),
-        ),
-        Stream.ensuring(Effect.sync(() => controller.abort())),
-      );
-      return HttpServerResponse.stream(body, {
-        headers: {
-          "content-type": "application/x-ndjson",
-          "content-encoding": "identity",
-          "cache-control": "no-store, no-transform",
-          "x-accel-buffering": "no",
-        },
-      });
-    }
-    return yield* Effect.tryPromise({
-      try: (signal) =>
-        "callId" in input ? calls.handle(input as CallRequest, signal) : proxySpeech(input, signal),
-      catch: (cause) =>
-        new SpeechServiceError({
-          recoverable:
-            cause instanceof SpeechUnavailableError ||
-            cause instanceof TypeError ||
-            (cause instanceof Error && cause.name === "TimeoutError"),
-          message:
-            cause instanceof Error
-              ? cause.message
-              : "Call unavailable. Saved speech is retained. Try reconnecting.",
-        }),
-    }).pipe(
-      Effect.map((result) => HttpServerResponse.jsonUnsafe(result)),
-      Effect.catch((error) =>
-        Effect.succeed(
-          HttpServerResponse.text(error.message, { status: error.recoverable ? 503 : 409 }),
-        ),
+    if (Number(request.headers["content-length"]) > MAX_TRANSCRIBE_BODY_BYTES)
+      return yield* failEnvironmentInvalidRequest("invalid_audio");
+    return yield* effect.pipe(
+      Effect.provideService(
+        HttpServerRequest.MaxBodySize,
+        ByteSize.bytes(MAX_TRANSCRIBE_BODY_BYTES),
       ),
     );
-  }).pipe(
-    Effect.catchTags({
-      EnvironmentAuthInvalidError: HttpServerRespondable.toResponse,
-      EnvironmentInternalError: HttpServerRespondable.toResponse,
-      EnvironmentScopeRequiredError: HttpServerRespondable.toResponse,
-    }),
-    Effect.orElseSucceed(() => HttpServerResponse.text("Invalid speech request.", { status: 400 })),
-  ),
+  }),
 );
+
+const mapSpeechError = <A, R>(effect: Effect.Effect<A, SpeechService.SpeechError, R>) =>
+  effect.pipe(
+    Effect.catchTags({
+      SpeechInvalidAudioError: () => failEnvironmentInvalidRequest("invalid_audio"),
+      SpeechUnsupportedPlatformError: () => failEnvironmentInvalidRequest("speech_unavailable"),
+      SpeechBusyError: () => failEnvironmentInvalidRequest("speech_busy"),
+      SpeechDownloadCancelledError: () => failEnvironmentInvalidRequest("speech_busy"),
+      SpeechModelNotFoundError: () => failEnvironmentInvalidRequest("invalid_command"),
+      SpeechOperationError: (error) => failEnvironmentInternal("internal_error", error),
+    }),
+  );
+
+// A linked model's origin is a path on this machine; only filesystem readers may see it.
+// Untraced: it runs inside each handler's own span.
+const withoutHostPaths = Effect.fnUntraced(function* (result: EnvironmentSpeechModels) {
+  const session = yield* EnvironmentAuthenticatedPrincipal;
+  if (session.scopes.has(AuthFilesystemReadScope)) return result;
+  return { models: result.models.map(({ linkedFrom: _, ...model }) => model) };
+});
+
+export const speechHttpApiLayer = HttpApiBuilder.group(
+  EnvironmentHttpApi,
+  "voice",
+  Effect.fnUntraced(function* (handlers) {
+    const speech = yield* SpeechService.SpeechService;
+    const cloud = yield* CloudSpeech.CloudSpeech;
+    const postProcessing = yield* SpeechPostProcessing.SpeechPostProcessing;
+    const guard = Effect.fnUntraced(function* (
+      endpoint: string,
+      scope: AuthEnvironmentScope = AuthOrchestrationOperateScope,
+    ) {
+      yield* annotateEnvironmentRequest(endpoint);
+      yield* requireEnvironmentScope(scope);
+    });
+    return handlers
+      .handle(
+        "cloudKeys",
+        Effect.fn("environment.voice.cloudKeys")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return yield* cloud.configured.pipe(
+            Effect.catch((error) => failEnvironmentInternal("internal_error", error)),
+          );
+        }),
+      )
+      .handle(
+        "setCloudKey",
+        Effect.fn("environment.voice.setCloudKey")(function* (args) {
+          yield* guard(args.endpoint.name, AuthSettingsWriteScope);
+          yield* cloud
+            .setKey(args.params.provider, args.payload.key)
+            .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+        }),
+      )
+      .handle(
+        "cloudModels",
+        Effect.fn("environment.voice.cloudModels")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return { models: yield* cloud.models };
+        }),
+      )
+      .handle(
+        "transcribeCloud",
+        Effect.fn("environment.voice.transcribeCloud")(function* (args) {
+          yield* guard(args.endpoint.name);
+          const decoded = parseAudio(args.payload);
+          if (Option.isNone(decoded)) return yield* failEnvironmentInvalidRequest("invalid_audio");
+          const text = yield* cloud
+            .transcribe(
+              args.params.provider,
+              decoded.value.pcm,
+              decoded.value.options,
+              args.query.model,
+            )
+            .pipe(
+              Effect.catchTags({
+                ServerSettingsError: (error) => failEnvironmentInternal("internal_error", error),
+                SpeechInvalidAudioError: () => failEnvironmentInvalidRequest("invalid_audio"),
+              }),
+            );
+          return { text };
+        }),
+      )
+      .handle(
+        "status",
+        Effect.fn("environment.voice.status")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return yield* speech.status.pipe(mapSpeechError);
+        }),
+      )
+      .handle(
+        "prepareModel",
+        Effect.fn("environment.voice.prepareModel")(function* (args) {
+          yield* guard(args.endpoint.name);
+          yield* speech.prepareModel.pipe(mapSpeechError);
+        }),
+      )
+      .handle(
+        "models",
+        Effect.fn("environment.voice.models")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return yield* speech
+            .models(args.query.benchmarks === "1")
+            .pipe(mapSpeechError, Effect.flatMap(withoutHostPaths));
+        }),
+      )
+      .handle(
+        "downloadModel",
+        Effect.fn("environment.voice.downloadModel")(function* (args) {
+          yield* guard(args.endpoint.name, AuthSettingsWriteScope);
+          return yield* speech
+            .downloadModel(args.payload.modelId)
+            .pipe(mapSpeechError, Effect.flatMap(withoutHostPaths));
+        }),
+      )
+      .handle(
+        "selectModel",
+        Effect.fn("environment.voice.selectModel")(function* (args) {
+          yield* guard(args.endpoint.name, AuthSettingsWriteScope);
+          return yield* speech
+            .selectModel(args.payload.modelId)
+            .pipe(mapSpeechError, Effect.flatMap(withoutHostPaths));
+        }),
+      )
+      .handle(
+        "cancelModelDownload",
+        Effect.fn("environment.voice.cancelModelDownload")(function* (args) {
+          yield* guard(args.endpoint.name, AuthSettingsWriteScope);
+          return yield* speech
+            .cancelDownload(args.payload.modelId)
+            .pipe(mapSpeechError, Effect.flatMap(withoutHostPaths));
+        }),
+      )
+      .handle(
+        "removeModel",
+        Effect.fn("environment.voice.removeModel")(function* (args) {
+          yield* guard(args.endpoint.name, AuthSettingsWriteScope);
+          return yield* speech
+            .removeModel(args.payload.modelId)
+            .pipe(mapSpeechError, Effect.flatMap(withoutHostPaths));
+        }),
+      )
+      .handle(
+        "linkModels",
+        Effect.fn("environment.voice.linkModels")(function* (args) {
+          yield* guard(args.endpoint.name, AuthSettingsWriteScope);
+          // The request names a path on this machine and the result reveals what is there.
+          yield* requireEnvironmentScope(AuthFilesystemReadScope);
+          return yield* speech.linkModels(args.payload.path).pipe(mapSpeechError);
+        }),
+      )
+      .handle(
+        "updateAcceleration",
+        Effect.fn("environment.voice.updateAcceleration")(function* (args) {
+          yield* guard(args.endpoint.name, AuthSettingsWriteScope);
+          return yield* speech.updateAcceleration(args.payload.acceleration).pipe(mapSpeechError);
+        }),
+      )
+      .handle(
+        "updateModelUnloadTimeout",
+        Effect.fn("environment.voice.updateModelUnloadTimeout")(function* (args) {
+          yield* guard(args.endpoint.name, AuthSettingsWriteScope);
+          return yield* speech.updateModelUnloadTimeout(args.payload.timeout).pipe(mapSpeechError);
+        }),
+      )
+      .handle(
+        "transcribe",
+        Effect.fn("environment.voice.transcribe")(function* (args) {
+          yield* guard(args.endpoint.name);
+          const decoded = parseAudio(args.payload);
+          if (Option.isNone(decoded)) return yield* failEnvironmentInvalidRequest("invalid_audio");
+          const text = yield* speech
+            .transcribe(decoded.value.pcm, decoded.value.options)
+            .pipe(mapSpeechError);
+          return { text };
+        }),
+      )
+      .handle(
+        "postProcess",
+        Effect.fn("environment.voice.postProcess")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return yield* postProcessing
+            .process(args.payload)
+            .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+        }),
+      );
+  }),
+).pipe(Layer.provide(bodyLimit), Layer.provide(SpeechPostProcessing.layer));

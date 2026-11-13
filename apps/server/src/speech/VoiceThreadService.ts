@@ -16,7 +16,7 @@ import * as Path from "effect/Path";
 import * as Semaphore from "effect/Semaphore";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -43,6 +43,10 @@ class VoiceProjectUnavailableError extends Schema.TaggedError<VoiceProjectUnavai
     return "Call project is unavailable.";
   }
 }
+
+class VoiceDispatchError extends Schema.TaggedError<VoiceDispatchError>()("VoiceDispatchError", {
+  cause: Schema.Unknown,
+}) {}
 
 const OtisSettingsJson = Schema.fromJsonString(
   Schema.Struct({ threadId: Schema.Literal(OTIS_THREAD_ID) }),
@@ -84,7 +88,7 @@ const make = Effect.gen(function* () {
           if (existing.projection.thread.archivedAt)
             yield* orchestrator.dispatch({
               type: "thread.unarchive",
-              commandId: CommandId.make(yield* crypto.randomUUIDv4().pipe(Effect.orDie)),
+              commandId: CommandId.make(yield* crypto.uuidV4().pipe(Effect.orDie)),
               threadId,
             });
           if (!hasSettings)
@@ -130,7 +134,7 @@ const make = Effect.gen(function* () {
   });
   const calls = callOperator(config.stateDir);
   const sessions = yield* Auxiliary.AuxiliaryProviderSessions;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const recordMessage = Effect.fn("VoiceThreadService.recordMessage")(function* (input: {
     readonly commandId: string;
     readonly threadId: string;
@@ -254,14 +258,16 @@ const make = Effect.gen(function* () {
               text: command.message.text,
               streaming: false,
             });
-        yield* Effect.tryPromise(() =>
-          calls.voice({
-            threadId: command.threadId,
-            messageId: command.message.messageId,
-            text: command.message.text,
-            selection: command.modelSelection,
-          }),
-        );
+        yield* Effect.tryPromise({
+          try: () =>
+            calls.voice({
+              threadId: command.threadId,
+              messageId: command.message.messageId,
+              text: command.message.text,
+              selection: command.modelSelection,
+            }),
+          catch: (cause) => new VoiceDispatchError({ cause }),
+        });
         return recorded;
       }
       return yield* orchestrator.dispatch({
@@ -420,7 +426,7 @@ const make = Effect.gen(function* () {
     return yield* executor.withLock(
       threadId,
       Effect.gen(function* () {
-        const id = EventId.make(yield* crypto.randomUUIDv4().pipe(Effect.orDie));
+        const id = EventId.make(yield* crypto.uuidV4().pipe(Effect.orDie));
         const occurredAt = yield* DateTime.now;
         const base = { id, threadId, occurredAt };
         let domain: OrchestrationV2DomainEvent | undefined;

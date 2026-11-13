@@ -60,13 +60,7 @@ const CODEX_NATIVE_SUBAGENT_PARENT_INSTRUCTIONS = `
 The selected Codex app-server model runtime controls the callable sub-agent tools for this turn. The user creates only the parent thread. The parent agent creates and controls its sub-agents; do not ask the user to create, start, steer, or configure one. Keep delegation single-level unless the selected runtime contract and an explicit policy allow recursion. Do not instruct a child agent to create another child.
 `;
 
-/**
- * The browser block is omitted entirely when the preview tools aren't attached.
- * Describing `preview_*` tools that aren't in the turn's tool list would be
- * worse than saying nothing: the instructions actively steer the model away
- * from Playwright and agent-browser, so leaving them in would talk it out of
- * the only browser automation it still has.
- */
+// Only describe browser tools when attached; otherwise the model may avoid available alternatives.
 export interface CodexControlRuntime {
   readonly useDesktopAppDaemon?: boolean | undefined;
   readonly computerControlAvailable?: boolean | undefined;

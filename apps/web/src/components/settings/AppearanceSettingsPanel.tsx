@@ -5,6 +5,7 @@ import {
   DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE,
   DEFAULT_UNIFIED_SETTINGS,
   type ChatWidth,
+  type EffortDisplay,
   type EnvironmentIdentificationMode,
   MAX_APPEARANCE_CONTRAST,
   MAX_GLASS_OPACITY,
@@ -19,6 +20,7 @@ import {
   useEnvironmentStageLabel,
 } from "../SidebarStageBackdrop";
 import { useCustomThemes } from "../../hooks/useCustomThemes";
+import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { useTheme } from "../../hooks/useTheme";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -34,6 +36,7 @@ import { searchableSetting } from "./settingsSearch";
 import { AdvancedSettings } from "./AdvancedSettings";
 import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
 import { TypographySection } from "./TypographySettings";
+import { ThreadDetailsItemsRow } from "./ThreadDetailsItemsRow";
 
 const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
   artwork: "Artwork",
@@ -77,6 +80,11 @@ const CHAT_WIDTH_LABELS: Record<ChatWidth, string> = {
   full: "Full",
 };
 
+const EFFORT_DISPLAY_LABELS: Record<EffortDisplay, string> = {
+  label: "Word",
+  bars: "Bars",
+};
+
 export function AppearanceSettingsPanel() {
   const {
     appearanceMode,
@@ -100,6 +108,20 @@ export function AppearanceSettingsPanel() {
     environmentIdentificationOptionList.find(
       ([value]) => value === settings.environmentIdentificationMode,
     )?.[1] ?? ENVIRONMENT_IDENTIFICATION_LABELS[settings.environmentIdentificationMode];
+  const effectiveEnvironmentIdentificationMode = useEnvironmentIdentificationMode();
+  const themeHidesEnvironmentArtwork =
+    effectiveEnvironmentIdentificationMode === "pill" &&
+    resolveSidebarStageBackdropVariant(
+      environmentStageLabel,
+      settings.environmentIdentificationMode,
+    ) !== null;
+  const environmentIdentificationDescription = themeHidesEnvironmentArtwork
+    ? environmentStageVariant
+      ? "Only built-in themes show artwork, so this theme shows the version pill."
+      : "Only built-in themes show artwork."
+    : environmentStageVariant
+      ? "Choose how Dev and Nightly environments are identified."
+      : "Show Dev or Nightly artwork in the sidebar header.";
   const glassOpacityRatio =
     (settings.glassOpacity - MIN_GLASS_OPACITY) / (MAX_GLASS_OPACITY - MIN_GLASS_OPACITY);
   const glassOpacitySliderStyle = {
@@ -268,6 +290,40 @@ export function AppearanceSettingsPanel() {
             </div>
           }
         />
+        <ThreadDetailsItemsRow />
+        <SettingsRow
+          {...searchableSetting("effort-display")}
+          description="Show reasoning effort in the composer as its name, such as High, or as bars."
+          resetAction={
+            settings.effortDisplay !== DEFAULT_UNIFIED_SETTINGS.effortDisplay ? (
+              <SettingResetButton
+                label="effort display"
+                onClick={() =>
+                  updateSettings({ effortDisplay: DEFAULT_UNIFIED_SETTINGS.effortDisplay })
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="w-full sm:w-40">
+              <Select
+                value={settings.effortDisplay}
+                onValueChange={(value) => {
+                  if (value === "bars" || value === "label")
+                    updateSettings({ effortDisplay: value });
+                }}
+              >
+                <SelectTrigger size="sm" className="w-full min-w-0" aria-label="Effort display">
+                  <SelectValue>{EFFORT_DISPLAY_LABELS[settings.effortDisplay]}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem value="label">Word (default)</SelectItem>
+                  <SelectItem value="bars">Bars</SelectItem>
+                </SelectPopup>
+              </Select>
+            </div>
+          }
+        />
         <SettingsRow
           {...searchableSetting("math-rendering")}
           description="Typeset LaTeX math, such as $x^2$ or \[x^2\], in messages and Markdown previews. The composer keeps TeX source editable."
@@ -355,11 +411,7 @@ export function AppearanceSettingsPanel() {
           />
           <SettingsRow
             {...searchableSetting("environment-identification")}
-            description={
-              environmentStageVariant
-                ? "Choose how Dev and Nightly environments are identified."
-                : "Show Dev or Nightly artwork in the sidebar header."
-            }
+            description={environmentIdentificationDescription}
             resetAction={
               settings.environmentIdentificationMode !== DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE ? (
                 <SettingResetButton

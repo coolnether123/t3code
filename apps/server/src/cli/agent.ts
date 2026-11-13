@@ -3,6 +3,7 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  OrchestrationV2ShellHttpSnapshot,
   EnvironmentId,
   EnvironmentAuthInvalidError,
   EnvironmentRequestInvalidError,
@@ -201,7 +202,9 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
         };
         if (request.kind === "capabilities") {
           const shell = yield* boundedHttp(
-            client.orchestration.shellSnapshot({ headers, query: {} }),
+            client.orchestration
+              .shellSnapshot({ headers, query: {} })
+              .pipe(Effect.flatMap(Schema.decodeUnknownEffect(OrchestrationV2ShellHttpSnapshot))),
           );
           const capabilities = target.descriptor.capabilities;
           const commands = AGENT_COMMAND_TYPES.filter((type) => {
@@ -261,7 +264,9 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
           return compactAgentProviders(target, providerSnapshot);
         }
         const shell = yield* boundedHttp(
-          client.orchestration.shellSnapshot({ headers, query: {} }),
+          client.orchestration
+            .shellSnapshot({ headers, query: {} })
+            .pipe(Effect.flatMap(Schema.decodeUnknownEffect(OrchestrationV2ShellHttpSnapshot))),
         );
         const threadId =
           request.kind === "snapshot"
@@ -381,7 +386,9 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
         const readback = yield* Effect.result(
           Effect.gen(function* () {
             const nextShell = yield* boundedHttp(
-              client.orchestration.shellSnapshot({ headers, query: {} }),
+              client.orchestration
+                .shellSnapshot({ headers, query: {} })
+                .pipe(Effect.flatMap(Schema.decodeUnknownEffect(OrchestrationV2ShellHttpSnapshot))),
             );
             const nextDetail =
               "threadId" in command ? yield* loadThread(command.threadId) : undefined;

@@ -51,7 +51,10 @@ vi.mock("../../voice/browserSpeech", () => ({
   requestSpeech: controller.request,
 }));
 vi.mock("../../voice/callPersistence", () => ({ callPersistence: () => ({}) }));
-vi.mock("../../state/session", () => ({ useEnvironmentScope: () => true }));
+vi.mock("../../state/session", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../state/session")>()),
+  useEnvironmentScope: () => true,
+}));
 vi.mock("../../state/entities", () => ({ useThreadProjection: () => null }));
 vi.mock("./CallModelSelectors", () => ({
   CallModelSelectors: () => <div>Voice model and background agent</div>,

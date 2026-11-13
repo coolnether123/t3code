@@ -5,7 +5,6 @@ import { makeProviderUsageReader } from "./usageProviderReaders.ts";
 import { BUILT_IN_USAGE_DRIVERS } from "../provider/builtInDrivers.ts";
 import * as ProviderScanCache from "./usageProviderScanCache.ts";
 // Read provider transcripts so usage includes work performed outside T3.
-import * as NodeOS from "node:os";
 
 import {
   USAGE_CONTRACT_VERSION,
@@ -32,7 +31,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -58,7 +57,12 @@ import {
   codexIsolatedHomePath,
   resolveCodexHomeLayout,
 } from "../provider/Drivers/CodexHomeLayout.ts";
-import { makeDayFormatter, resolveModelAliases, UsageAggregator } from "./usageAggregation.ts";
+import {
+  canonicalModelFilter,
+  makeDayFormatter,
+  resolveModelAliases,
+  UsageAggregator,
+} from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import { mergeUsageReads, projectUsageRead, usageReadBatchKey } from "./usageReadBatch.ts";
 import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
@@ -443,9 +447,7 @@ const UsageImportsFile = Schema.Struct({
     }),
   ),
 });
-const decodeRatesCache = Schema.decodeUnknownEffect(
-  Schema.fromJsonString(RatesCacheFile as unknown as Schema.Codec<typeof RatesCacheFile.Type>),
-);
+const decodeRatesCache = Schema.decodeUnknownEffect(Schema.fromJsonString(RatesCacheFile));
 const encodeRatesCache = Schema.encodeEffect(
   Schema.fromJsonString(RatesCacheFile as unknown as Schema.Codec<typeof RatesCacheFile.Type>),
 );
@@ -457,7 +459,7 @@ const defaultClaudeSettings = Schema.decodeSync(ClaudeSettings)({});
 const decodeCodexSettings = Schema.decodeUnknownEffect(CodexSettings);
 
 /** The scan cache is narrowed by hand in `usageScanCache`, so JSON is enough here. */
-const ScanCacheJson = Schema.fromJsonString(Schema.Unknown as unknown as Schema.Codec<unknown>);
+const ScanCacheJson = Schema.fromJsonString(Schema.Unknown);
 const decodeScanCacheFile = Schema.decodeUnknownEffect(ScanCacheJson);
 const encodeRateDocument = Schema.encodeSync(ScanCacheJson);
 
@@ -525,12 +527,46 @@ export const layerTest = Layer.succeed(
 );
 
 export const make = Effect.gen(function* () {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* Digest.Digest;
   const fileSystem = yield* FileSystem.FileSystem;
-  setPromptIndexCutover(yield* promptCutoverEnabled(process.env, fileSystem));
   const path = yield* Path.Path;
   const config = yield* ServerConfig;
   const hostEnvironment = yield* HostProcess.Environment;
+  setPromptIndexCutover(yield* promptCutoverEnabled(hostEnvironment, fileSystem));
+  const hostname = yield* HostProcess.Hostname;
+  const homeDirectory = yield* HostProcess.HomeDirectory;
+  const hostIdPath = path.join(config.baseDir, "usage-host-id");
+  const explicitHostId = hostEnvironment["T3CODE_HOST_ID"]?.trim();
+  const hostId =
+    explicitHostId ||
+    (yield* fileSystem.readFileString(hostIdPath).pipe(
+      Effect.catchIf(
+        (error) => error.reason._tag === "NotFound",
+        () =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              yield* fileSystem.makeDirectory(config.baseDir, { recursive: true });
+              const tempDirectory = yield* fileSystem.makeTempDirectoryScoped({
+                directory: config.baseDir,
+                prefix: "usage-host-id.",
+              });
+              const tempFile = path.join(tempDirectory, "identity");
+              yield* fileSystem.writeFileString(tempFile, `${hostname}\n`);
+              // Publish complete contents without replacing another initializer's identity.
+              yield* fileSystem.link(tempFile, hostIdPath).pipe(
+                Effect.catchIf(
+                  (error) => error.reason._tag === "AlreadyExists",
+                  () => Effect.void,
+                ),
+              );
+              return yield* fileSystem.readFileString(hostIdPath);
+            }),
+          ),
+      ),
+      Effect.map((value) => value.trim() || hostname),
+      Effect.orElseSucceed(() => hostname),
+    ));
+
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
   const readProviderUsage = yield* makeProviderUsageReader;
@@ -630,7 +666,7 @@ export const make = Effect.gen(function* () {
     rates = parsed;
     const revisionDocument = encodeRateDocument(fromDisk.document);
     ratesRevision = Buffer.from(
-      yield* crypto.digest("SHA-256", Buffer.from(revisionDocument)).pipe(Effect.orDie),
+      yield* crypto.digest(Digest.sha256, Buffer.from(revisionDocument)).pipe(Effect.orDie),
     ).toString("hex");
     ratesFetchedAtMs = fromDisk.fetchedAtMs;
     ratesStatus = "cached";
@@ -680,7 +716,7 @@ export const make = Effect.gen(function* () {
             ratesLastFailedAtMs = null;
             const revisionDocument = encodeRateDocument(fetched.document);
             ratesRevision = Buffer.from(
-              yield* crypto.digest("SHA-256", Buffer.from(revisionDocument)).pipe(Effect.orDie),
+              yield* crypto.digest(Digest.sha256, Buffer.from(revisionDocument)).pipe(Effect.orDie),
             ).toString("hex");
             ratesFetchedAtMs = now;
             ratesStatus = "fresh";
@@ -787,7 +823,7 @@ export const make = Effect.gen(function* () {
         );
       }
     }
-    const geminiHome = path.join(NodeOS.homedir(), ".gemini");
+    const geminiHome = path.join(homeDirectory, ".gemini");
 
     const imports = yield* fileSystem.readFileString(usageImportsPath).pipe(
       Effect.flatMap((raw) => decodeUsageImports(raw)),
@@ -1098,6 +1134,7 @@ export const make = Effect.gen(function* () {
     mtimeMs: number,
     provider: UsageProviderKind,
     requestedStartByte: number,
+    archiveFingerprint: string | null,
   ): Effect.fn.Return<{ readonly records: readonly UsageRecord[]; readonly complete: boolean }> {
     const meta = scanStore.meta(filePath);
     // Provider is part of the identity: if both providers were ever pointed
@@ -1109,7 +1146,9 @@ export const make = Effect.gen(function* () {
       meta.provider === provider &&
       meta.scanCursor === undefined &&
       meta.scanSkippedLines === undefined &&
-      meta.scanDiscardingLine !== true
+      meta.scanDiscardingLine !== true &&
+      (!filePath.endsWith(".jsonl.zst") ||
+        (archiveFingerprint !== null && meta.prefixFingerprint === archiveFingerprint))
     ) {
       const warm = scanStore.load(filePath);
       if (
@@ -1133,7 +1172,9 @@ export const make = Effect.gen(function* () {
     const parsed = yield* Effect.promise(() =>
       readTranscriptRecords(filePath, provider, {
         startByte,
-        endByte: Math.min(size - 1, startByte + MAX_TRANSCRIPT_READ_BYTES_PER_FILE - 1),
+        endByte: filePath.endsWith(".jsonl.zst")
+          ? startByte + MAX_TRANSCRIPT_READ_BYTES_PER_FILE - 1
+          : Math.min(size - 1, startByte + MAX_TRANSCRIPT_READ_BYTES_PER_FILE - 1),
         sourceSize: size,
         ...(appendable && cached.scanDiscardingLine === true ? { discardPartialLine: true } : {}),
         ...(appendable && provider === "codex" && cached.codexState !== undefined
@@ -1145,6 +1186,13 @@ export const make = Effect.gen(function* () {
     // (size, mtime) would silently drop the file's usage until it changes.
     if (parsed === null)
       return { records: scanStore.load(filePath)?.records ?? [], complete: false };
+    if (
+      filePath.endsWith(".jsonl.zst") &&
+      (archiveFingerprint === null ||
+        archiveFingerprint !==
+          (yield* Effect.promise(() => readTranscriptPrefixFingerprint(filePath, size))))
+    )
+      return { records: scanStore.load(filePath)?.records ?? [], complete: false };
     // Stored already de-duplicated within the file, which is 99% of all
     // duplicates. The aggregator still runs the cross-file dedupe pass.
     const parsedRecords = dedupeWithinFile([
@@ -1152,10 +1200,11 @@ export const make = Effect.gen(function* () {
       ...parsed.records,
     ]);
     const records = yield* resolveHistoricalTiers(parsedRecords);
-    const nextByte = Math.min(size, Math.max(startByte, parsed.nextByte));
+    const logicalSize = parsed.decodedSize ?? size;
+    const nextByte = Math.min(logicalSize, Math.max(startByte, parsed.nextByte));
     const scanSkippedLines =
       (appendable ? (cached.scanSkippedLines ?? 0) : 0) + parsed.discardedLines;
-    const reachedEnd = nextByte >= size && !parsed.discardingLine;
+    const reachedEnd = nextByte >= logicalSize && !parsed.discardingLine;
     const complete = reachedEnd && scanSkippedLines === 0;
 
     // Written immediately: a later source can exhaust the response budget,
@@ -1169,12 +1218,13 @@ export const make = Effect.gen(function* () {
         mtimeMs,
         provider,
         records,
+        ...(archiveFingerprint === null ? {} : { prefixFingerprint: archiveFingerprint }),
         ...(reachedEnd ? {} : { scanCursor: nextByte }),
         ...(scanSkippedLines === 0 ? {} : { scanSkippedLines }),
         ...(parsed.discardingLine ? { scanDiscardingLine: true } : {}),
         ...(parsed.codexState === undefined ? {} : { codexState: parsed.codexState }),
       },
-      { replaceRecords: records !== parsedRecords },
+      { replaceRecords: !appendable || records !== parsedRecords },
     );
     return { records, complete };
   });
@@ -1273,7 +1323,7 @@ export const make = Effect.gen(function* () {
               ),
             };
           }).pipe(
-            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.provideService(Digest.Digest, crypto),
             Effect.provideService(FileSystem.FileSystem, fileSystem),
             Effect.provideService(Path.Path, path),
           )))
@@ -1348,7 +1398,6 @@ export const make = Effect.gen(function* () {
         }),
     });
 
-    const hostId = NodeOS.hostname();
     // The home resolvers ask for `Path` themselves; satisfy them from the
     // instance we already hold so `readSummary` stays context-free.
     if (context === undefined) {
@@ -1428,6 +1477,7 @@ export const make = Effect.gen(function* () {
       ...(input.sessionIds === undefined ? {} : { sessionIds: input.sessionIds }),
       ...(input.turnIds === undefined ? {} : { turnIds: input.turnIds }),
       ...(input.groupBy === undefined ? {} : { groupBy: input.groupBy }),
+      ...(input.modelFilter === undefined ? {} : { modelFilter: input.modelFilter }),
     });
     if (progress !== undefined) progress.aggregator = aggregator;
 
@@ -1652,6 +1702,14 @@ export const make = Effect.gen(function* () {
         files,
         Effect.fnUntraced(function* (file) {
           const cached = scanStore.meta(file.path);
+          const archive = file.path.endsWith(".jsonl.zst");
+          const archiveFingerprint =
+            archive && file.size <= 64 * 1024 * 1024
+              ? yield* Effect.promise(() => readTranscriptPrefixFingerprint(file.path, file.size))
+              : null;
+          const archiveMatches =
+            !archive ||
+            (archiveFingerprint !== null && cached?.prefixFingerprint === archiveFingerprint);
           const unavailable =
             listingComplete &&
             shouldRefresh &&
@@ -1669,25 +1727,29 @@ export const make = Effect.gen(function* () {
             cached.scanCursor === undefined &&
             cached.scanSkippedLines === undefined &&
             cached.scanDiscardingLine !== true &&
+            archiveMatches &&
             (provider !== "codex" || cached.codexParserCurrent === true);
           const resumePartial =
             cached !== undefined &&
             cached.size === file.size &&
             cached.mtimeMs === file.mtimeMs &&
             cached.provider === provider &&
+            archiveMatches &&
             cached.scanCursor !== undefined;
           const resumeByte = resumePartial ? cached!.scanCursor! : cached?.size;
           const cursorIsUsable =
             !warm &&
             resumeByte !== undefined &&
             resumeByte > 0 &&
-            (cached?.scanDiscardingLine === true ||
+            ((archive && resumePartial) ||
+              cached?.scanDiscardingLine === true ||
               (yield* Effect.promise(() => transcriptCursorIsLineBoundary(file.path, resumeByte))));
           const appendable =
             !warm &&
             cached !== undefined &&
             cursorIsUsable &&
-            (resumePartial || (cached.scanCursor === undefined && file.size > cached.size)) &&
+            (resumePartial ||
+              (!archive && cached.scanCursor === undefined && file.size > cached.size)) &&
             (resumePartial || cached.provider === provider) &&
             (provider === "claude" ||
               (provider === "codex" && cached.hasCodexState && cached.codexParserCurrent === true));
@@ -1702,6 +1764,7 @@ export const make = Effect.gen(function* () {
           const repeatedInputAppendable =
             repeatedInputEnabled &&
             provider === "codex" &&
+            !archive &&
             !warm &&
             parserMatches &&
             cached !== undefined &&
@@ -1730,6 +1793,8 @@ export const make = Effect.gen(function* () {
             repeatedInputStartByte,
             repeatedInputWarm,
             repeatedInputAppendable,
+            archiveFingerprint,
+            warm,
           };
         }),
         { concurrency: 16 },
@@ -1741,7 +1806,11 @@ export const make = Effect.gen(function* () {
           file.unavailable
             ? 0
             : Math.max(
-                Math.min(file.size - file.startByte, MAX_TRANSCRIPT_READ_BYTES_PER_FILE),
+                file.path.endsWith(".jsonl.zst")
+                  ? file.warm
+                    ? 0
+                    : file.size
+                  : Math.min(file.size - file.startByte, MAX_TRANSCRIPT_READ_BYTES_PER_FILE),
                 file.size - file.repeatedInputStartByte,
               ),
         MAX_COLD_SCAN_BYTES_PER_SOURCE,
@@ -1781,7 +1850,51 @@ export const make = Effect.gen(function* () {
       // rebuilt without decoding the transcript again.
       const readRecords = new Map<string, { records: readonly UsageRecord[]; complete: boolean }>();
 
+      const suppressedArchives = new Set<string>();
+      const supersededOriginals = new Set<string>();
+      const duplicateArchives = new Set<string>();
       for (const file of selection.files) {
+        if (!file.path.endsWith(".jsonl.zst") || file.unavailable) continue;
+        const original = file.path.slice(0, -4);
+        if (presentPaths.has(original)) {
+          duplicateArchives.add(file.path);
+          continue;
+        }
+        if (!file.warm) transcriptIndexes.delete(file.path);
+        const read = yield* readFileRecords(
+          file.path,
+          file.size,
+          file.mtimeMs,
+          provider,
+          file.startByte,
+          file.archiveFingerprint,
+        );
+        readRecords.set(file.path, read);
+        if (
+          !listingComplete ||
+          presentPaths.has(original) ||
+          scanStore.meta(original) === undefined
+        )
+          continue;
+        const exists = yield* fileSystem.exists(original).pipe(Effect.orElseSucceed(() => true));
+        if (exists) continue;
+        if (!read.complete) suppressedArchives.add(file.path);
+        else {
+          supersededOriginals.add(original);
+          scanStore.delete(original);
+          transcriptIndexes.delete(original);
+          staleTranscriptIndexes.delete(original);
+          dedupeKeys.remove(original);
+        }
+      }
+
+      for (const file of selection.files) {
+        if (supersededOriginals.has(file.path) || duplicateArchives.has(file.path)) continue;
+        if (suppressedArchives.has(file.path)) {
+          incompleteFiles += 1;
+          continue;
+        }
+        if (!presentPaths.has(file.path) && scanStore.meta(file.path) === undefined) continue;
         if (file.unavailable) {
           const cached = scanStore.load(file.path);
           if (cached !== undefined) {
@@ -1823,6 +1936,7 @@ export const make = Effect.gen(function* () {
           stored.scanCursor === undefined &&
           stored.scanSkippedLines === undefined &&
           stored.scanDiscardingLine !== true &&
+          (!file.path.endsWith(".jsonl.zst") || file.warm) &&
           stored.latestMs < windowStartMs
         ) {
           if (stored.recordCount > 0) scannedFiles += 1;
@@ -1841,13 +1955,16 @@ export const make = Effect.gen(function* () {
             indexed.push({ file, index: held.index });
             continue;
           }
-          const fileRead = yield* readFileRecords(
-            file.path,
-            file.size,
-            file.mtimeMs,
-            provider,
-            file.startByte,
-          );
+          const fileRead =
+            readRecords.get(file.path) ??
+            (yield* readFileRecords(
+              file.path,
+              file.size,
+              file.mtimeMs,
+              provider,
+              file.startByte,
+              file.archiveFingerprint,
+            ));
           if (!fileRead.complete) incompleteFiles += 1;
           readRecords.set(file.path, fileRead);
           indexed.push({
@@ -1866,13 +1983,16 @@ export const make = Effect.gen(function* () {
         // Repeated-input attribution reads the prior entry's observations and
         // parser state; ordinary scans never decode it here.
         const cachedBefore = repeatedInputEnabled ? scanStore.load(file.path) : undefined;
-        const fileRead = yield* readFileRecords(
-          file.path,
-          file.size,
-          file.mtimeMs,
-          provider,
-          file.startByte,
-        );
+        const fileRead =
+          readRecords.get(file.path) ??
+          (yield* readFileRecords(
+            file.path,
+            file.size,
+            file.mtimeMs,
+            provider,
+            file.startByte,
+            file.archiveFingerprint,
+          ));
         const { records } = fileRead;
         if (!fileRead.complete) incompleteFiles += 1;
         if (repeatedInputEnabled && provider === "codex") {
@@ -1891,7 +2011,7 @@ export const make = Effect.gen(function* () {
             const parsed = yield* Effect.promise(() =>
               readRepeatedInputRecords(file.path, {
                 startByte: repeatedStartByte,
-                endByte: file.size - 1,
+                ...(file.path.endsWith(".jsonl.zst") ? {} : { endByte: file.size - 1 }),
                 catalog: repeatedInputCatalogForScan ?? undefined,
                 maxPayloadBytes: 4 * 1024 * 1024,
                 project: null,
@@ -2111,7 +2231,7 @@ export const make = Effect.gen(function* () {
     // making the response wait for the write.
     if (quotaCostLedgerDirty) yield* Queue.offer(persistQueue, undefined);
 
-    const legacyVersion = input.clientContractVersion ?? 5;
+    const legacyVersion = input.clientContractVersion ?? USAGE_CONTRACT_VERSION;
     const additionalProviders =
       input.quotaIntervals !== undefined && !batched
         ? []
@@ -2155,7 +2275,6 @@ export const make = Effect.gen(function* () {
         malformedRecords: scan.malformedRecords,
         distinctSessions: sessions.size,
         message: scan.message ?? null,
-        ...(scan.action === undefined ? {} : { action: scan.action }),
         ...(scan.refreshing === undefined ? {} : { refreshing: scan.refreshing }),
       });
     }
@@ -2196,7 +2315,7 @@ export const make = Effect.gen(function* () {
           ),
         )
       : undefined;
-    const clientContractVersion = input.clientContractVersion ?? 5;
+    const clientContractVersion = input.clientContractVersion ?? USAGE_CONTRACT_VERSION;
     const supportsOpenCode = clientContractVersion >= 6;
     const supportsImports = clientContractVersion >= 7;
     const supportsProvider = (provider: UsageProviderKind) =>
@@ -2229,6 +2348,7 @@ export const make = Effect.gen(function* () {
               input.quotaIntervals!.some((interval) => interval.id === row.intervalId),
             ),
           }),
+      ...(input.modelFilter === undefined ? {} : { modelFilter: input.modelFilter }),
     } satisfies UsageSummary;
   });
 
@@ -2241,7 +2361,13 @@ export const make = Effect.gen(function* () {
     modelAliases: Readonly<Record<string, string>>,
   ): string => {
     const base = usageSummaryCacheKey(input, priceOverrides);
-    return JSON.stringify([base, modelAliases, ratesRevision, includeRepeatedInput(input)]);
+    return JSON.stringify([
+      base,
+      modelAliases,
+      ratesRevision,
+      includeRepeatedInput(input),
+      input.modelFilter ?? null,
+    ]);
   };
 
   const partialSummaryAtDeadline = Effect.fn("UsageService.partialSummaryAtDeadline")(function* (
@@ -2273,7 +2399,7 @@ export const make = Effect.gen(function* () {
               source.fingerprint.resolvedHomePath === dir,
           ) ?? {
             fingerprint: {
-              hostId: NodeOS.hostname(),
+              hostId,
               provider,
               resolvedHomePath: dir,
               volumeId: "",
@@ -2287,7 +2413,7 @@ export const make = Effect.gen(function* () {
               "Usage is partial because its response budget expired before this source finished.",
           }) satisfies UsageSource,
       );
-    const clientContractVersion = input.clientContractVersion ?? 5;
+    const clientContractVersion = input.clientContractVersion ?? USAGE_CONTRACT_VERSION;
     const supportsOpenCode = clientContractVersion >= 6;
     const supportsImports = clientContractVersion >= 7;
     const supportsProvider = (provider: UsageProviderKind) =>
@@ -2327,7 +2453,10 @@ export const make = Effect.gen(function* () {
   });
 
   const readSummary: UsageService["Service"]["readSummary"] = Effect.fn("UsageService.readSummary")(
-    function* (input: UsageSummaryInput) {
+    function* (requested: UsageSummaryInput) {
+      const { modelFilter: requestedFilter, ...unfiltered } = requested;
+      const modelFilter = canonicalModelFilter(requestedFilter);
+      const input = modelFilter === undefined ? unfiltered : { ...unfiltered, modelFilter };
       const startedAtMs = yield* Clock.currentTimeMillis;
       let resolvedDirs: readonly { readonly provider: UsageProviderKind; readonly dir: string }[] =
         [];
@@ -2401,7 +2530,7 @@ export const make = Effect.gen(function* () {
               const exists = yield* fileSystem.exists(dir).pipe(Effect.orElseSucceed(() => false));
               return {
                 fingerprint: {
-                  hostId: NodeOS.hostname(),
+                  hostId,
                   provider,
                   resolvedHomePath: dir,
                   volumeId,
@@ -2625,10 +2754,10 @@ export const make = Effect.gen(function* () {
       const otis =
         input.promptSource === "t3"
           ? null
-          : yield* Effect.tryPromise(() => readOtisPromptReport(input)).pipe(
+          : yield* Effect.promise(() => readOtisPromptReport(input).catch(() => null)).pipe(
               Effect.catchCause(() => Effect.succeed(null)),
             );
-      const cutover = yield* promptCutoverEnabled(process.env, fileSystem);
+      const cutover = yield* promptCutoverEnabled(hostEnvironment, fileSystem);
       setPromptIndexCutover(cutover);
       if (input.promptSource !== "t3" && cutover && usableOtisReport(otis))
         return selectPromptReport(input, otis);
@@ -2711,8 +2840,8 @@ export const make = Effect.gen(function* () {
         );
       });
       return input.promptSource === "t3" ||
-        !process.env.T3_OTIS_USAGE_ORIGIN ||
-        process.env.T3_OTIS_USAGE_MODE === "off"
+        !hostEnvironment.T3_OTIS_USAGE_ORIGIN ||
+        hostEnvironment.T3_OTIS_USAGE_MODE === "off"
         ? local
         : selectPromptReport(input, otis, local);
     }

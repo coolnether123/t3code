@@ -1,8 +1,6 @@
 import * as Scope from "effect/Scope";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
-import * as Fiber from "effect/Fiber";
 import * as TxQueue from "effect/TxQueue";
 import * as TxRef from "effect/TxRef";
 

@@ -1,4 +1,3 @@
-/* oxlint-disable unicorn/prefer-add-event-listener -- Each recognizer has one owner; cleanup clears its callback slots before abort. */
 import { FloorController, type TranscriptRevision } from "@t3tools/client-runtime/voice-call/floor";
 
 export interface RecognitionHooks {

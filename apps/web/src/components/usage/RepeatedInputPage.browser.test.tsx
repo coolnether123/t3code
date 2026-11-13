@@ -1,16 +1,19 @@
-import { act } from "react";
-import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import type { UsageRepeatedInputSummary } from "@t3tools/contracts";
 
 const state = vi.hoisted(() => ({ useUsage: vi.fn(), refresh: vi.fn() }));
 vi.mock("../../state/usage", () => ({ useUsage: state.useUsage }));
 vi.mock("../../env", () => ({ isElectron: false }));
-vi.mock("@tanstack/react-router", () => ({ Link: "a" }));
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  Link: "a",
+}));
 vi.mock("../ui/scroll-area", () => ({ ScrollArea: "div" }));
 vi.mock("../ui/sidebar", () => ({ SidebarInset: "div" }));
 vi.mock("../WorkspacePageHeader", () => ({ WorkspacePageHeader: "header" }));
+
+import { act, render } from "../../../test/render";
 
 import { RepeatedInputPage } from "./RepeatedInputPage";
 
@@ -29,14 +32,14 @@ const desktop = {
   summary: { sources: [], repeatedInput: attribution },
 };
 
-beforeEach(() => {
+function setup() {
   vi.clearAllMocks();
   state.useUsage.mockReturnValue({ environments: [desktop], refresh: state.refresh });
-});
-afterEach(() => vi.unstubAllGlobals());
+}
 
 describe("RepeatedInputPage", () => {
   it("opens attribution as a separate page with a return link and opt-in request", () => {
+    setup();
     const markup = renderToStaticMarkup(<RepeatedInputPage />);
     expect(markup).toContain("Skills &amp; repeated input");
     expect(markup).toContain('to="/usage"');
@@ -46,6 +49,7 @@ describe("RepeatedInputPage", () => {
   });
 
   it("distinguishes scanning, unavailable, unsupported and empty attribution", () => {
+    setup();
     state.useUsage.mockReturnValue({
       environments: [{ ...desktop, isPending: true, summary: null }],
       refresh: state.refresh,
@@ -68,6 +72,7 @@ describe("RepeatedInputPage", () => {
   });
 
   it("keeps returned attribution visible while naming a missing computer", () => {
+    setup();
     state.useUsage.mockReturnValue({
       environments: [
         desktop,
@@ -83,7 +88,7 @@ describe("RepeatedInputPage", () => {
   });
 
   it("changes the period query and scopes the overview to the selected computer", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    setup();
     state.useUsage.mockReturnValue({
       environments: [
         desktop,
@@ -96,10 +101,10 @@ describe("RepeatedInputPage", () => {
       ],
       refresh: state.refresh,
     });
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<RepeatedInputPage />));
+    {
+      // This test mocks the router module.
+      await using screen = await render(<RepeatedInputPage />, { router: false });
+      const { container } = screen;
       expect(container.textContent).toContain("$0.32");
       const computer = container.querySelector<HTMLSelectElement>(
         '[aria-label="Repeated input computer"]',
@@ -126,8 +131,6 @@ describe("RepeatedInputPage", () => {
           .click(),
       );
       expect(state.refresh).toHaveBeenCalledOnce();
-    } finally {
-      await act(async () => root.unmount());
     }
   });
 });

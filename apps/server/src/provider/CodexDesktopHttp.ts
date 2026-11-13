@@ -39,6 +39,10 @@ import {
 import * as ServerSettings from "../serverSettings.ts";
 import * as CodexDesktopStore from "./CodexDesktopStore.ts";
 
+const decodeCodexDesktopSendMessageRequest = Schema.decodeUnknownEffect(
+  CodexDesktopSendMessageRequest,
+);
+
 const CODEX_PATH = "/api/codex";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -181,7 +185,7 @@ export const codexDesktopRouteLayer = Layer.unwrap(
           const bodyJson = yield* Effect.result(request.json);
           if (Result.isFailure(bodyJson)) return badRequest("Invalid Codex message request.");
           const decoded = yield* Effect.result(
-            Schema.decodeUnknownEffect(CodexDesktopSendMessageRequest)(bodyJson.success),
+            decodeCodexDesktopSendMessageRequest(bodyJson.success),
           );
           if (Result.isFailure(decoded)) return badRequest("Invalid Codex message request.");
           const body = decoded.success;

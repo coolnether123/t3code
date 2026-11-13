@@ -157,7 +157,7 @@ export function UsageModelTracker({
           </p>
         </div>
         <div className="text-right">
-          <p className="text-xl tabular-nums">{data ? `${data.drop.toFixed(1)} pts` : "—"}</p>
+          <p className="text-xl tabular-nums">{data ? `${data.drop.toFixed(1)} pts` : "-"}</p>
           <p className="text-xs text-muted-foreground">quota used while monitored</p>
         </div>
       </div>
@@ -192,7 +192,7 @@ export function UsageModelTracker({
                     <TooltipPopup>{row.model}</TooltipPopup>
                   </Tooltip>
                   <span className="ms-auto shrink-0 tabular-nums">
-                    {row.estimatedPoints === null ? "—" : `≈ ${percentage(row.estimatedPoints)}`}
+                    {row.estimatedPoints === null ? "-" : `≈ ${percentage(row.estimatedPoints)}`}
                   </span>
                 </div>
                 <p className="mt-1 ps-4 text-2xs text-muted-foreground tabular-nums">

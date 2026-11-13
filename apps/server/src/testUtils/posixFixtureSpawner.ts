@@ -34,7 +34,9 @@ export const makePosixFixtureSpawner = Effect.fn("test.makePosixFixtureSpawner")
       if (
         command._tag === "StandardCommand" &&
         command.command === "tar" &&
-        command.args.some((arg) => path.resolve(arg).toLowerCase().startsWith(root))
+        command.args.some(
+          (arg) => typeof arg === "string" && path.resolve(arg).toLowerCase().startsWith(root),
+        )
       ) {
         return yield* spawner.spawn(ChildProcess.make(nativeTar, command.args, command.options));
       }

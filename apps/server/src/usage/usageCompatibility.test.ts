@@ -4,6 +4,10 @@ import { UsageSummaryInput, UsageSummary, UsageReportInput, UsageReport } from "
 import { decodeQuotaHistory } from "./usageQuotaHistory.ts";
 import { makeUsageReportCalculation, projectUsageReport } from "./usageReport.ts";
 
+const decodeUsageReportInput = Schema.decodeSync(UsageReportInput);
+const decodeUsageSummary = Schema.decodeSync(UsageSummary);
+const isUsageReport = Schema.is(UsageReport);
+
 // These payloads match Otis integration/tools/t3-usage-transport.mjs.
 const window = { sinceDay: "2026-10-18", untilDay: "2026-10-19", timeZone: "America/Chicago" };
 const decodeSummaryInput = Schema.decodeSync(UsageSummaryInput);
@@ -30,7 +34,7 @@ describe("retained usage consumer contract", () => {
   });
 
   it("keeps the saved Codex quota history in the report response", () => {
-    const request = Schema.decodeSync(UsageReportInput)({
+    const request = decodeUsageReportInput({
       ...window,
       mode: "quota",
       refresh: false,
@@ -49,7 +53,7 @@ describe("retained usage consumer contract", () => {
         },
       ],
     });
-    const summary = Schema.decodeSync(UsageSummary)({
+    const summary = decodeUsageSummary({
       ...window,
       contractVersion: 7,
       readAt: "2026-10-19T06:00:00Z",
@@ -69,7 +73,7 @@ describe("retained usage consumer contract", () => {
       request,
       makeUsageReportCalculation(summary.pricing, {}),
     );
-    expect(Schema.is(UsageReport)(report)).toBe(true);
+    expect(isUsageReport(report)).toBe(true);
     expect(report.mode).toBe("quota");
     const encoded = JSON.stringify(report);
     expect(encoded).toContain("Codex Limits saved history");

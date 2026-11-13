@@ -97,7 +97,7 @@ export function UsageActivityPanel({
         <div>
           <dt className="text-3xs text-muted-foreground">Average / hour</dt>
           <dd className="mt-1 text-sm font-medium">
-            {data.averagePerHour === null ? "—" : formatUsd(data.averagePerHour)}
+            {data.averagePerHour === null ? "-" : formatUsd(data.averagePerHour)}
           </dd>
         </div>
         <div>
@@ -105,7 +105,7 @@ export function UsageActivityPanel({
           <dd className="mt-1 text-sm font-medium">
             {data.averagePerHour && data.peak
               ? `${(data.peak.perHour / data.averagePerHour).toFixed(1)}×`
-              : "—"}
+              : "-"}
           </dd>
         </div>
       </dl>

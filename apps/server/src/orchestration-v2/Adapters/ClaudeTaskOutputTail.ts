@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 /** The SDK withholds stdout until tool results; tail task_started files for live output.
  * The private Claude layout can change; failures omit live output and retain the final result. */
@@ -18,10 +19,20 @@ export function claudeTaskOutputRoot(
   environment: Readonly<Record<string, string | undefined>> | undefined,
   path: Path.Path,
   uid: number | undefined,
+  cwd: string | null = null,
+  platform: NodeJS.Platform = HostProcess.Platform.defaultValue(),
 ): string | undefined {
   if (uid === undefined) return undefined;
-  const base = environment?.CLAUDE_CODE_TMPDIR?.trim() || "/tmp";
-  return path.join(base, `claude-${uid}`);
+  // Claude Code's macOS build falls back to /tmp and ignores the TMPDIR that
+  // launchd always sets. Its other builds use `os.tmpdir()`, which reads these
+  // from the environment it was launched with. A relative value is relative
+  // to Claude's working directory, not this server's.
+  const fallback =
+    platform === "darwin"
+      ? "/tmp"
+      : environment?.TMPDIR || environment?.TMP || environment?.TEMP || "/tmp";
+  const base = environment?.CLAUDE_CODE_TMPDIR?.trim() || fallback;
+  return path.resolve(cwd ?? ".", base, `claude-${uid}`);
 }
 
 const locate = Effect.fn("ClaudeTaskOutputTail.locate")(function* (input: {
@@ -78,7 +89,10 @@ export const tailClaudeTaskOutput = Effect.fn("ClaudeTaskOutputTail.tail")(funct
       Effect.map((info) => Number(info.size)),
       Effect.orElseSucceed(() => offset),
     );
-    if (size < offset) offset = 0;
+    if (size < offset) {
+      offset = 0;
+      decoder = new TextDecoder("utf-8", { fatal: false });
+    }
     if (size > offset) {
       const start = size - offset > MAX_READ_BYTES ? size - MAX_READ_BYTES : offset;
       const bytes = yield* Effect.scoped(
@@ -91,10 +105,15 @@ export const tailClaudeTaskOutput = Effect.fn("ClaudeTaskOutputTail.tail")(funct
       if (Option.isSome(bytes)) {
         // Skipped output must not splice two unrelated lines together.
         const skipped = start > offset;
-        // Reset partial UTF-8 bytes when skipping output.
-        if (skipped) decoder = new TextDecoder("utf-8", { fatal: false });
+        let first = 0;
+        if (skipped) {
+          // Reset partial UTF-8 bytes, and skip the rest of a code point the cut landed inside.
+          decoder = new TextDecoder("utf-8", { fatal: false });
+          while (((bytes.value[first] ?? 0) & 0xc0) === 0x80) first += 1;
+        }
         offset = start + bytes.value.byteLength;
-        const text = (skipped ? "\n" : "") + decoder.decode(bytes.value, { stream: true });
+        const text =
+          (skipped ? "\n" : "") + decoder.decode(bytes.value.subarray(first), { stream: true });
         if (text.length > 0) yield* input.onChunk(text);
       }
     }

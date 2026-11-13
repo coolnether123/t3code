@@ -19,6 +19,7 @@ import {
   normalizeModelSlug,
   resolveSelectableModel,
   modelSelectionsEqual,
+  withImplicitFastModeDefault,
 } from "./model.ts";
 
 it("keeps the Codex catalog display formatting", () => {
@@ -202,6 +203,32 @@ describe("descriptor helpers", () => {
     expect(getModelSelectionBooleanOptionValue(selection, "fastMode")).toBe(true);
   });
 
+  it("dispatches an old Ultracode effort as Extra High with the Ultracode toggle", () => {
+    const legacy = [{ id: "effort", value: "ultracode" }];
+    const descriptors = getProviderOptionDescriptors({
+      caps: createModelCapabilities({
+        optionDescriptors: [
+          {
+            id: "effort",
+            label: "Reasoning",
+            type: "select",
+            options: [
+              { id: "high", label: "High", isDefault: true },
+              { id: "xhigh", label: "Extra High" },
+            ],
+          },
+          { id: "ultracode", label: "Ultracode", type: "boolean" },
+        ],
+      }),
+      selections: legacy,
+    });
+
+    expect(buildExplicitProviderOptionSelectionsFromDescriptors(descriptors, legacy)).toEqual([
+      { id: "effort", value: "xhigh" },
+      { id: "ultracode", value: true },
+    ]);
+  });
+
   it("compares complete model selections independent of option ordering", () => {
     const left = createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.4", [
       { id: "reasoningEffort", value: "high" },
@@ -363,5 +390,21 @@ describe("provider-reported option display", () => {
     { ...selection, options: [{ id: "variant", value: "none" }] },
   ])("ignores reports after changing the model, instance, or option: %j", (selected) => {
     expect(getProviderOptionCurrentLabel(descriptor, selected, reported)).toBe("Unknown");
+  });
+});
+
+describe("withImplicitFastModeDefault", () => {
+  // regression: #2981 a remembered Fast mode choice must survive the implicit default on new chats
+  it("injects fastMode false only when the model exposes fastMode and no selection exists", () => {
+    const caps = createModelCapabilities({
+      optionDescriptors: [{ id: "fastMode", label: "Fast", type: "boolean", currentValue: true }],
+    });
+
+    expect(withImplicitFastModeDefault(caps, undefined)).toEqual([
+      { id: "fastMode", value: false },
+    ]);
+    expect(withImplicitFastModeDefault(caps, [{ id: "fastMode", value: true }])).toEqual([
+      { id: "fastMode", value: true },
+    ]);
   });
 });

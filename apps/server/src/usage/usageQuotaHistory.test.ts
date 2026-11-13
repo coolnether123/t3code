@@ -1,5 +1,7 @@
+import * as Layer from "effect/Layer";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { describe, expect, it } from "@effect/vitest";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as Schema from "effect/Schema";
 import {
   decodeQuotaHistory,
@@ -90,7 +92,7 @@ describe("saved quota history", () => {
   it.effect("reports missing input without inventing a balance", () =>
     Effect.gen(function* () {
       expect(yield* readQuotaHistory(null)).toMatchObject({ status: "missing", samples: [] });
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
   it.effect("reads saved files and rejects truncated or oversized history", () =>
     Effect.gen(function* () {
@@ -111,7 +113,7 @@ describe("saved quota history", () => {
       expect((yield* readQuotaHistory(file)).status).toBe("invalid");
       yield* fs.writeFileString(file, " ".repeat(2 * 1024 * 1024 + 1));
       expect((yield* readQuotaHistory(file)).status).toBe("invalid");
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
   it.effect("loads archived observations without replacing the active snapshot", () =>
     Effect.gen(function* () {
@@ -124,8 +126,8 @@ describe("saved quota history", () => {
       const archiveDir = `${file}.archive`;
       yield* fs.makeDirectory(archiveDir);
       const archiveText = `${encodeJson({ Samples: [archived, sample] })}\n`;
-      const crypto = yield* Crypto.Crypto;
-      const name = `${Buffer.from(yield* crypto.digest("SHA-256", Buffer.from(archiveText))).toString("hex")}.json`;
+      const crypto = yield* Digest.Digest;
+      const name = `${Buffer.from(yield* crypto.digest(Digest.sha256, Buffer.from(archiveText))).toString("hex")}.json`;
       yield* fs.writeFileString(path.join(archiveDir, name), archiveText);
       expect((yield* readQuotaHistory(file)).samples.map((row) => row.observedAt)).toEqual([
         "2026-07-20T17:00:00.000Z",
@@ -133,7 +135,7 @@ describe("saved quota history", () => {
       ]);
       yield* fs.writeFileString(path.join(archiveDir, name), `${archiveText} `);
       expect((yield* readQuotaHistory(file)).status).toBe("invalid");
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
   it.effect("rejects conflicting archived readings and oversized archive collections", () =>
     Effect.gen(function* () {
@@ -145,13 +147,13 @@ describe("saved quota history", () => {
       const archiveDir = `${file}.archive`;
       yield* fs.makeDirectory(archiveDir);
       const archiveText = encodeJson({ Samples: [{ ...sample, RemainingPercent: 11 }] });
-      const crypto = yield* Crypto.Crypto;
-      const name = `${Buffer.from(yield* crypto.digest("SHA-256", Buffer.from(archiveText))).toString("hex")}.json`;
+      const crypto = yield* Digest.Digest;
+      const name = `${Buffer.from(yield* crypto.digest(Digest.sha256, Buffer.from(archiveText))).toString("hex")}.json`;
       yield* fs.writeFileString(path.join(archiveDir, name), archiveText);
       expect((yield* readQuotaHistory(file)).status).toBe("invalid");
       yield* fs.writeFileString(path.join(archiveDir, name), " ".repeat(256 * 1024 + 1));
       expect((yield* readQuotaHistory(file)).status).toBe("invalid");
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
   it("bounds and validates cost intervals independently of client schemas", () => {
     expect(validQuotaIntervals(intervals, "2026-07-19", "2026-07-23")).toBe(true);

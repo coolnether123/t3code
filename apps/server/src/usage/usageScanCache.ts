@@ -7,6 +7,7 @@ import type {
   UsageRepeatedInputSourceKind,
 } from "@t3tools/contracts";
 
+import { mergeUsageCopies } from "./usageCopies.ts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as CodexUsage from "../provider/Drivers/codexUsage.ts";
@@ -18,8 +19,9 @@ import {
   type RepeatedInputObservation,
 } from "./usageRepeatedInput.ts";
 
-// Older rows cannot distinguish native session IDs from synthetic IDs and must be reparsed.
-export const USAGE_SCAN_CACHE_VERSION = 9 as const;
+// Older parses omit request-ledger, advisor and progressing-copy usage.
+export const USAGE_SCAN_CACHE_VERSION = 10 as const;
+const decodeCodexScanState = Schema.decodeUnknownOption(CodexUsage.CodexScanState);
 
 export interface CachedFile {
   readonly size: number;
@@ -114,6 +116,7 @@ type SerializedRecord = readonly [
   rateModelIndex?: number | null,
   unresolvedServiceTierTurnId?: string | null,
   serviceTierSource?: UsageRecord["serviceTierSource"] | null,
+  cacheCreation1hTokens?: number | null,
 ];
 
 type SerializedRepeatedInput = readonly [
@@ -313,6 +316,7 @@ export function encodeScanCache(
         record.rateModel === undefined ? null : intern(models, modelIndex, record.rateModel),
         record.unresolvedServiceTierTurnId ?? null,
         record.serviceTierSource ?? null,
+        record.cacheCreation1hTokens ?? null,
       ]),
     };
   }
@@ -474,7 +478,10 @@ export function decodeScanCache(document: unknown): ScanCache {
  * Decodes entries one at a time so a large legacy document can be imported
  * without holding a second complete copy of every record.
  */
-export function* decodeScanCacheEntries(document: unknown): Generator<[string, CachedFile]> {
+export function* decodeScanCacheEntries(
+  document: unknown,
+  filePath?: string,
+): Generator<[string, CachedFile]> {
   if (typeof document !== "object" || document === null) return;
 
   const root = document as Partial<SerializedCache>;
@@ -494,7 +501,7 @@ export function* decodeScanCacheEntries(document: unknown): Generator<[string, C
   const version = root.version;
 
   for (const [path, raw] of Object.entries(root.files)) {
-    const entry = decodeSerializedFile(raw, version, models, sessions);
+    const entry = decodeSerializedFile(raw, version, models, sessions, filePath ?? path);
     if (entry !== undefined) yield [path, entry];
   }
 }
@@ -504,6 +511,7 @@ function decodeSerializedFile(
   version: number,
   models: readonly string[],
   sessions: readonly string[],
+  path: string,
 ): CachedFile | undefined {
   if (typeof raw !== "object" || raw === null) return undefined;
   // Upstream positional rows use the same numeric version with a different layout.
@@ -607,6 +615,9 @@ function decodeSerializedFile(
         ? { rateModel: models[row[14]] }
         : {}),
       ...(typeof row[15] === "string" ? { unresolvedServiceTierTurnId: row[15] } : {}),
+      ...(typeof row[17] === "number" && Number.isFinite(row[17]) && row[17] >= 0
+        ? { cacheCreation1hTokens: row[17] }
+        : {}),
       dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
     });
   }
@@ -616,7 +627,7 @@ function decodeSerializedFile(
     typeof entry.q === "number" &&
     Number.isSafeInteger(entry.q) &&
     entry.q >= 0 &&
-    entry.q < entry.s
+    (path.endsWith(".jsonl.zst") ? entry.q <= 64 * 1024 * 1024 : entry.q < entry.s)
       ? entry.q
       : undefined;
   if (version >= 8 && entry.q !== undefined && scanCursor === undefined) return undefined;
@@ -754,7 +765,7 @@ function decodeSerializedFile(
     ) {
       return undefined;
     }
-    const providerState = Schema.decodeUnknownOption(CodexUsage.CodexScanState)(providerStateValue);
+    const providerState = decodeCodexScanState(providerStateValue);
     codexState = {
       ...(Option.isSome(providerState) ? { providerState: providerState.value } : {}),
       model,
@@ -797,14 +808,14 @@ export function encodeCachedFile(entry: CachedFile): string {
 }
 
 /** Reverses `encodeCachedFile`; malformed text reads as a missing entry. */
-export function decodeCachedFile(text: string): CachedFile | undefined {
+export function decodeCachedFile(text: string, filePath?: string): CachedFile | undefined {
   let document: unknown;
   try {
     document = JSON.parse(text);
   } catch {
     return undefined;
   }
-  for (const [, entry] of decodeScanCacheEntries(document)) return entry;
+  for (const [, entry] of decodeScanCacheEntries(document, filePath)) return entry;
   return undefined;
 }
 
@@ -917,12 +928,16 @@ export function pruneScanCache(cache: ScanCache, retentionCutoffMs: number): num
 
 /** Within-file de-duplication, applied before an entry is cached. */
 export function dedupeWithinFile(records: readonly UsageRecord[]): readonly UsageRecord[] {
-  const seen = new Set<string>();
+  const positions = new Map<string, number>();
   const kept: UsageRecord[] = [];
   for (const record of records) {
     if (record.dedupeKey !== null) {
-      if (seen.has(record.dedupeKey)) continue;
-      seen.add(record.dedupeKey);
+      const position = positions.get(record.dedupeKey);
+      if (position !== undefined) {
+        kept[position] = mergeUsageCopies(kept[position]!, record);
+        continue;
+      }
+      positions.set(record.dedupeKey, kept.length);
     }
     kept.push(record);
   }

@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import { MuseUsageHome } from "@t3tools/provider-muse/server";
@@ -30,6 +31,7 @@ import {
   listTranscriptFilesBounded,
   readRepeatedInputRecords,
   readTranscriptRecords,
+  readTranscriptPrefixFingerprint,
   transcriptCursorIsLineBoundary,
 } from "./usageTranscriptReader.ts";
 
@@ -47,6 +49,7 @@ vi.mock("./usageTranscriptReader.ts", async (importOriginal) => ({
     complete: inventoryComplete,
   })),
   readDirectoryVolumeId: vi.fn(async () => "fixture"),
+  readTranscriptPrefixFingerprint: vi.fn(async () => "archive-signature"),
   transcriptCursorIsLineBoundary: vi.fn(async () => true),
   readTranscriptRecords: vi.fn(async (filePath: string) => ({
     records: [],
@@ -81,10 +84,10 @@ const testLayer = Layer.mergeAll(
   Layer.succeed(CodexUsageHistory.CodexUsageHistory, {
     resolve: () => Effect.succeed(new Map()),
   }),
-  Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.sync(() => undefined) }),
+  Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.succeedNone }),
   ServerSettings.layerTest(),
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-scan-budget-test-" }),
-).pipe(Layer.provideMerge(NodeServices.layer));
+).pipe(Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
 
 beforeEach(() => {
   inventoryComplete = true;
@@ -92,9 +95,105 @@ beforeEach(() => {
   vi.mocked(readTranscriptRecords).mockReset();
   vi.mocked(readRepeatedInputRecords).mockReset();
   vi.mocked(transcriptCursorIsLineBoundary).mockReset();
+  vi.mocked(readTranscriptPrefixFingerprint).mockReset().mockResolvedValue("archive-signature");
 });
 
 describe("incremental scan integration", () => {
+  it.effect("resumes archive replacement across restart and invalidates a changed signature", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const config = yield* ServerConfig.ServerConfig;
+      let archive = false;
+      let signature = "one";
+      let original = "";
+      let compressed = "";
+      const mtimeMs = Date.parse("2026-08-30T23:00:00Z");
+      const record = (tokens: number): UsageRecord => ({
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        sessionId: "session-a",
+        timestampMs: mtimeMs,
+        totals: {
+          uncachedInputTokens: tokens,
+          cachedInputTokens: 0,
+          cacheCreationTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+        },
+        reportedCostUsd: null,
+        dedupeKey: null,
+      });
+      vi.mocked(readTranscriptPrefixFingerprint).mockImplementation(async () => signature);
+      vi.mocked(listTranscriptFilesBounded).mockImplementation(async (root) => {
+        if (!/[\\/]sessions$/.test(root) || /[\\/]codex-home[\\/]/.test(root))
+          return { files: [], complete: true };
+        original = path.join(root, "replacement.jsonl");
+        compressed = `${original}.zst`;
+        return {
+          files: [{ path: archive ? compressed : original, size: 100, mtimeMs }],
+          complete: true,
+        };
+      });
+      vi.mocked(readTranscriptRecords).mockImplementation(async (filePath, _provider, options) => {
+        const start = options?.startByte ?? 0;
+        const partial = filePath.endsWith(".zst") && signature === "one" && start === 0;
+        return {
+          records: [
+            record(filePath.endsWith(".zst") && signature === "two" ? 30 : start > 0 ? 10 : 20),
+          ],
+          nextByte: partial ? 200 : filePath.endsWith(".zst") ? 300 : 100,
+          ...(filePath.endsWith(".zst") ? { decodedSize: 300 } : {}),
+          discardedLines: 0,
+          discardingLine: false,
+          codexState: initialCodexScanState(),
+        };
+      });
+      const input = {
+        sinceDay: UsageDay.make("2026-08-29"),
+        untilDay: UsageDay.make("2026-09-02"),
+        timeZone: "UTC",
+        providers: ["codex"] as const,
+        refresh: true,
+      };
+      const run = () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const service = yield* make.pipe(
+              Effect.provideService(FileSystem.FileSystem, {
+                ...fs,
+                exists: (filePath) => Effect.succeed(!(archive && filePath === original)),
+                readFileString: (filePath, ...args) =>
+                  filePath.endsWith("usage-scan-cache.json")
+                    ? Effect.succeed(emptyScanCache)
+                    : fs.readFileString(filePath, ...args),
+              }),
+              Effect.provideService(
+                HttpClient.HttpClient,
+                HttpClient.make(() => Effect.die("Offline fixture")),
+              ),
+            );
+            return yield* service.readSummary(input);
+          }),
+        );
+      const first = yield* run();
+      expect(first.buckets[0]!.totals.uncachedInputTokens).toBe(20);
+      archive = true;
+      const partial = yield* run();
+      expect(partial.buckets[0]!.totals.uncachedInputTokens).toBe(20);
+      expect(partial.sources.some((source) => source.status === "partial")).toBe(true);
+      expect(
+        storedFiles(config.stateDir).find((entry) => entry.path === compressed)?.scan_cursor,
+      ).toBe(200);
+      const resumed = yield* run();
+      expect(resumed.buckets[0]!.totals.uncachedInputTokens).toBe(30);
+      expect(storedFiles(config.stateDir).some((entry) => entry.path === original)).toBe(false);
+      signature = "two";
+      const changed = yield* run();
+      expect(changed.buckets[0]!.totals.uncachedInputTokens).toBe(30);
+      expect(vi.mocked(readTranscriptRecords).mock.calls.at(-1)?.[2]?.startByte).toBe(0);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
+  );
   it.effect("persists transcript gap estimates once and reuses the closed period", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

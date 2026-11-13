@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as ServerConfig from "../config.ts";
 import {
@@ -11,6 +12,7 @@ import {
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
   OrchestrationV2AppThread,
+  OrchestrationV2Run,
   OrchestrationV2TurnItem,
   OrchestrationV2ThreadTranscript,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
@@ -23,6 +25,8 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as Statement from "effect/sql/Statement";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpPlatform from "effect/http/HttpPlatform";
 import * as Etag from "effect/http/Etag";
@@ -99,6 +103,24 @@ const items = Schema.decodeUnknownSync(Schema.Array(OrchestrationV2TurnItem))(
     updatedAt: now,
   })),
 );
+
+const rolledBackRun = Schema.decodeSync(OrchestrationV2Run)({
+  id: "run:rolled-back",
+  threadId: "source-thread",
+  ordinal: 1,
+  providerInstanceId: "codex",
+  modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+  providerThreadId: null,
+  userMessageId: "message:rolled-back",
+  rootNodeId: null,
+  activeAttemptId: null,
+  status: "rolled_back",
+  requestedAt: now,
+  startedAt: now,
+  completedAt: now,
+  checkpointId: null,
+  contextHandoffId: null,
+});
 
 // Serves the orchestration HTTP routes over real stores; `allowed` gates the read scope.
 const serveOrchestrationHttp = (allowed: () => boolean, voice = false) =>
@@ -180,7 +202,7 @@ const serveOrchestrationHttp = (allowed: () => boolean, voice = false) =>
       Layer.provide(Layer.mock(ProjectEnrichmentService)({})),
       Layer.provide(HttpPlatform.layer),
       Layer.provide(Etag.layerWeak),
-      Layer.provide(NodeServices.layer),
+      Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
     );
     const { handler, dispose } = HttpRouter.toWebHandler(routes, { disableLogger: true });
     yield* Effect.addFinalizer(() => Effect.promise(dispose));
@@ -198,6 +220,18 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
             headers: { [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT },
           }),
         ),
+      );
+
+    const readTranscriptError = Context.get(
+      services,
+      ThreadManagementService.ThreadManagementService,
+    )
+      .getThreadTranscript(thread.id)
+      .pipe(
+        Effect.provideService(ServerEnvironment.ServerEnvironmentIdentity, {
+          getEnvironmentId: Effect.succeed(environmentId),
+        }),
+        Effect.flip,
       );
 
     const emptyResponse = yield* read(thread.id);
@@ -254,22 +288,79 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
       });
       const response = yield* read(thread.id);
       expect(response.status).toBe(expectedStatus);
-      if (expectedStatus === 400) {
-        const error = yield* Context.get(services, ThreadManagementService.ThreadManagementService)
-          .getThreadTranscript(thread.id)
-          .pipe(
-            Effect.provideService(ServerEnvironment.ServerEnvironmentIdentity, {
-              getEnvironmentId: Effect.succeed(environmentId),
-            }),
-            Effect.flip,
-          );
-        expect(error).toBeInstanceOf(ThreadManagementService.ThreadTranscriptTooLargeError);
-        expect(yield* Effect.promise(() => response.json())).toMatchObject({
-          _tag: "EnvironmentRequestInvalidError",
-          reason: "thread_transcript_too_large",
-        });
-      }
+      if (expectedStatus === 200) continue;
+      expect(yield* readTranscriptError).toBeInstanceOf(
+        ThreadManagementService.ThreadTranscriptTooLargeError,
+      );
+      expect(yield* Effect.promise(() => response.json())).toMatchObject({
+        _tag: "EnvironmentRequestInvalidError",
+        reason: "thread_transcript_too_large",
+      });
     }
+
+    const sql = Context.get(services, SqlClient.SqlClient);
+    const commandItemId = items.find((item) => item.type === "command_execution")!.id;
+    const setCommandPayload = (payload: Statement.Fragment) => sql`
+      UPDATE orchestration_v2_projection_turn_items SET payload_json = ${payload}
+      WHERE turn_item_id = ${commandItemId}
+    `;
+    const fill = (bytes: number) => sql`printf('%.*c', ${bytes}, 'x')`;
+    // Stored bytes the export drops do not count, and neither does a row SQLite cannot parse:
+    // only what the export keeps can reject it.
+    yield* setCommandPayload(sql`json_set(
+      payload_json, '$.output', 'x',
+      '$.droppedLegacyField', ${fill(PROVIDER_SEND_TURN_MAX_FILE_BYTES + 1)}
+    )`);
+    expect((yield* read(thread.id)).status).toBe(200);
+    const deepField = sql`'"droppedDeepField":' || printf('%.*c', 1001, '[') || printf('%.*c', 1001, ']') || ','`;
+    yield* setCommandPayload(
+      sql`replace(payload_json, '"droppedLegacyField":', ${deepField} || '"droppedLegacyField":')`,
+    );
+    expect((yield* read(thread.id)).status).toBe(200);
+    // Tool output over the limit rejects the export, here as the content array a dynamic tool
+    // stores. Its only read is the size.
+    yield* sql`
+      UPDATE orchestration_v2_projection_turn_items SET type = 'dynamic_tool'
+      WHERE turn_item_id = ${commandItemId}
+    `;
+    yield* setCommandPayload(sql`json_set(
+      replace(payload_json, ${deepField}, ''), '$.type', 'dynamic_tool', '$.toolName', NULL,
+      '$.output',
+      json_array(json_object('type', 'text', 'text', ${fill(PROVIDER_SEND_TURN_MAX_FILE_BYTES + 1)}))
+    )`);
+    const reads: Array<string> = [];
+    expect(
+      yield* readTranscriptError.pipe(
+        Effect.provideService(Statement.CurrentTransformer, (statement) => {
+          reads.push(statement.compile()[0]);
+          return Effect.succeed(statement);
+        }),
+      ),
+    ).toBeInstanceOf(ThreadManagementService.ThreadTranscriptTooLargeError);
+    expect(reads).toEqual([expect.stringContaining("octet_length(payload_json)")]);
+    expect((yield* read(thread.id)).status).toBe(400);
+    // The export leaves a rolled back run out, so its output cannot reject it.
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make("create-rolled-back-run"),
+          type: "run.created",
+          threadId: thread.id,
+          occurredAt: now,
+          payload: rolledBackRun,
+        },
+      ],
+    });
+    yield* sql`
+      UPDATE orchestration_v2_projection_turn_items SET run_id = ${rolledBackRun.id}
+      WHERE turn_item_id = ${commandItemId}
+    `;
+    yield* setCommandPayload(sql`json_set(payload_json, '$.runId', ${rolledBackRun.id})`);
+    const withoutRolledBackRun = yield* read(thread.id);
+    expect(withoutRolledBackRun.status).toBe(200);
+    expect(
+      (yield* decodeTranscript(yield* Effect.promise(() => withoutRolledBackRun.json()))).items,
+    ).toHaveLength(199);
 
     expect((yield* read(ThreadId.make("missing"))).status).toBe(404);
     const readShell = (id: ThreadId) =>
@@ -296,7 +387,7 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
     expect(yield* Effect.promise(() => archivedShell.json())).toMatchObject({
       id: thread.id,
       archivedAt: DateTime.formatIso(now),
-      itemCount: 200,
+      itemCount: 199,
     });
     expect((yield* readShell(ThreadId.make("missing"))).status).toBe(404);
     allowed = false;
@@ -347,6 +438,8 @@ it.effect("leaves older settled threads out of the HTTP shell only when asked", 
           }),
         );
         return (await response.json()) as {
+          readonly snapshotSequence: number;
+          readonly projectIdentities?: string;
           readonly threads: ReadonlyArray<{ readonly id: string }>;
           readonly olderSettled?: { readonly counts: ReadonlyArray<unknown> };
           readonly voice?: { readonly coverage: string; readonly count: number };
@@ -371,5 +464,13 @@ it.effect("leaves older settled threads out of the HTTP shell only when asked", 
     );
     expect(otis.status).toBe(200);
     expect(yield* Effect.promise(() => otis.json())).toMatchObject({ id: "otis-main" });
+
+    // A client that holds rows the socket can replay from keeps them; any other cursor reloads.
+    expect(full.projectIdentities).toBeTypeOf("string");
+    expect(yield* shell(`?resumeFrom=${full.snapshotSequence}`)).toEqual({ resumable: true });
+    expect(yield* shell(`?resumeFrom=${full.snapshotSequence - 1}`)).toEqual({ resumable: true });
+    for (const cursor of [full.snapshotSequence + 1, "x"]) {
+      expect((yield* shell(`?omitOlderSettled=1&resumeFrom=${cursor}`)).threads).toHaveLength(26);
+    }
   }),
 );

@@ -95,7 +95,7 @@ export function UsageRunwayPlanner({
                 {formatUsd(plan.measuredUsdPerHour)} / hour
               </dd>
               <dd className="mt-1 text-xs text-muted-foreground">
-                Measured {pace ? pace.hours.toFixed(1) : "—"}h, including idle time
+                Measured {pace ? pace.hours.toFixed(1) : "-"}h, including idle time
               </dd>
             </div>
             <div>

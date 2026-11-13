@@ -11,7 +11,7 @@ import {
 } from "@t3tools/shared/assistantCitations";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { submitComposerDraft } from "./composerSubmission";
+import { isComposerSubmissionBlocked, submitComposerDraft } from "./composerSubmission";
 
 const assistantCitation = {
   version: 1 as const,
@@ -223,4 +223,31 @@ it("routes a typed call turn to the call and preserves ordinary chat sends outsi
   expect(onSend).not.toHaveBeenCalled();
   expect(submitComposerDraft(input).didDispatch).toBe(true);
   expect(onSend).toHaveBeenCalledOnce();
+});
+
+describe("isComposerSubmissionBlocked", () => {
+  const sendBlocked = {
+    noProviderAvailable: true,
+    sendDisabledReason: "Messages loading",
+    attachmentBlockReason: null,
+    environmentUnavailable: false,
+  };
+
+  // regression: #9318
+  it("lets a pending answer through while provider-turn sends are blocked", () => {
+    expect(
+      isComposerSubmissionBlocked({ ...sendBlocked, submissionTarget: "pending-user-input" }),
+    ).toBe(false);
+    expect(isComposerSubmissionBlocked({ ...sendBlocked, submissionTarget: "provider-turn" })).toBe(
+      true,
+    );
+  });
+
+  it("still blocks a pending answer on its attachments or a lost connection", () => {
+    const answer = { ...sendBlocked, submissionTarget: "pending-user-input" as const };
+    expect(
+      isComposerSubmissionBlocked({ ...answer, attachmentBlockReason: "Attach the file again" }),
+    ).toBe(true);
+    expect(isComposerSubmissionBlocked({ ...answer, environmentUnavailable: true })).toBe(true);
+  });
 });

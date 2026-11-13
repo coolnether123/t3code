@@ -1,12 +1,12 @@
 # Fork features to preserve during nightly merges
 
-This inventory records the fork behavior retained through the October 25
-nightly merge. Upstream subagents and delegated tasks replaced the old fork
+This inventory records the fork behavior retained through the November 12
+upstream merge. Upstream subagents and delegated tasks replaced the old fork
 workers. Do not restore the retired workers while resolving a conflict.
 
 | Behavior                                                                                 | Source owners                                                                                                                   | Existing verification                                                                                                                                           |
 | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Voice calls, operator notifications, new-chat calls, streaming and barge-in              | `apps/server/src/speech/`, `packages/contracts/src/speech.ts`, web speech components                                            | Speech service and store tests beside their sources; `packages/contracts/src/speech.test.ts`                                                                    |
+| Voice calls, operator notifications, new-chat calls, streaming and barge-in              | `apps/server/src/speech/`, `packages/contracts/src/voiceCalls.ts`, web speech components                                        | Speech service and store tests beside their sources; `packages/contracts/src/voiceCalls.test.ts`                                                                |
 | Otis button, conversation screen, chronological call timeline and personality activation | `apps/web/src/components/otis/`, `apps/web/src/session-logic.ts`, `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts` | Otis browser tests, `session-logic.test.ts`, `CodexAdapterV2.test.ts`, orchestration HTTP snapshot tests                                                        |
 | Usage and Limits modals retain their public URLs, reset history, paid line and year view | `apps/web/src/routes/_chat.usage.tsx`, `apps/web/src/routes/_chat.usage-resets.tsx`, `apps/web/src/components/usage/`           | Usage and reset report tests beside their sources; integrated desktop and phone-width verification                                                              |
 | Usage history, quota and reset history, prompt reports and repeated-input reports        | `apps/server/src/usage/`, `packages/contracts/src/usage.ts`, mobile usage state and widgets                                     | `UsageService.test.ts`, `UsageService.scan.test.ts`, `usagePromptReport.test.ts`, `usageRepeatedInput.test.ts`, `usageScanStore.test.ts` in the usage directory |

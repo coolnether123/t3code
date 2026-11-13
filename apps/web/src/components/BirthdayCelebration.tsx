@@ -54,6 +54,7 @@ export function BirthdayCelebration({ children }: { readonly children: ReactNode
     nextNote: () => setNoteIndex((index) => index + 1),
   }))();
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Refresh the date on a timer, visibility change, and focus.
   useEffect(() => {
     const update = () => setNow(Date.now());
     const timer = window.setInterval(update, 30_000);
@@ -66,6 +67,7 @@ export function BirthdayCelebration({ children }: { readonly children: ReactNode
     };
   }, []);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Keep document attributes in step with the celebration.
   useEffect(() => {
     const root = document.documentElement;
     root.toggleAttribute("data-birthday", active);
@@ -76,6 +78,7 @@ export function BirthdayCelebration({ children }: { readonly children: ReactNode
     };
   }, [active, effects]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Own the celebration listeners and their timers while effects are enabled.
   useEffect(() => {
     if (!effects) return;
     const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
