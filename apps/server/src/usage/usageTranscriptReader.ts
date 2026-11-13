@@ -614,7 +614,7 @@ async function readCompleteJsonlLines(
     markers.some((marker) => bytes.includes(marker));
 
   let nextByte = start;
-  let pending = Buffer.alloc(0);
+  let pending: Buffer = Buffer.alloc(0);
   let discardedLines = 0;
   let discardingLine = options.discardPartialLine === true;
   // A line resumed mid-skip started in an earlier read whose bytes are gone.
