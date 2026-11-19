@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$Commit = 'HEAD', [string]$Config = 'A:/Runtime/T3CodeReleases/deploy-config.json', [switch]$DryRun, [switch]$Recover, [switch]$Status)
+param([string]$Commit = 'HEAD', [string]$Config = 'A:/Runtime/T3CodeReleases/deploy-config.json', [switch]$DryRun, [switch]$Recover, [switch]$Status, [ValidateSet("gpt-6.1-sol","gpt-6.2-sol")][string]$ProofModel)
 $ErrorActionPreference = 'Stop'
 $node = 'A:/Dev/Tooling/t3-node-v24.19.0/node.exe'
 $settings = Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json
@@ -19,5 +19,7 @@ if (-not (Test-Path -LiteralPath $candidate)) {
     & $node (Join-Path $PSScriptRoot 't3-build-job.mjs') $jobPath
     if ($LASTEXITCODE -ne 0) { throw 'Release preparation failed' }
 }
-& $node (Join-Path $PSScriptRoot 't3-deploy.mjs') deploy $Config $candidate
+$proofArguments = @()
+if ($ProofModel) { $proofArguments += $ProofModel }
+& $node (Join-Path $PSScriptRoot 't3-deploy.mjs') deploy $Config $candidate @proofArguments
 exit $LASTEXITCODE

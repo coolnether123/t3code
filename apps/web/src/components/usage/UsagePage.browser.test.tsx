@@ -64,14 +64,18 @@ describe("UsagePage modal dismissal", () => {
     await expect.element(page.getByRole("dialog", { name: "Usage" })).toBeVisible();
     await page.screenshot({ path: `__screenshots__/usage-modal-${width}.png` });
     await userEvent.keyboard("{Escape}");
-    await vi.waitFor(() => expect(testState.navigate).toHaveBeenCalledWith({ href: "/" }));
+    await vi.waitFor(() =>
+      expect(testState.navigate).toHaveBeenCalledWith({ href: "/", replace: true }),
+    );
   });
 
   it("closes Usage from its close button", async () => {
     setup();
     await using _screen = await render(<UsagePage />);
     await userEvent.click(page.getByRole("button", { name: "Close", exact: true }));
-    await vi.waitFor(() => expect(testState.navigate).toHaveBeenCalledWith({ href: "/" }));
+    await vi.waitFor(() =>
+      expect(testState.navigate).toHaveBeenCalledWith({ href: "/", replace: true }),
+    );
   });
 
   it("closes the environment menu before Escape closes Usage", async () => {
@@ -88,6 +92,8 @@ describe("UsagePage modal dismissal", () => {
     expect(testState.navigate).not.toHaveBeenCalled();
 
     await userEvent.keyboard("{Escape}");
-    await vi.waitFor(() => expect(testState.navigate).toHaveBeenCalledWith({ href: "/" }));
+    await vi.waitFor(() =>
+      expect(testState.navigate).toHaveBeenCalledWith({ href: "/", replace: true }),
+    );
   });
 });

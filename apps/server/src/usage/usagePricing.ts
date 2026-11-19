@@ -351,6 +351,11 @@ const MODEL_RATE_ALIASES = new Map([
   ["gemini-2.5-pro-preview-06-05", "gemini-2.5-pro"],
 ]);
 
+export function isUnlistedModel(table: RateTable, model: string): boolean {
+  const key = normalizeModelName(model).split("[", 1)[0]!;
+  return key.length > 0 && !UNPRICEABLE_MODELS.has(key) && lookupRate(table, model) === null;
+}
+
 export function lookupRate(table: RateTable, model: string): ModelRate | null {
   const normalized = normalizeModelName(model).split("[", 1)[0]!;
   if (normalized.length === 0 || UNPRICEABLE_MODELS.has(normalized)) return null;

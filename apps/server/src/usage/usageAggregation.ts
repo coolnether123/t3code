@@ -7,12 +7,13 @@ import type {
   UsageModelFilter,
   UsageModelSelector,
   UsageResolution,
+  UsageProviderKind,
   UsageTokenTotals,
 } from "@t3tools/contracts";
 
 import { mergeUsageCopies } from "./usageCopies.ts";
 import { addTotals, EMPTY_TOTALS, type UsageRecord } from "./usageTranscripts.ts";
-import { priceUsageRecord, type RateTable } from "./usagePricing.ts";
+import { lookupRate, priceUsageRecord, type RateTable } from "./usagePricing.ts";
 import {
   lowerBound,
   readGroupRange,
@@ -184,6 +185,7 @@ export interface AggregateOptions {
   readonly runIds?: readonly string[];
   readonly turnIds?: readonly string[];
   readonly modelAliases?: ReadonlyMap<string, string>;
+  readonly rateModel?: (provider: UsageProviderKind, model: string) => string | undefined;
   readonly groupBy?: "model" | "session" | "turn" | "run";
 }
 
@@ -291,7 +293,12 @@ export class UsageAggregator {
 
   /** Prices a record with this aggregation's rates, as `add` does. */
   price(input: UsageRecord): PricedRecord {
-    const record = mapUsageModel(input, this.#options.modelAliases);
+    const record = mapUsageModel(
+      input,
+      this.#options.modelAliases,
+      this.#options.rates,
+      this.#options.rateModel,
+    );
     const priced = priceUsageRecord(this.#options.rates, record, this.#options.priceOverrides);
     return {
       record,
@@ -608,9 +615,15 @@ function resolveCostSource(bucket: MutableBucket): UsageBucket["costSource"] {
 export function mapUsageModel(
   record: UsageRecord,
   aliases?: ReadonlyMap<string, string>,
+  rates?: RateTable,
+  providerRateModel?: AggregateOptions["rateModel"],
 ): UsageRecord {
   const model = aliases?.get(record.model);
   if (model === undefined) return record;
   const { rateModel: _rateModel, ...rest } = record;
-  return { ...rest, model };
+  const rateModel =
+    rates && lookupRate(rates, model) === null
+      ? providerRateModel?.(record.provider, model)
+      : undefined;
+  return rateModel === undefined ? { ...rest, model } : { ...rest, model, rateModel };
 }

@@ -11,6 +11,7 @@ const state = vi.hoisted(() => ({
     {
       environmentId: "desktop",
       label: "Desktop",
+      canReadDiagnostics: true,
       isPending: false,
       error: "This environment could not report usage." as string | null,
       summary: null as UsageSummary | null,
@@ -20,6 +21,7 @@ const state = vi.hoisted(() => ({
     label: string;
     connection?: EnvironmentConnectionPresentation;
     isConnected?: boolean;
+    canReadDiagnostics: boolean;
     isPending: boolean;
     error: string | null;
     summary: UsageSummary | null;
@@ -36,7 +38,10 @@ vi.mock("../rpc/atomRegistry", () => ({ appAtomRegistry: {} }));
 vi.mock("./presentation", () => ({
   environmentPresentations: { presentationsAtom: {} },
 }));
-vi.mock("./session", () => ({ environmentSession: { sessionStateAtom: vi.fn() } }));
+vi.mock("./session", () => ({
+  environmentSession: { sessionStateAtom: vi.fn() },
+  readEnvironmentScope: () => true,
+}));
 vi.mock("./server", () => ({
   serverEnvironment: { usageSummary: (request: unknown) => request },
 }));
@@ -197,6 +202,7 @@ async function setupUsageFixture() {
     {
       environmentId: "desktop",
       label: "Desktop",
+      canReadDiagnostics: true,
       isPending: false,
       error: "This environment could not report usage.",
       summary: null,
@@ -230,6 +236,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "desktop",
         label: "Desktop",
+        canReadDiagnostics: true,
         isPending: false,
         error: null,
         summary: null,
@@ -249,6 +256,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "desktop",
         label: "Desktop",
+        canReadDiagnostics: true,
         connection: { phase: "connected", error: null, traceId: null },
         isPending: false,
         error: null,
@@ -276,6 +284,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "desktop",
         label: "Desktop",
+        canReadDiagnostics: true,
         isPending: false,
         error: null,
         summary: refreshedSummary,
@@ -295,6 +304,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "desktop",
         label: "Desktop",
+        canReadDiagnostics: true,
         isPending: false,
         error: null,
         summary: refreshedSummary,
@@ -329,6 +339,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "desktop",
         label: "Desktop",
+        canReadDiagnostics: true,
         isPending: true,
         error: "This environment could not report usage.",
         summary: null,
@@ -411,6 +422,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "desktop",
         label: "Desktop",
+        canReadDiagnostics: true,
         isPending: false,
         error: null,
         isConnected: true,
@@ -434,6 +446,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "desktop",
         label: "Desktop",
+        canReadDiagnostics: true,
         isConnected: true,
         isPending: false,
         error: "This environment could not report usage.",
@@ -460,6 +473,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "desktop",
         label: "Desktop",
+        canReadDiagnostics: true,
         isPending: false,
         error: null,
         isConnected: true,
@@ -499,6 +513,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "desktop",
         label: "Desktop",
+        canReadDiagnostics: true,
         isPending: false,
         error: null,
         isConnected: true,
@@ -529,6 +544,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "desktop",
         label: "Desktop",
+        canReadDiagnostics: true,
         isPending: false,
         error: null,
         isConnected: true,
@@ -543,6 +559,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "desktop",
         label: "Desktop",
+        canReadDiagnostics: true,
         isPending: false,
         error: "This environment could not report usage.",
         summary: deferredSummary,
@@ -565,6 +582,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "desktop",
         label: "Desktop",
+        canReadDiagnostics: true,
         isPending: false,
         error: null,
         summary: null,
@@ -580,6 +598,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "desktop",
         label: "Desktop",
+        canReadDiagnostics: true,
         isPending: false,
         error: null,
         summary: { ...refreshedSummary, readAt: "2026-09-01T12:01:00.000Z" },
@@ -600,6 +619,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "desktop",
         label: "Desktop",
+        canReadDiagnostics: true,
         isPending: false,
         error: null,
         summary: null,
@@ -607,6 +627,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "laptop",
         label: "Laptop",
+        canReadDiagnostics: true,
         isPending: false,
         error: null,
         summary: null,
@@ -631,6 +652,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "laptop",
         label: "Laptop",
+        canReadDiagnostics: true,
         isPending: false,
         error: null,
         summary: { ...refreshedSummary, readAt: "2026-09-01T12:03:00.000Z" },
@@ -648,6 +670,7 @@ describe("usage route recovery", () => {
       {
         environmentId: "desktop",
         label: "Desktop",
+        canReadDiagnostics: true,
         isPending: false,
         error: null,
         summary: refreshedSummary,

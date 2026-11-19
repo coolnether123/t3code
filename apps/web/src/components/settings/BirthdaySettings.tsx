@@ -9,11 +9,12 @@ import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSet
 import { usePrimaryEnvironment } from "../../state/environments";
 import { Button } from "../ui/button";
 import { SettingsSection } from "./settingsLayout";
-import { searchableSetting } from "./settingsSearch";
+import { useSearchableSetting } from "./settingsSearch";
 
 const isBirthdayPreference = Schema.is(BirthdayCelebrationPreference);
 
 export function BirthdaySettings() {
+  const searchableSetting = useSearchableSetting();
   const saved = usePrimarySettings((settings) => settings.birthdayCelebration);
   const update = useUpdatePrimarySettings();
   const connected = usePrimaryEnvironment();

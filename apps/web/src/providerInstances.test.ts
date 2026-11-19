@@ -106,6 +106,31 @@ describe("isProviderInstancePickerReady", () => {
       expect(unavailableEntry && isProviderInstancePickerReady(unavailableEntry)).toBe(false);
     }
   });
+
+  it("offers a warning provider's models on its usable sub-providers only", () => {
+    const backendModel = (slug: string, subProvider: string) => ({ ...model(slug), subProvider });
+    const fx = (models: ServerProvider["models"]) => ({
+      ...provider({
+        provider: ProviderDriverKind.make("fx"),
+        instanceId: "fx",
+        status: "warning",
+        models,
+      }),
+      subProviders: [
+        { name: "Gateway" },
+        { name: "Codex", unavailableReason: "Signed out. Run `fx login codex` on this machine." },
+      ],
+    });
+    const ready = (snapshot: ServerProvider) =>
+      deriveProviderInstanceEntries([snapshot]).map(isProviderInstancePickerReady)[0];
+
+    expect(
+      ready(fx([model("default", false, true), backendModel("openai/gpt-5.5", "Gateway")])),
+    ).toBe(true);
+    expect(ready(fx([model("default", false, true), backendModel("gpt-5.5", "Codex")]))).toBe(
+      false,
+    );
+  });
 });
 
 describe("applyProviderInstanceSettings", () => {

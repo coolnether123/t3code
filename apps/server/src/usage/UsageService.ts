@@ -63,7 +63,12 @@ import {
   resolveModelAliases,
   UsageAggregator,
 } from "./usageAggregation.ts";
-import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
+import {
+  createOverrideRateTable,
+  isUnlistedModel,
+  parseRateTable,
+  type RateTable,
+} from "./usagePricing.ts";
 import { mergeUsageReads, projectUsageRead, usageReadBatchKey } from "./usageReadBatch.ts";
 import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
 import { makeUsageReportCalculation, projectUsageReport } from "./usageReport.ts";
@@ -85,6 +90,8 @@ import {
 import {
   listTranscriptFilesBounded,
   resolveClaudeDesktopLocalAgentDir,
+  DESKTOP_HOST_SCOPE_ENV,
+  readPhysicalSourceId,
   readDirectoryVolumeId,
   readTranscriptRecords,
   readRepeatedInputRecords,
@@ -167,9 +174,6 @@ const MAX_SUMMARY_CACHE_ENTRIES = 16;
 // mtime slack includes writes just before local midnight on the window's first day.
 const MTIME_SLACK_MS = 36 * 60 * 60 * 1000;
 const MAX_HOURLY_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-/** Longest window the UI offers. Older entries are pruned. */
-const CACHE_RETENTION_DAYS = 365;
 
 /** Keeps a first-time usage read responsive even with very large transcripts. */
 const MAX_COLD_SCAN_BYTES_PER_SOURCE = 128 * 1024 * 1024;
@@ -532,6 +536,25 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const config = yield* ServerConfig;
   const hostEnvironment = yield* HostProcess.Environment;
+  const hostPlatform = yield* HostProcess.Platform;
+  const hostScope = hostEnvironment[DESKTOP_HOST_SCOPE_ENV]?.trim();
+  // A mount or a directory's on-disk name does not change under a running server.
+  // A miss is not cached: the directory may not exist yet.
+  const physicalSourceIds = new Map<string, Promise<string | undefined>>();
+  const physicalSourceId = (dir: string) =>
+    Effect.promise(() => {
+      const cached = physicalSourceIds.get(dir);
+      if (cached !== undefined) return cached;
+      const id = readPhysicalSourceId(dir, hostScope, hostPlatform);
+      physicalSourceIds.set(dir, id);
+      void id.then((resolved) => {
+        if (resolved === undefined && physicalSourceIds.get(dir) === id) {
+          physicalSourceIds.delete(dir);
+        }
+      });
+      return id;
+    });
+
   setPromptIndexCutover(yield* promptCutoverEnabled(hostEnvironment, fileSystem));
   const hostname = yield* HostProcess.Hostname;
   const homeDirectory = yield* HostProcess.HomeDirectory;
@@ -679,6 +702,12 @@ export const make = Effect.gen(function* () {
     }),
   );
 
+  const providerRateModels = new Map(
+    BUILT_IN_USAGE_DRIVERS.flatMap(({ usage }) =>
+      usage?.rateModel === undefined ? [] : [[usage.provider, usage.rateModel] as const],
+    ),
+  );
+  const checkedUnlistedModels = new Set<string>();
   const ensureRates = (force = false) =>
     ensureCachedRates.pipe(
       Effect.andThen(
@@ -765,8 +794,7 @@ export const make = Effect.gen(function* () {
     const claudeInstances = Object.values(settings.providerInstances).filter(
       (instance) => instance.driver === "claudeAgent",
     );
-    const claudeConfigs =
-      claudeInstances.length === 0 ? [{ config: {}, environment: undefined }] : claudeInstances;
+    const claudeConfigs = [...claudeInstances, { config: {}, environment: undefined }];
     const claudeDirs = yield* Effect.forEach(
       claudeConfigs,
       Effect.fnUntraced(function* (raw) {
@@ -795,16 +823,6 @@ export const make = Effect.gen(function* () {
         codexHomes.add(codexIsolatedHomePath(path, config.baseDir, instanceId));
       }
     });
-    if (
-      !Object.values(settings.providerInstances).some((instance) => instance.driver === "codex")
-    ) {
-      yield* addCodexHome(
-        "codex",
-        yield* decodeCodexSettings({ homePath: hostEnvironment.CODEX_HOME ?? "" }).pipe(
-          Effect.orDie,
-        ),
-      );
-    }
     for (const [instanceId, instance] of Object.entries(settings.providerInstances)) {
       if (String(instance.driver) !== "codex") continue;
       const codexConfig = yield* decodeCodexSettings(instance.config ?? {}).pipe(
@@ -823,6 +841,10 @@ export const make = Effect.gen(function* () {
         );
       }
     }
+    yield* addCodexHome(
+      "codex",
+      yield* decodeCodexSettings({ homePath: hostEnvironment.CODEX_HOME ?? "" }).pipe(Effect.orDie),
+    );
     const geminiHome = path.join(homeDirectory, ".gemini");
 
     const imports = yield* fileSystem.readFileString(usageImportsPath).pipe(
@@ -880,6 +902,7 @@ export const make = Effect.gen(function* () {
     const settings = yield* readSettings;
     const dirs = yield* resolveTranscriptDirs(settings).pipe(
       Effect.provideService(Path.Path, path),
+      Effect.provideService(HostProcess.HomeDirectory, homeDirectory),
     );
     return { settings, dirs } satisfies UsageReadContext;
   });
@@ -1378,6 +1401,7 @@ export const make = Effect.gen(function* () {
     // at its start and let the regular refresh populate the next read; never let
     // the pricing endpoint consume this scan's budget or change its prices
     // partway through aggregation.
+    const scanRateRevision = ratesRevision;
     const scanRates = new Map(rates);
     const scanPricing = pricing();
     yield* Effect.forkDetach(ensureRates().pipe(Effect.withSpan("UsageService.ensureRates")));
@@ -1404,6 +1428,10 @@ export const make = Effect.gen(function* () {
       return yield* Effect.die("A transcript usage read requires its resolved source context.");
     }
     const { settings } = context;
+    const retentionCutoffMs =
+      settings.usageHistoryRetentionDays === "unlimited"
+        ? 0
+        : Math.max(0, startedAtMs - settings.usageHistoryRetentionDays * 24 * 60 * 60 * 1000);
     let dirs = context.dirs;
     const claudeDir = dirs.find((source) => source.provider === "claude")?.dir;
     if (claudeDir !== undefined) {
@@ -1471,6 +1499,7 @@ export const make = Effect.gen(function* () {
       ...hourlyWindow,
       rates: scanRates,
       modelAliases: resolveModelAliases(settings.usageModelAliases),
+      rateModel: (provider, model) => providerRateModels.get(provider)?.(model),
       priceOverrides: createOverrideRateTable(settings.usagePriceOverrides),
       ...(input.providers === undefined ? {} : { providers: input.providers }),
       ...(input.runIds === undefined ? {} : { runIds: input.runIds }),
@@ -1484,7 +1513,7 @@ export const make = Effect.gen(function* () {
     // Prices are fixed for the length of a read. An index priced under other
     // rates, overrides, tier corrections or Fast windows is rebuilt.
     const indexRevision = transcriptIndexRevisionOf(
-      ratesRevision,
+      scanRateRevision,
       scanRates.size,
       [settings.usagePriceOverrides, settings.usageModelAliases],
       tierJournal,
@@ -1591,6 +1620,8 @@ export const make = Effect.gen(function* () {
 
     for (const source of plannedSources) {
       const { provider, dir, volumeId } = source;
+      const physicalId = yield* physicalSourceId(dir);
+      const identity = physicalId === undefined ? {} : { physicalSourceId: physicalId };
       if (!source.exists) {
         const coverage = scanStore.coverage(provider, dir);
         const retainedFiles = [...scanStore.index()].flatMap(([filePath, meta]) => {
@@ -1639,6 +1670,7 @@ export const make = Effect.gen(function* () {
               provider,
               resolvedHomePath: dir,
               volumeId: retainedVolumeId,
+              ...identity,
             },
           });
         }
@@ -1648,6 +1680,7 @@ export const make = Effect.gen(function* () {
             provider,
             resolvedHomePath: dir,
             volumeId: retainedVolumeId,
+            ...identity,
           },
           status: retainedFiles.length > 0 ? "partial" : "missing",
           scannedFiles,
@@ -2160,11 +2193,11 @@ export const make = Effect.gen(function* () {
         quotaCosts.push({
           ...cost,
           complete: scanCompleted,
-          fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
+          fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId, ...identity },
         });
       }
       sources.push({
-        fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
+        fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId, ...identity },
         status: !scanCompleted || malformedRecords > 0 ? "partial" : "ok",
         scannedFiles,
         skippedFiles,
@@ -2191,7 +2224,27 @@ export const make = Effect.gen(function* () {
       });
     }
 
-    scanStore.prune(startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    yield* settingsService
+      .withSettingsSnapshot((current) =>
+        Effect.sync(() => {
+          if (
+            current.usageHistoryRetentionDays === settings.usageHistoryRetentionDays &&
+            retentionCutoffMs > 0
+          ) {
+            scanStore.prune(retentionCutoffMs);
+          }
+        }),
+      )
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new UsageReadError({
+              reason: "scanFailed",
+              detail: "Cannot check usage retention.",
+              cause,
+            }),
+        ),
+      );
     for (const filePath of transcriptIndexes.keys()) {
       if (scanStore.meta(filePath) !== undefined) continue;
       transcriptIndexes.delete(filePath);
@@ -2242,7 +2295,7 @@ export const make = Effect.gen(function* () {
     const providerScans = yield* readProviderUsage({
       settings,
       windowStartMs,
-      retentionCutoffMs: startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+      retentionCutoffMs,
       awaitRefresh: input.awaitRefresh === true,
       ...(additionalProviders === undefined ? {} : { providers: additionalProviders }),
     });
@@ -2279,6 +2332,31 @@ export const make = Effect.gen(function* () {
       });
     }
     const aggregated = aggregator.finish();
+    const unlisted = [
+      ...new Set(
+        aggregated.buckets
+          .filter(
+            (bucket) =>
+              bucket.unpricedRecords > 0 &&
+              !checkedUnlistedModels.has(bucket.model) &&
+              isUnlistedModel(scanRates, bucket.model),
+          )
+          .map((bucket) => bucket.model),
+      ),
+    ];
+    if (unlisted.length > 0 && scanRateRevision !== null) {
+      yield* Effect.forkDetach(
+        Effect.gen(function* () {
+          yield* ensureRates(true);
+          if (
+            ratesFetchedAtMs !== null &&
+            (yield* Clock.currentTimeMillis) - ratesFetchedAtMs < RATES_REFRESH_FLOOR_MS
+          ) {
+            for (const model of unlisted) checkedUnlistedModels.add(model);
+          }
+        }),
+      );
+    }
     const readAt = yield* DateTime.now;
     const finishedAtMs = yield* Clock.currentTimeMillis;
     const repeatedDayAt = makeDayFormatter(input.timeZone);

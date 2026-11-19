@@ -347,9 +347,13 @@ export function productionAdapter(config, io = {}) {
   };
 }
 async function main() {
-  const [operation, configFile, candidate] = process.argv.slice(2);
+  const [operation, configFile, candidate, proofModel] = process.argv.slice(2);
   const config = readJson(configFile);
-  if (config.modelSelection.model !== "gpt-6.1-sol" || config.healthUrls.length !== 3)
+  if (proofModel) config.modelSelection = { ...config.modelSelection, model: proofModel };
+  if (
+    !["gpt-6.1-sol", "gpt-6.2-sol"].includes(config.modelSelection.model) ||
+    config.healthUrls.length !== 3
+  )
     throw new Error("Require Sol proof and all three health surfaces");
   if (
     config.fixtureLaunch ||

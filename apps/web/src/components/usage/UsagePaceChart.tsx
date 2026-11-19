@@ -29,7 +29,7 @@ import {
 } from "react";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 
-import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
+import { namedClipboardTarget, writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { readLocalApi } from "~/localApi";
 import { toastManager } from "../ui/toast";
 
@@ -302,7 +302,7 @@ export function UsagePaceChart({
       0,
     );
   const copy = (text: string, what: string) =>
-    writeTextToClipboard(text, what).then(
+    writeTextToClipboard(text, namedClipboardTarget(what)).then(
       () => toastManager.add({ type: "success", title: `Copied ${what}` }),
       () => toastManager.add({ type: "error", title: `Could not copy the ${what}` }),
     );

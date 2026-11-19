@@ -18,8 +18,6 @@ import {
   ComputerOpenUrlFailedError,
   ComputerOpenUrlResult,
 } from "@t3tools/contracts";
-import * as Context from "effect/Context";
-import * as Fiber from "effect/Fiber";
 import { McpSchema, Tool, Toolkit } from "effect/ai";
 
 import * as ChromeAutomation from "../../../browser/ChromeAutomation.ts";
@@ -53,20 +51,8 @@ const safeChromeTool = <T extends Tool.Any>(tool: T): T =>
 const idempotentChromeTool = <T extends Tool.Any>(tool: T): T =>
   safeChromeTool(tool).annotate(Tool.Idempotent, true) as T;
 
-/**
- * MCP's tool-list filter runs inside the authenticated request fiber. Keep
- * computer control out of catalogs unless that fiber carries the same
- * capability used by the execution-time guard.
- */
-export const hasCurrentComputerCapability = (): boolean => {
-  const fiber = Fiber.getCurrent();
-  if (!fiber) return false;
-  const invocation = Context.getOption(fiber.context, McpInvocationContext.McpInvocationContext);
-  return invocation._tag === "Some" && invocation.value.capabilities.has("computer");
-};
-
 const computerTool = <T extends Tool.Any>(tool: T): T =>
-  tool.annotate(McpSchema.EnabledWhen, hasCurrentComputerCapability) as T;
+  tool.annotate(McpSchema.EnabledWhen, McpInvocationContext.hasThreadComputerCapability) as T;
 
 export const ComputerStartTool = computerTool(
   idempotentChromeTool(

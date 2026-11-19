@@ -1,5 +1,6 @@
 // Cache per file so timezone changes do not invalidate parsed usage.
 // Deduplicate within each file here; the aggregator handles cross-file copies.
+import { CODEX_SCAN_PARSER_REVISION } from "./usageTranscripts.ts";
 import type {
   UsageProviderKind,
   UsageRepeatedInputConfidence,
@@ -177,6 +178,7 @@ interface SerializedFile {
     (string | null)?,
     (string | null)?,
     unknown?,
+    number?,
   ];
 }
 
@@ -290,6 +292,7 @@ export function encodeScanCache(
               entry.codexState.serviceTier ?? null,
               entry.codexState.turnId ?? null,
               entry.codexState.providerState ?? null,
+              entry.codexState.parserRevision ?? 0,
             ] as const,
           }),
       ...(entry.scanCursor === undefined ? {} : { q: entry.scanCursor }),
@@ -753,6 +756,7 @@ function decodeSerializedFile(
       serviceTier,
       turnId,
       providerStateValue,
+      parserRevision,
     ] = entry.c;
     if (
       typeof model !== "string" ||
@@ -767,6 +771,7 @@ function decodeSerializedFile(
     }
     const providerState = decodeCodexScanState(providerStateValue);
     codexState = {
+      ...(parserRevision === CODEX_SCAN_PARSER_REVISION ? { parserRevision } : {}),
       ...(Option.isSome(providerState) ? { providerState: providerState.value } : {}),
       model,
       sessionId,
@@ -861,7 +866,9 @@ export function cachedFileMeta(entry: CachedFile): CachedFileMeta {
       ? {}
       : { repeatedInputVersion: entry.repeatedInputVersion }),
     hasCodexState: entry.codexState !== undefined,
-    codexParserCurrent: entry.codexState?.providerState !== undefined,
+    codexParserCurrent:
+      entry.codexState?.providerState !== undefined &&
+      entry.codexState.parserRevision === CODEX_SCAN_PARSER_REVISION,
     malformedRecords:
       entry.codexState?.providerState?.malformedRecords ?? entry.malformedRecords ?? 0,
     hasRepeatedInput: entry.repeatedInputObservations !== undefined,

@@ -81,9 +81,7 @@ export const makeProviderUsageReader = Effect.gen(function* () {
     > = Object.entries(settings.providerInstances)
       .filter(([, instance]) => instance.driver === driver.driverKind)
       .map(([id, instance]) => [ProviderInstanceId.make(id), instance, true] as const);
-    if (!Object.hasOwn(settings.providerInstances, driver.driverKind)) {
-      entries.push([ProviderInstanceId.make(driver.driverKind), {}, false]);
-    }
+    entries.push([ProviderInstanceId.make(driver.driverKind), {}, false]);
     const decode = Schema.decodeUnknownOption(driver.configSchema);
     return yield* Effect.forEach(
       entries,

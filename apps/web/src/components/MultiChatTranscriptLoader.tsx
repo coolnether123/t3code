@@ -5,7 +5,7 @@ import { serializeTaskTranscripts, type TaskTranscriptInput } from "../chatTrans
 import { orchestrationEnvironment } from "../state/orchestration";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useStableCallback } from "../hooks/useStableCallback";
-import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
+import { namedClipboardTarget, writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { toastManager } from "./ui/toast";
 
 export async function copyThreadTranscripts(
@@ -43,7 +43,9 @@ export function useMultiChatTranscriptCopy(
           const copying = copyTail.current
             .catch(() => false)
             .then(() =>
-              requestId.current === id ? writeTextToClipboard(text, "chat transcripts") : false,
+              requestId.current === id
+                ? writeTextToClipboard(text, namedClipboardTarget("chat transcripts"))
+                : false,
             );
           copyTail.current = copying;
           return copying;

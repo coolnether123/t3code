@@ -14,8 +14,7 @@
     "ComputerStartTool",
     "ComputerStatusTool",
     "ComputerTabsTool",
-    "ComputerTypeTool",
-    "hasCurrentComputerCapability"
+    "ComputerTypeTool"
   ],
   "apps/server/src/persistence/forkWorkersMigration.fixture.ts": ["default", "ensureWorkerSchema"],
   "apps/server/src/provider/ClaudeProvider.ts": ["readClaudeSubscriptionWindows"],

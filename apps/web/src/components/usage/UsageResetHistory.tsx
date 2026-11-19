@@ -8,7 +8,7 @@ import {
 } from "@t3tools/shared/usageQuota";
 import type { MouseEvent as ReactMouseEvent } from "react";
 
-import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
+import { namedClipboardTarget, writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { readLocalApi } from "~/localApi";
 import { cn } from "~/lib/utils";
 import { toastManager } from "../ui/toast";
@@ -110,7 +110,7 @@ export function UsageResetHistory({
     }
     if (action === "chart") onSelectCycle(period.id);
     else if (action === "copy") {
-      await writeTextToClipboard(summary, "cycle").then(
+      await writeTextToClipboard(summary, namedClipboardTarget("cycle")).then(
         () => toastManager.add({ type: "success", title: "Copied cycle summary" }),
         () => toastManager.add({ type: "error", title: "Could not copy the cycle summary" }),
       );

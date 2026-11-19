@@ -2,7 +2,7 @@ import type { ContextMenuItem } from "@t3tools/contracts";
 import { quotaDuration } from "@t3tools/shared/usageQuotaForecast";
 import { useEffect, useState, type MouseEvent as ReactMouseEvent } from "react";
 
-import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
+import { namedClipboardTarget, writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { readLocalApi } from "~/localApi";
 import { cn } from "~/lib/utils";
 import { toastManager } from "../ui/toast";
@@ -70,7 +70,7 @@ export function UsageLimitCards({
     else if (action === "only") onShowOnly(limit.provider);
     else if (action === "copy" && summary) {
       const text = `${name}: ${summary.remainingPercent}% remaining, resets in ${quotaDuration(summary.resetInMs)} (${new Date(summary.resetsAt).toLocaleString()})`;
-      await writeTextToClipboard(text, "limit").then(
+      await writeTextToClipboard(text, namedClipboardTarget("limit")).then(
         () => toastManager.add({ type: "success", title: "Copied limit" }),
         () => toastManager.add({ type: "error", title: "Could not copy the limit" }),
       );

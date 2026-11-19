@@ -344,6 +344,8 @@ describe("voice environment transport", () => {
           }),
       });
       const remoteAuthorization = RemoteEnvironmentAuthorization.of({
+        authorizeDirectDpop: () => Effect.die("unused direct transport"),
+        authorizeDirectDpopHttp: () => Effect.die("unused direct transport"),
         rememberCheckedDescriptor: () => Effect.void,
         renewDpopBeforeExpiry: () => Effect.die("unused"),
         authorizeBearer: () => Effect.die("unused"),

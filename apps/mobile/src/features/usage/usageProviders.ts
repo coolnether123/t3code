@@ -1,5 +1,6 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
+import { providerColors } from "./providerColors";
 
 /**
  * Series and table order. The chart stacks providers from the bottom in this
@@ -38,20 +39,7 @@ export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
  * with the theme or its bars vanish against the matching background.
  */
 export function useProviderColors(): Record<UsageProviderKind, string> {
-  const { themeAppearance: scheme } = useAppearancePreferences();
-  return {
-    claude: "#d97757",
-    codex: scheme === "dark" ? "#e6e6e6" : "#3c3c43",
-    gemini: "#4e8cff",
-    opencode: "#7c9cff",
-    chatgpt: "#10a37f",
-    aistudio: "#f9ab00",
-    grok: scheme === "dark" ? "#e5e5e5" : "#52525b",
-    cursor: "#8b8b8b",
-    antigravity: "#8c7bd1",
-    pi: "#4d9f8a",
-    muse: "#0866ff",
-  };
+  return providerColors(useAppearancePreferences().themeAppearance);
 }
 
 export function useUsageMixColors() {

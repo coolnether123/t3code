@@ -278,7 +278,10 @@ export function parseOpenCodeMessageValue(
  * from the most recent `turn_context`. Sessions that switch models mid-run
  * attribute correctly from the switch onward.
  */
+export const CODEX_SCAN_PARSER_REVISION = 2;
+
 export interface CodexScanState {
+  parserRevision?: number;
   providerState?: CodexUsage.CodexScanState;
   model: string;
   serviceTier?: string | undefined;
@@ -293,6 +296,7 @@ export interface CodexScanState {
 
 export function initialCodexScanState(): CodexScanState {
   return {
+    parserRevision: CODEX_SCAN_PARSER_REVISION,
     providerState: CodexUsage.initialCodexScanState(),
     model: "",
     sessionId: "",

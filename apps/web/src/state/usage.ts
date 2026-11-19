@@ -1,4 +1,3 @@
-import { environmentSession } from "./session";
 /**
  * Multi-environment usage state.
  *
@@ -12,6 +11,7 @@ import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/
 import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
 import { usageQueryInput } from "@t3tools/client-runtime/usageRefresh";
 import {
+  AuthDiagnosticsReadScope,
   USAGE_CONTRACT_VERSION,
   type EnvironmentId,
   type UsageBucket,
@@ -23,6 +23,7 @@ import * as Option from "effect/Option";
 import { needsCursorKeychainAccess, usageSummaryInput } from "@t3tools/client-runtime/state/usage";
 import { resolveUsageAccess } from "@t3tools/client-runtime/state/usage-access";
 import { AsyncResult, Atom } from "effect/reactivity";
+import { msg } from "gt-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStableCallback } from "../hooks/useStableCallback";
 
@@ -30,6 +31,8 @@ import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/sh
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentPresentations } from "./presentation";
 import { serverEnvironment } from "./server";
+import { environmentSession, readEnvironmentScope } from "./session";
+import { m } from "../i18n/messages";
 
 const DEFERRED_TRANSCRIPT_REFRESH_BASE_MS = 750;
 const DEFERRED_TRANSCRIPT_REFRESH_MAX_MS = 8_000;
@@ -103,7 +106,8 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
         isPending: result.waiting,
         canReadDiagnostics: true,
         isConnected,
-        error: result._tag === "Failure" ? "This environment could not report usage." : null,
+        error:
+          result._tag === "Failure" ? m(msg("This environment could not report usage.")) : null,
         needsCursorKeychainAccess: needsCursorKeychainAccess(
           summary,
           get(serverEnvironment.providersValueAtom(environmentId)),
@@ -150,7 +154,7 @@ export function useUsage(
     const byId = new Map(refreshed.statuses.map((status) => [status.environmentId, status]));
     return observedEnvironments.map((environment) => {
       const refreshedEnvironment = byId.get(environment.environmentId);
-      if (refreshedEnvironment === undefined) return environment;
+      if (!environment.canReadDiagnostics || refreshedEnvironment === undefined) return environment;
       const observedAt = environment.summary?.readAt;
       const refreshedAt = refreshedEnvironment.summary?.readAt;
       const baselineAt = refreshed.baselineReadAt.get(environment.environmentId);
@@ -214,9 +218,11 @@ export function useUsage(
       environments.map((environment) => [environment.environmentId, environment.summary?.readAt]),
     );
     const requestStatuses = environments.map((environment) =>
-      requestWindowKey === windowKey
-        ? { ...environment, isPending: true }
-        : { ...environment, isPending: true, error: null, summary: null },
+      !environment.canReadDiagnostics
+        ? environment
+        : requestWindowKey === windowKey
+          ? { ...environment, isPending: true }
+          : { ...environment, isPending: true, error: null, summary: null },
     );
     setRefreshed({
       windowKey: requestWindowKey,
@@ -227,6 +233,18 @@ export function useUsage(
     const promise = (async () => {
       const statuses = await Promise.all(
         environments.map(async (environment) => {
+          if (
+            !environment.canReadDiagnostics ||
+            !readEnvironmentScope(environment.environmentId, AuthDiagnosticsReadScope)
+          ) {
+            return {
+              ...environment,
+              canReadDiagnostics: false,
+              isPending: false,
+              error: null,
+              summary: null,
+            };
+          }
           const result = await executeAtomQuery(
             appAtomRegistry,
             serverEnvironment.usageSummary({
@@ -356,9 +374,19 @@ export function useUsage(
   }, [windowKey, delayedRetryTimers, delayedRetries]);
 
   const hiddenProviderKey = JSON.stringify([...hiddenProviders].sort());
-  const selectionKey = JSON.stringify(
+  const selectionKey = JSON.stringify([
     selectedEnvironmentIds === null ? null : [...selectedEnvironmentIds].sort(),
-  );
+    observedEnvironments
+      .filter(
+        (environment) =>
+          !environment.canReadDiagnostics &&
+          !environment.isPending &&
+          (selectedEnvironmentIds === null ||
+            selectedEnvironmentIds.has(environment.environmentId)),
+      )
+      .map((environment) => environment.environmentId)
+      .sort(),
+  ]);
   const merged = (() =>
     mergeAnsweredUsage(withoutProviders(selectedEnvironments, hiddenProviders)))();
 
@@ -437,7 +465,8 @@ export function useUsage(
     (environment) => environment.summary !== null,
   ).length;
   const stillReporting = selectedEnvironments.filter(
-    (environment) => environment.summary === null && environment.error === null,
+    (environment) =>
+      environment.summary === null && environment.isPending && environment.error === null,
   ).length;
 
   const [lastAnswered, setLastAnswered] = useState<{

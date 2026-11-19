@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 /** Durable scan cache: a bounded in-memory index over SQLite record chunks. */
+import { CODEX_SCAN_PARSER_REVISION } from "./usageTranscripts.ts";
 import * as NodeSqlite from "node:sqlite";
 
 import type { UsageProviderKind } from "@t3tools/contracts";
@@ -249,7 +250,7 @@ function sqliteBackend(filePath: string): Backend {
                 : {}),
               ...(repeatedInputVersion === undefined ? {} : { repeatedInputVersion }),
               hasCodexState: row.has_codex_state === 1,
-              codexParserCurrent: row.codex_parser_current === 1,
+              codexParserCurrent: row.codex_parser_current === CODEX_SCAN_PARSER_REVISION,
               malformedRecords: optionalNumber(row.malformed_records) ?? 0,
               hasRepeatedInput: row.has_repeated_input === 1,
               recordCount,
@@ -292,7 +293,7 @@ function sqliteBackend(filePath: string): Backend {
             row.chunkCount,
             row.lastRecord,
             head,
-            meta.codexParserCurrent ? 1 : 0,
+            meta.codexParserCurrent ? CODEX_SCAN_PARSER_REVISION : 0,
             meta.malformedRecords ?? 0,
           );
           if (replaceChunks) deleteChunks.run(path);

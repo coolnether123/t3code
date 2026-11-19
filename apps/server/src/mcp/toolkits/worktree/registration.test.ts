@@ -36,6 +36,9 @@ import * as SourceControlRepositoryService from "../../../sourceControl/SourceCo
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpSessionRegistry from "../../McpSessionRegistry.ts";
+import * as EnvironmentTheme from "../../../environmentTheme.ts";
+import * as IssueService from "../../../issue/IssueService.ts";
+import * as ThreadIssueService from "../../../orchestration-v2/ThreadIssueService.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as PreviewBrowser from "../../../preview/PreviewBrowser.ts";
 
@@ -122,6 +125,9 @@ it.effect("production mcp layer lists worktree tools over http", () =>
             getEnvironmentId: Effect.succeed("environment-scratch" as never),
           }),
         ),
+        Layer.provide(Layer.mock(EnvironmentTheme.EnvironmentThemeService)({})),
+        Layer.provide(Layer.mock(IssueService.IssueService)({})),
+        Layer.provide(Layer.mock(ThreadIssueService.ThreadIssueService)({})),
         Layer.provide(PreviewAutomationBroker.layer),
         Layer.provide(PreviewBrowser.layer),
         Layer.provide(layerStubServices),
