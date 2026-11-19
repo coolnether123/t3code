@@ -694,12 +694,17 @@ export const make = Effect.gen(function* () {
     ratesFetchedAtMs = fromDisk.fetchedAtMs;
     ratesStatus = "cached";
   });
-  const ensureCachedRates = ratesLock.withPermits(1)(
+  const loadCachedRatesOnce = ratesLock.withPermits(1)(
     Effect.gen(function* () {
       if (cachedRatesLoaded) return;
       yield* loadCachedRates;
       cachedRatesLoaded = true;
     }),
+  );
+
+  // A background price refresh holds the lock while it waits for the network.
+  const ensureCachedRates = Effect.suspend(() =>
+    cachedRatesLoaded ? Effect.void : loadCachedRatesOnce,
   );
 
   const providerRateModels = new Map(
@@ -779,11 +784,12 @@ export const make = Effect.gen(function* () {
       const nestedExists = yield* fileSystem
         .exists(nested)
         .pipe(Effect.catchCause(() => Effect.succeed(false)));
+      if (nestedExists) return nested;
       const fallback = path.join(homePath, "projects");
       const fallbackExists = yield* fileSystem
         .exists(fallback)
         .pipe(Effect.catchCause(() => Effect.succeed(false)));
-      return nestedExists ? nested : fallbackExists ? fallback : nested;
+      return fallbackExists ? fallback : nested;
     },
   );
 
@@ -2490,6 +2496,9 @@ export const make = Effect.gen(function* () {
             message:
               "Usage is partial because its response budget expired before this source finished.",
           }) satisfies UsageSource,
+      )
+      .map((source) =>
+        source.status === "missing" ? source : { ...source, refreshing: true as const },
       );
     const clientContractVersion = input.clientContractVersion ?? USAGE_CONTRACT_VERSION;
     const supportsOpenCode = clientContractVersion >= 6;
@@ -2583,7 +2592,7 @@ export const make = Effect.gen(function* () {
             ],
       });
       return yield* Effect.gen(function* () {
-        const result = yield* Effect.gen(function* () {
+        const read = Effect.gen(function* () {
           if (input.sinceDay > input.untilDay) {
             return yield* new UsageReadError({
               reason: "invalidWindow",
@@ -2687,7 +2696,7 @@ export const make = Effect.gen(function* () {
             const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
             if (cached !== undefined) return cached;
           }
-          const scanInput =
+          const selectedInput =
             intervals.length === 0
               ? input
               : {
@@ -2698,6 +2707,8 @@ export const make = Effect.gen(function* () {
                       sources.filter((source) => source.status !== "missing").length,
                   ),
                 };
+          // Readers with different response deadlines share the same underlying scan.
+          const scanInput = { ...selectedInput, awaitRefresh: true, provisional: false };
           const batchKey = encodeBatchKey([
             usageReadBatchKey(scanInput),
             context.settings.usagePriceOverrides,
@@ -2801,7 +2812,9 @@ export const make = Effect.gen(function* () {
             summaryCache.set(key, yield* Clock.currentTimeMillis, summary);
           }
           return summary;
-        }).pipe(Effect.timeoutOption(MAX_USAGE_READ_DURATION_MS));
+        });
+        if (input.awaitRefresh) return yield* read;
+        const result = yield* read.pipe(Effect.timeoutOption(MAX_USAGE_READ_DURATION_MS));
         if (Option.isSome(result)) return result.value;
         if (resolvedDirs.length === 0) {
           return yield* new UsageReadError({

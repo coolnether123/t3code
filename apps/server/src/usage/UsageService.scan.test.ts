@@ -887,11 +887,16 @@ describe("incremental scan integration", () => {
           partial.sources.every((source) => source.message?.includes("response budget expired")),
         ).toBe(true);
 
-        // The import outlives the request that started it; the retry waits for
-        // the same import instead of reading the legacy cache again.
+        expect(partial.sources.every((source) => source.refreshing === true)).toBe(true);
+        const waiting = yield* Effect.forkChild(
+          service.readSummary({ ...input, awaitRefresh: true }),
+          { startImmediately: true },
+        );
+        yield* TestClock.adjust("13 seconds");
+        expect(waiting.pollUnsafe()).toBeUndefined();
         stallCacheLoad = false;
         yield* Deferred.succeed(releaseCacheLoad, undefined);
-        const retry = yield* service.readSummary(input);
+        const retry = yield* Fiber.join(waiting);
         expect(retry.sources.every((source) => source.status === "missing")).toBe(true);
         expect(cacheReads).toBe(1);
       }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
