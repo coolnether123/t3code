@@ -266,7 +266,6 @@ const decodeCodexBackgroundTerminalsListResponse = Schema.decodeUnknownEffect(
   CodexBackgroundTerminalsListResponse,
 );
 // Initialize normally answers in under a second; leave room for a slow first launch.
-const CODEX_INITIALIZE_TIMEOUT = "30 seconds";
 const CodexThreadSampleResponse = Schema.Struct({ text: Schema.NullOr(Schema.String) });
 const decodeCodexThreadSampleResponse = Schema.decodeUnknownEffect(CodexThreadSampleResponse);
 export const CODEX_PROMPT_SUGGESTION_PROMPT =
@@ -2022,6 +2021,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   const readMcpSession = (threadId: ThreadId | null) =>
     threadId === null ? Effect.undefined : mcpSessions.read(threadId);
   const { clientFactory, digest, fileSystem, idAllocator, serverConfig } = adapterOptions;
+  // A populated custom home can take minutes to open its local history database.
+  const initializeDeadline = adapterOptions.settings.homePath ? "4 minutes" : "30 seconds";
   const continuationRequests = adapterOptions.continuationRequests;
 
   return ProviderAdapter.ProviderAdapterV2.of({
@@ -2158,12 +2159,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 // session waits behind the permit. Failing the event stream retires
                 // the session, so the next turn spawns a fresh app-server.
                 Effect.timeoutOrElse({
-                  duration: CODEX_INITIALIZE_TIMEOUT,
+                  duration: initializeDeadline,
                   orElse: () => {
                     const error = new ProviderAdapter.ProviderAdapterEventStreamError({
                       driver: CODEX_PROVIDER,
                       providerSessionId: input.providerSessionId,
-                      cause: `Codex app-server did not answer initialize within ${CODEX_INITIALIZE_TIMEOUT}.`,
+                      cause: `Codex app-server did not answer initialize within ${initializeDeadline}.`,
                     });
                     return Ref.set(initializeTimeout, error).pipe(
                       Effect.andThen(Queue.fail(events, error)),
