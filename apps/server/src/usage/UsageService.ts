@@ -479,6 +479,11 @@ export class UsageService extends Context.Service<
   }
 >()("t3/usage/UsageService") {}
 
+type UsageSummaryReaderWithReportSnapshots = (
+  input: UsageSummaryInput,
+  rememberReport?: boolean,
+) => Effect.Effect<UsageSummary, UsageReadError>;
+
 const EMPTY_PRICING: UsagePricing = {
   status: "unavailable",
   source: LITELLM_RATES_URL,
@@ -607,13 +612,12 @@ export const make = Effect.gen(function* () {
   // reports a coverage gap instead of substituting a byte-based token count.
   const repeatedInputTokenizer = createPythonTiktokenTokenizer({ timeoutMs: 2_000 });
   const summaryCache = new UsageSummaryCache(SUMMARY_CACHE_TTL_MS, MAX_SUMMARY_CACHE_ENTRIES);
-  // Shares the result only while an identical scan is running. Completed
-  // provider-backed summaries are deliberately not retained because transcript
-  // changes must be visible to the next request.
+  const reportSnapshots = new UsageSummaryCache(SUMMARY_CACHE_TTL_MS, MAX_SUMMARY_CACHE_ENTRIES);
   const inFlightSummaries = new Map<
     string,
     {
       inputs: UsageSummaryInput[];
+      reportInputs: Map<string, UsageSummaryInput>;
       started: boolean;
       progress: UsageReadProgress;
       result: Deferred.Deferred<Exit.Exit<UsageSummary, UsageReadError>, never>;
@@ -1176,6 +1180,7 @@ export const make = Effect.gen(function* () {
       meta.scanCursor === undefined &&
       meta.scanSkippedLines === undefined &&
       meta.scanDiscardingLine !== true &&
+      (provider !== "codex" || meta.codexParserCurrent === true) &&
       (!filePath.endsWith(".jsonl.zst") ||
         (archiveFingerprint !== null && meta.prefixFingerprint === archiveFingerprint))
     ) {
@@ -1196,7 +1201,8 @@ export const make = Effect.gen(function* () {
     const cached = requestedStartByte > 0 ? scanStore.load(filePath) : undefined;
     const appendable =
       cached !== undefined &&
-      (provider !== "codex" || cached.codexState?.providerState !== undefined);
+      (provider !== "codex" ||
+        (meta?.codexParserCurrent === true && cached.codexState?.providerState !== undefined));
     const startByte = appendable ? requestedStartByte : 0;
     const parsed = yield* Effect.promise(() =>
       readTranscriptRecords(filePath, provider, {
@@ -1770,6 +1776,7 @@ export const make = Effect.gen(function* () {
             (provider !== "codex" || cached.codexParserCurrent === true);
           const resumePartial =
             cached !== undefined &&
+            (provider !== "codex" || cached.codexParserCurrent === true) &&
             cached.size === file.size &&
             cached.mtimeMs === file.mtimeMs &&
             cached.provider === provider &&
@@ -1985,6 +1992,7 @@ export const make = Effect.gen(function* () {
         if (!repeatedInputEnabled && mode === "indexed") {
           const held = transcriptIndexes.get(file.path);
           if (
+            file.warm &&
             held !== undefined &&
             held.size === file.size &&
             held.mtimeMs === file.mtimeMs &&
@@ -2176,7 +2184,8 @@ export const make = Effect.gen(function* () {
             cached.provider === provider &&
             cached.scanCursor === undefined &&
             cached.scanSkippedLines === undefined &&
-            cached.scanDiscardingLine === undefined
+            cached.scanDiscardingLine === undefined &&
+            (provider !== "codex" || cached.codexParserCurrent === true)
           );
         });
       if (shouldRefresh && scanCompleted) {
@@ -2539,8 +2548,8 @@ export const make = Effect.gen(function* () {
     } satisfies UsageSummary;
   });
 
-  const readSummary: UsageService["Service"]["readSummary"] = Effect.fn("UsageService.readSummary")(
-    function* (requested: UsageSummaryInput) {
+  const readSummary: UsageSummaryReaderWithReportSnapshots = Effect.fn("UsageService.readSummary")(
+    function* (requested: UsageSummaryInput, rememberReport = false) {
       const { modelFilter: requestedFilter, ...unfiltered } = requested;
       const modelFilter = canonicalModelFilter(requestedFilter);
       const input = modelFilter === undefined ? unfiltered : { ...unfiltered, modelFilter };
@@ -2603,6 +2612,16 @@ export const make = Effect.gen(function* () {
           yield* ensureCachedRates;
           const context = yield* resolveReadContext();
           resolvedDirs = context.dirs;
+          const key = repeatedAwareSummaryCacheKey(
+            input,
+            context.settings.usagePriceOverrides,
+            context.settings.usageModelAliases,
+          );
+          const reportKey = rememberReport ? encodeBatchKey([key, context.dirs]) : undefined;
+          if (!input.refresh && reportKey !== undefined) {
+            const snapshot = reportSnapshots.get(reportKey, yield* Clock.currentTimeMillis);
+            if (snapshot !== undefined) return snapshot;
+          }
           // Establish source identities before waiting for a scan so saved interval
           // calculations remain usable when this request reaches its deadline.
           const sources = yield* Effect.forEach(
@@ -2687,11 +2706,6 @@ export const make = Effect.gen(function* () {
             };
           }
 
-          const key = repeatedAwareSummaryCacheKey(
-            input,
-            context.settings.usagePriceOverrides,
-            context.settings.usageModelAliases,
-          );
           if (!input.refresh) {
             const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
             if (cached !== undefined) return cached;
@@ -2755,6 +2769,7 @@ export const make = Effect.gen(function* () {
           if (shared === undefined) {
             const batch = {
               inputs: [scanInput],
+              reportInputs: new Map(reportKey === undefined ? [] : [[reportKey, input]]),
               started: false,
               progress,
               result: Deferred.makeUnsafe<Exit.Exit<UsageSummary, UsageReadError>>(),
@@ -2788,6 +2803,16 @@ export const make = Effect.gen(function* () {
                     }),
                   ),
                 ),
+                // A report caller can time out while the shared scan is still running.
+                Effect.tap((summary) =>
+                  Clock.currentTimeMillis.pipe(
+                    Effect.map((now) => {
+                      for (const [key, input] of batch.reportInputs) {
+                        reportSnapshots.set(key, now, projectUsageRead(summary, input));
+                      }
+                    }),
+                  ),
+                ),
                 Effect.onExit((exit) =>
                   Effect.sync(() => {
                     if (inFlightSummaries.get(batchKey) === batch)
@@ -2800,6 +2825,7 @@ export const make = Effect.gen(function* () {
             );
           } else {
             if (!shared.started) shared.inputs.push(scanInput);
+            if (reportKey !== undefined) shared.reportInputs.set(reportKey, input);
             progress = shared.progress;
           }
           const exit = yield* Deferred.await(shared.result);
@@ -2981,7 +3007,7 @@ export const make = Effect.gen(function* () {
           ? { quotaHistoryOnly: true }
           : { includeQuotaHistory: true, quotaIntervals: input.quotaIntervals }),
     };
-    const summary = yield* readSummary(summaryInput);
+    const summary = yield* readSummary(summaryInput, input.mode !== "quota");
     const report = projectUsageReport(
       summary,
       input,

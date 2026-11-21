@@ -19,7 +19,7 @@ import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { HttpClient } from "effect/http";
-import { UsageDay, type UsageSummary } from "@t3tools/contracts";
+import { USAGE_CONTRACT_VERSION, UsageDay, type UsageSummary } from "@t3tools/contracts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { make } from "./UsageService.ts";
@@ -900,6 +900,81 @@ describe("incremental scan integration", () => {
         expect(retry.sources.every((source) => source.status === "missing")).toBe(true);
         expect(cacheReads).toBe(1);
       }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
+  );
+
+  it.effect("shares the finished scan across report views after the first caller times out", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const started = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      vi.mocked(readTranscriptRecords).mockImplementation(async (filePath) => {
+        started.resolve();
+        await release.promise;
+        return {
+          records: [
+            {
+              provider: "codex",
+              model: "gpt-6.2-sol",
+              timestampMs: Date.parse("2026-08-30T23:00:00Z"),
+              sessionId: "codex-worker-session",
+              totals: {
+                uncachedInputTokens: 10,
+                cachedInputTokens: 0,
+                cacheCreationTokens: 0,
+                outputTokens: 5,
+                reasoningTokens: 0,
+              },
+              reportedCostUsd: null,
+              dedupeKey: filePath,
+            },
+          ],
+          nextByte: files.find((file) => file.path === filePath)!.size,
+          discardedLines: 0,
+          discardingLine: false,
+          codexState: initialCodexScanState(),
+        };
+      });
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: (path) => (/[\\/]sessions$/.test(path) ? Effect.succeed(true) : fs.exists(path)),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const input = {
+        sinceDay: UsageDay.make("2026-08-30"),
+        untilDay: UsageDay.make("2026-08-30"),
+        timeZone: "UTC",
+        providers: ["codex"] as const,
+      };
+      const first = yield* service
+        .readReport({ ...input, mode: "overview" })
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => started.promise);
+      yield* TestClock.adjust("12 seconds");
+      const partial = yield* Fiber.join(first);
+      expect(partial.coverage.status).toBe("partial");
+      expect(partial.totals.records).toBe(0);
+
+      const waiting = yield* service
+        .readSummary({
+          ...input,
+          clientContractVersion: USAGE_CONTRACT_VERSION,
+          awaitRefresh: true,
+        })
+        .pipe(Effect.forkChild);
+      release.resolve();
+      const finished = yield* Fiber.join(waiting);
+      yield* TestClock.adjust("1 second");
+      const models = yield* service.readReport({ ...input, mode: "models" });
+      const overview = yield* service.readReport({ ...input, mode: "overview" });
+      expect(models.rows[0]?.totals.outputTokens).toBeGreaterThan(0);
+      expect(overview.totals.records).toBe(models.rows[0]?.records);
+      expect([models.readAt, overview.readAt]).toEqual([finished.readAt, finished.readAt]);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
   );
 
   it.effect("marks totals partial when transcript inventory reaches its response budget", () =>

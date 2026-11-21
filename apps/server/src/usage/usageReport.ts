@@ -47,7 +47,7 @@ export function makeUsageReportCalculation(
     formulaVersion: 1,
     costBasis: "apiEquivalent",
     costSemantics:
-      "USD-equivalent value at the selected public model rates; this is not a subscription charge.",
+      "USD-equivalent value at the selected public model rates. A record is unpriced when no model rate matches or the matching rate cannot price all of its tokens. Unpriced records are excluded from the dollar total.",
     cacheSavingsSemantics:
       "Full uncached input value minus the charged cache-read value for cacheable input tokens.",
     serviceTierPolicy:

@@ -46,6 +46,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { vi } from "vite-plus/test";
 import * as UsageService from "./UsageService.ts";
 import { UsageScanStore } from "./usageScanStore.ts";
+import { initialCodexScanState } from "./usageTranscripts.ts";
 
 const isUsageSummary = Schema.is(UsageSummarySchema);
 const isUsageReport = Schema.is(UsageReportSchema);
@@ -463,6 +464,105 @@ describe("UsageService", () => {
       const report = yield* service.readReport({ ...WINDOW, mode: "overview", refresh: false });
       assert.strictEqual(report.mode, "overview");
       assert.strictEqual(isUsageReport(report), true);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("rebuilds a stale Codex cache row and prices native worker usage", () =>
+    Effect.gen(function* () {
+      const { home, settings, transcript } = yield* setup;
+      const configBaseDir = NodePath.join(home, "usage-state");
+      const stateDir = NodePath.join(configBaseDir, "userdata");
+      const dir = NodePath.join(home, "codex", "sessions");
+      const rollout = NodePath.join(dir, "rollout.jsonl");
+      const nativeSessionId = "codex-worker-session";
+      const workerUsage = {
+        input_tokens: 14_322_122,
+        cached_input_tokens: 14_022_528,
+        output_tokens: 49_156,
+        total_tokens: 14_371_278,
+      };
+      const workerTranscript = [
+        { type: "session_meta", payload: { id: nativeSessionId } },
+        { type: "turn_context", payload: { model: "gpt-6.2-sol", turn_id: "worker-turn" } },
+        {
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              last_token_usage: workerUsage,
+              total_token_usage: workerUsage,
+            },
+          },
+        },
+      ]
+        .map((entry) => JSON.stringify({ timestamp: "2026-08-01T10:00:00Z", ...entry }))
+        .join("\n");
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(dir, { recursive: true });
+        await NodeFSP.mkdir(stateDir, { recursive: true });
+        await NodeFSP.writeFile(rollout, workerTranscript + "\n");
+        await NodeFSP.writeFile(transcript, claudeLine(1, 5));
+        const stats = await NodeFSP.stat(rollout);
+        const store = UsageScanStore.open(NodePath.join(stateDir, "usage-scan-cache.sqlite"));
+        try {
+          store.set(rollout, {
+            provider: "codex",
+            size: stats.size,
+            mtimeMs: stats.mtimeMs,
+            records: [],
+            codexState: { ...initialCodexScanState(), parserRevision: 1 },
+          });
+        } finally {
+          store.close();
+        }
+      });
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-worker-report",
+            home,
+            settings,
+            configBaseDir,
+            ratesDocument: {
+              "gpt-6.2-sol": {
+                input_cost_per_token: 2e-6,
+                cache_read_input_token_cost: 1e-7,
+                output_cost_per_token: 1e-5,
+              },
+              "claude-fable-5": { input_cost_per_token: 1e-5, output_cost_per_token: 5e-5 },
+            },
+          }),
+        ),
+      );
+      yield* service.refreshRates;
+      const overview = yield* service.readReport({ ...WINDOW, mode: "overview" });
+      const models = yield* service.readReport({ ...WINDOW, mode: "models" });
+      const runs = yield* service.readReport({
+        ...WINDOW,
+        mode: "runs",
+        providers: ["codex"],
+        runIds: [nativeSessionId],
+      });
+      assert.strictEqual(overview.mode, "overview");
+      assert.strictEqual(models.mode, "models");
+      assert.strictEqual(runs.mode, "runs");
+      const codex = models.rows.find((row) => row.model === "gpt-6.2-sol");
+      assert.closeTo(codex?.costUsd ?? -1, 2.4930008, 1e-12);
+      assert.strictEqual(models.rows.length, 2);
+      assert.strictEqual(
+        overview.totals.records,
+        models.rows.reduce((n, row) => n + row.records, 0),
+      );
+      assert.closeTo(
+        overview.totals.costUsd,
+        models.rows.reduce((n, row) => n + row.costUsd, 0),
+        1e-12,
+      );
+      assert.strictEqual(runs.runs[0]?.runId, nativeSessionId);
+      assert.strictEqual(runs.runs[0]?.totals.uncachedInputTokens, 299_594);
+      assert.strictEqual(runs.runs[0]?.totals.cachedInputTokens, 14_022_528);
+      assert.strictEqual(runs.runs[0]?.totals.outputTokens, 49_156);
+      assert.strictEqual(runs.runs[0]?.costUsd, codex?.costUsd);
     }).pipe(Effect.scoped),
   );
 
