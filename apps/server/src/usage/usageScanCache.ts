@@ -87,9 +87,7 @@ export function planTranscriptScan(options: TranscriptScanPlanOptions): Transcri
     options.nowMs - options.lastRecentScanAtMs >= options.incrementalScanTtlMs;
   const scanStartMs = hasCurrentCoverage
     ? Math.max(options.windowStartMs, options.nowMs - options.recentTranscriptWindowMs)
-    : coverageIncludesWindow && options.coverage !== undefined
-      ? options.coverage.sinceMs
-      : options.windowStartMs;
+    : options.windowStartMs;
 
   return { hasCurrentCoverage, shouldRefresh, scanStartMs };
 }

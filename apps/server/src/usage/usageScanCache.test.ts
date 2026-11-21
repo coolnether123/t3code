@@ -563,7 +563,7 @@ describe("planTranscriptScan", () => {
     ).toBe(false);
   });
 
-  it("audits the full covered range after coverage expires", () => {
+  it("audits the requested range when wider coverage expires", () => {
     expect(
       planTranscriptScan({
         ...common,
@@ -577,7 +577,7 @@ describe("planTranscriptScan", () => {
     ).toEqual({
       hasCurrentCoverage: false,
       shouldRefresh: true,
-      scanStartMs: 50_000,
+      scanStartMs: common.windowStartMs,
     });
   });
 
