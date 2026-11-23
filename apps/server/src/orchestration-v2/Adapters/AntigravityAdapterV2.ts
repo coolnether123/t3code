@@ -90,6 +90,8 @@ export interface AntigravityAdapterV2Options {
   readonly withProcess: AntigravityAuth["withProcess"];
   readonly defaultModel: Effect.Effect<string | undefined>;
   readonly supportsNativeGoals?: Effect.Effect<boolean>;
+  readonly additionalMcpServers?: AcpAdapterV2Flavor["additionalMcpServers"];
+  readonly quotaResetAt?: (model: string) => Effect.Effect<string | undefined>;
   readonly onSessionStarted?: (
     started: AcpSessionRuntime.AcpSessionRuntimeStartResult,
     cwd: string,
@@ -290,6 +292,9 @@ export function makeAntigravityAcpAdapterFlavor(
     normalizeToolCall: normalizeAntigravityToolCall,
     extractSubagentUpdate: extractAntigravitySubagentUpdate,
     supportsImagePrompts: true,
+    ...(options.additionalMcpServers === undefined
+      ? {}
+      : { additionalMcpServers: options.additionalMcpServers }),
     // ACP 1.3.0 treats /compact as ordinary model input.
     supportsCompaction: false,
     requiresSignIn: isAntigravitySignInRequiredError,
@@ -301,8 +306,26 @@ export function makeAntigravityAcpAdapterFlavor(
     ...(profileDirectory === undefined
       ? {}
       : {
-          watchPromptOutcome: (sessionId: string) =>
-            watchAntigravityPromptOutcome(profileDirectory, sessionId),
+          watchPromptOutcome: (sessionId: string, model: string) =>
+            watchAntigravityPromptOutcome(profileDirectory, sessionId).pipe(
+              Effect.map(
+                (check) => (result) =>
+                  Effect.gen(function* () {
+                    const outcome = yield* check(result);
+                    if (
+                      outcome?.failure.class !== "usage_limit" ||
+                      outcome.failure.resetAt !== null ||
+                      options.quotaResetAt === undefined
+                    ) {
+                      return outcome;
+                    }
+                    const resetAt = yield* options.quotaResetAt(model);
+                    return resetAt === undefined
+                      ? outcome
+                      : { ...outcome, failure: { ...outcome.failure, resetAt } };
+                  }),
+              ),
+            ),
         }),
   };
 }

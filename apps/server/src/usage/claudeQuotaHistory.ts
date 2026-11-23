@@ -4,9 +4,11 @@ import * as DateTime from "effect/DateTime";
 import type {
   ServerProviderUsageWindow,
   UsageProviderQuotaHistory,
+  UsageAntigravityQuotaHistory,
   UsageQuotaSample,
 } from "@t3tools/contracts";
 
+export const ANTIGRAVITY_QUOTA_HISTORY_FILE = "usage-antigravity-quota-history.json";
 export const CLAUDE_QUOTA_HISTORY_FILE = "usage-claude-quota-history.json";
 const RETENTION_MS = 120 * 24 * 60 * 60 * 1000;
 const MAX_SAMPLES_PER_WINDOW = 12_000;
@@ -145,7 +147,15 @@ const iso = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
 /** The summary shape: one history per window, in session-then-weekly order. */
 export function claudeQuotaHistories(
   document: ClaudeQuotaHistoryDocument,
-): readonly UsageProviderQuotaHistory[] {
+): readonly UsageProviderQuotaHistory[];
+export function claudeQuotaHistories(
+  document: ClaudeQuotaHistoryDocument,
+  provider: "antigravity",
+): readonly UsageAntigravityQuotaHistory[];
+export function claudeQuotaHistories(
+  document: ClaudeQuotaHistoryDocument,
+  provider: "claude" | "antigravity" = "claude",
+): readonly (UsageProviderQuotaHistory | UsageAntigravityQuotaHistory)[] {
   const order = { session: 0, weekly: 1, monthly: 2, other: 3 } as const;
   const entries = Object.entries(document.windows).sort(
     ([leftId, left], [rightId, right]) =>
@@ -154,6 +164,7 @@ export function claudeQuotaHistories(
   const checkedAt =
     document.checkedAtMs === undefined ? {} : { checkedAt: iso(document.checkedAtMs) };
   if (entries.length === 0) {
+    if (provider === "antigravity") return [];
     return [
       {
         provider: "claude",
@@ -169,7 +180,7 @@ export function claudeQuotaHistories(
     ];
   }
   return entries.map(([windowId, window]) => ({
-    provider: "claude" as const,
+    provider,
     windowId,
     label: window.label,
     kind: window.kind,

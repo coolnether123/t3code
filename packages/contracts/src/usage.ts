@@ -184,8 +184,7 @@ export type UsageQuotaHistory = typeof UsageQuotaHistory.Type;
  * weekly limit, such as Claude's session and weekly windows. Samples use the
  * Codex shape so cycle and pace math apply unchanged.
  */
-export const UsageProviderQuotaHistory = Schema.Struct({
-  provider: Schema.Literals(["claude"]),
+const UsageProviderQuotaHistoryFields = {
   windowId: TrimmedNonEmptyString,
   label: Schema.String,
   kind: Schema.Literals(["session", "weekly", "monthly", "other"]),
@@ -195,7 +194,16 @@ export const UsageProviderQuotaHistory = Schema.Struct({
   /** Last reading attempt, successful or not. */
   checkedAt: Schema.optional(Schema.String),
   samples: Schema.Array(UsageQuotaSample),
+};
+export const UsageProviderQuotaHistory = Schema.Struct({
+  provider: Schema.Literal("claude"),
+  ...UsageProviderQuotaHistoryFields,
 });
+export const UsageAntigravityQuotaHistory = Schema.Struct({
+  provider: Schema.Literal("antigravity"),
+  ...UsageProviderQuotaHistoryFields,
+});
+export type UsageAntigravityQuotaHistory = typeof UsageAntigravityQuotaHistory.Type;
 export type UsageProviderQuotaHistory = typeof UsageProviderQuotaHistory.Type;
 
 /** Cost is measured after the first observation and through the last one. */
@@ -292,6 +300,7 @@ export const UsageSummaryInput = Schema.Struct({
   /** Retain native IDs in bucket keys. Defaults to model-level aggregation. */
   groupBy: Schema.optional(UsageAttributionGroup),
   includeQuotaHistory: Schema.optional(Schema.Boolean),
+  includeAntigravityQuota: Schema.optional(Schema.Boolean),
   /** Read saved observations without scanning transcripts or fetching prices. */
   quotaHistoryOnly: Schema.optional(Schema.Boolean),
   quotaIntervals: Schema.optional(Schema.Array(UsageQuotaInterval).check(Schema.isMaxLength(64))),
@@ -472,6 +481,7 @@ export const UsageSummary = Schema.Struct({
   scanDurationMs: NonNegativeInt,
   quotaHistory: Schema.optional(UsageQuotaHistory),
   providerQuotaHistories: Schema.optional(Schema.Array(UsageProviderQuotaHistory)),
+  antigravityQuota: Schema.optional(Schema.Array(UsageAntigravityQuotaHistory)),
   quotaCosts: Schema.optional(Schema.Array(UsageQuotaCost)),
   quotaCostSnapshots: Schema.optional(Schema.Array(UsageQuotaCostSnapshot)),
   repeatedInput: Schema.optional(UsageRepeatedInputSummary),
@@ -773,6 +783,7 @@ export const UsageReportQuota = Schema.Struct({
   ...UsageReportEnvelope,
   mode: Schema.Literal("quota"),
   quotaHistory: UsageQuotaHistory,
+  antigravityQuota: Schema.optional(Schema.Array(UsageAntigravityQuotaHistory)),
   samplesTruncated: Schema.Boolean,
   totalSamples: NonNegativeInt,
   costs: Schema.Array(UsageReportQuotaCost),

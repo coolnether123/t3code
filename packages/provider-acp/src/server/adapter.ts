@@ -365,6 +365,7 @@ export interface AcpAdapterV2Flavor {
    */
   readonly watchPromptOutcome?: (
     sessionId: string,
+    model: string,
   ) => Effect.Effect<
     (result: EffectAcpSchema.PromptResponse) => Effect.Effect<AcpPromptOutcomeFailure | undefined>
   >;
@@ -384,6 +385,7 @@ export interface AcpAdapterV2Flavor {
     EffectAcpSchema.InitializeRequest["clientCapabilities"]
   >["_meta"];
   readonly mcpOverHttp?: boolean;
+  readonly additionalMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   /** The agent has no tool search of its own, so T3 lists optional tools on demand. */
   readonly deferMcpTools?: boolean;
   readonly normalizeSessionUpdate?: (
@@ -945,9 +947,17 @@ function acpMcpContext(
   self: SelfInvocation,
   mcpOverHttp: boolean | undefined,
   deferMcpTools: boolean | undefined,
+  configuredServers: ReadonlyArray<EffectAcpSchema.McpServer> = [],
 ): AcpMcpContext {
+  const servers = [
+    ...new Map(
+      configuredServers
+        .filter((server) => server.name !== "t3-code")
+        .map((server) => [server.name, server]),
+    ).values(),
+  ];
   if (session === undefined) {
-    return { servers: [], acpServers: [], httpServers: [] };
+    return { servers, acpServers: [], httpServers: [] };
   }
   // codex-acp 1.2.0 and pi-acp drop injected HTTP servers, so HTTP is opt-in per flavor.
   return {
@@ -962,8 +972,9 @@ function acpMcpContext(
           { name: "T3_ACP_MCP_AUTHORIZATION", value: session.authorizationHeader },
         ],
       },
+      ...servers,
     ],
-    acpServers: [{ type: "acp", name: "t3-code", serverId: "t3-code" }],
+    acpServers: [{ type: "acp", name: "t3-code", serverId: "t3-code" }, ...servers],
     httpServers:
       mcpOverHttp === true
         ? [
@@ -978,6 +989,7 @@ function acpMcpContext(
                   : []),
               ],
             },
+            ...servers,
           ]
         : [],
     endpoint: session.endpoint,
@@ -1868,12 +1880,26 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
   const { flavor, selfInvocation: self } = options;
   const readMcpContext = (threadId: ThreadId | null) =>
     threadId === null
-      ? Effect.succeed(acpMcpContext(undefined, self, flavor.mcpOverHttp, flavor.deferMcpTools))
+      ? Effect.succeed(
+          acpMcpContext(
+            undefined,
+            self,
+            flavor.mcpOverHttp,
+            flavor.deferMcpTools,
+            flavor.additionalMcpServers,
+          ),
+        )
       : mcpSessions
           .read(threadId)
           .pipe(
             Effect.map((session) =>
-              acpMcpContext(session, self, flavor.mcpOverHttp, flavor.deferMcpTools),
+              acpMcpContext(
+                session,
+                self,
+                flavor.mcpOverHttp,
+                flavor.deferMcpTools,
+                flavor.additionalMcpServers,
+              ),
             ),
           );
   const driver = flavor.driver;
@@ -9009,7 +9035,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             const checkPromptOutcome =
               flavor.watchPromptOutcome === undefined
                 ? undefined
-                : yield* flavor.watchPromptOutcome(requestedSessionId);
+                : yield* flavor.watchPromptOutcome(
+                    requestedSessionId,
+                    turnInput.modelSelection.model,
+                  );
             const promptGeneration = yield* Ref.get(runtimeCallbackGeneration);
             const promptOptions = {
               dispatched: context.promptDispatched,

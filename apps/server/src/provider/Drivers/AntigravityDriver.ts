@@ -1,11 +1,14 @@
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import {
+  ANTIGRAVITY_DEFAULT_MODEL,
   AntigravitySettings,
   ProviderDriverKind,
   ProviderSetupError,
+  type ServerProviderUsageLimits,
   settingsSecretLiteral,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import {
   NodeRuntimeUnavailableError,
@@ -13,6 +16,7 @@ import {
 } from "@t3tools/shared/nodeRuntime";
 import * as Digest from "effect/crypto/Digest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -22,6 +26,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -80,6 +85,17 @@ import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/
 import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
 import { discoverAntigravitySkills, resolveAntigravityUserHome } from "./AntigravitySkills.ts";
 
+import {
+  ANTIGRAVITY_QUOTA_HISTORY_FILE,
+  appendClaudeQuotaReadings,
+  decodeClaudeQuotaHistory,
+  emptyClaudeQuotaHistory,
+} from "../../usage/claudeQuotaHistory.ts";
+
+const historyWriteLock = Semaphore.makeUnsafe(1);
+const quotaHistoryJson = Schema.fromJsonString(Schema.Unknown);
+const decodeQuotaHistoryJson = Schema.decodeUnknownEffect(quotaHistoryJson);
+const encodeQuotaHistoryJson = Schema.encodeEffect(quotaHistoryJson);
 const DRIVER = ProviderDriverKind.make("antigravity");
 const decodeSettings = Schema.decodeSync(AntigravitySettings);
 const isNodeRuntimeUnavailableError = Schema.is(NodeRuntimeUnavailableError);
@@ -537,9 +553,53 @@ export const AntigravityDriver: ProviderDriver<
       };
     });
 
+    const refreshCatalogSession = Effect.fn("AntigravityDriver.refreshCatalogSession")(function* (
+      publish:
+        | ((
+            started: AcpSessionRuntime.AcpSessionRuntimeStartResult,
+            runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
+          ) => Effect.Effect<void>)
+        | undefined,
+    ) {
+      const processScope = yield* Scope.make();
+      yield* Effect.addFinalizer((exit) => Scope.close(processScope, exit));
+      yield* authFlow
+        .withProcess(
+          Scope.close(processScope, Exit.void),
+          Effect.gen(function* () {
+            const runtime = yield* makeDisposableRuntime({});
+            const started = yield* runtime.start();
+            if (publish !== undefined) yield* publish(started, runtime);
+          }),
+        )
+        .pipe(Effect.provideService(Scope.Scope, processScope));
+    }, Effect.scoped);
+    const historyPath = path.join(host.paths.stateDir, ANTIGRAVITY_QUOTA_HISTORY_FILE);
+    const saveQuota = Effect.fn("AntigravityDriver.saveQuota")(
+      function* (limits: ServerProviderUsageLimits) {
+        if (limits.windows.length === 0) return;
+        const prior = yield* fileSystem.readFileString(historyPath).pipe(
+          Effect.flatMap(decodeQuotaHistoryJson),
+          Effect.map(decodeClaudeQuotaHistory),
+          Effect.orElseSucceed(() => emptyClaudeQuotaHistory),
+        );
+        const next = appendClaudeQuotaReadings(
+          prior,
+          limits.windows.map((window) => ({ ...window, id: instanceId + "/" + window.id })),
+          Date.parse(limits.checkedAt),
+        );
+        const contents = yield* encodeQuotaHistoryJson(next);
+        yield* writeFileStringAtomically({ filePath: historyPath, contents });
+      },
+      historyWriteLock.withPermits(1),
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+      Effect.ignoreCause({ log: true }),
+    );
     const usage = yield* makeAntigravityUsageProbe({
       profileDirectory,
       authMethod: auth.authMethod,
+      refreshSignIn: refreshCatalogSession(undefined).pipe(Effect.ignore),
     }).pipe(
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
@@ -550,7 +610,7 @@ export const AntigravityDriver: ProviderDriver<
       environment: processEnvironment,
       stampIdentity: classifyModels,
       probe,
-      probeUsage: usage.probe,
+      probeUsage: usage.probe.pipe(Effect.tap(saveQuota)),
       clearUsage: usage.clear,
       auth: { type: auth.authMethod, label: antigravityAuthLabel(auth.authMethod) },
       supportsTextGeneration: isAntigravityTextGenerationAvailable(profileDirectory).pipe(
@@ -576,6 +636,24 @@ export const AntigravityDriver: ProviderDriver<
       makeRuntime,
       withProcess: authFlow.withProcess,
       defaultModel,
+      ...(settings.mcpServers === undefined ? {} : { additionalMcpServers: settings.mcpServers }),
+      quotaResetAt: Effect.fn("AntigravityDriver.quotaResetAt")(function* (model: string) {
+        const modelId = model === ANTIGRAVITY_DEFAULT_MODEL ? yield* defaultModel : model;
+        const { usageLimits } = yield* provider.snapshot.getSnapshot;
+        const now = yield* Clock.currentTimeMillis;
+        return usageLimits?.windows
+          .filter(
+            (window) =>
+              (window.id === "model:" + modelId + ":quota" ||
+                window.id === "model:" + modelId + ":weekly") &&
+              window.usedPercent === 100 &&
+              window.resetsAt !== undefined &&
+              Date.parse(window.resetsAt) > now,
+          )
+          .flatMap((window) => (window.resetsAt === undefined ? [] : [window.resetsAt]))
+          .toSorted()
+          .at(-1);
+      }),
       supportsNativeGoals: provider.snapshot.getSnapshot.pipe(
         Effect.map(
           (snapshot) => snapshot.slashCommands?.some((command) => command.name === "goal") === true,
@@ -612,20 +690,8 @@ export const AntigravityDriver: ProviderDriver<
 
     const refreshModels = Effect.fn("AntigravityDriver.refreshModels")(
       function* () {
-        const processScope = yield* Scope.make();
-        yield* Effect.addFinalizer((exit) => Scope.close(processScope, exit));
-        yield* authFlow
-          .withProcess(
-            Scope.close(processScope, Exit.void),
-            Effect.gen(function* () {
-              const runtime = yield* makeDisposableRuntime({});
-              const started = yield* runtime.start();
-              yield* publishCatalog(started, runtime);
-            }),
-          )
-          .pipe(Effect.provideService(Scope.Scope, processScope));
+        yield* refreshCatalogSession(publishCatalog);
       },
-      Effect.scoped,
       Effect.timeoutOrElse({
         duration: "90 seconds",
         orElse: () =>

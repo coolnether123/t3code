@@ -1503,8 +1503,10 @@ describe("AntigravityAdapterV2 session system prompt", () => {
         type RuntimeService = AcpSessionRuntime.AcpSessionRuntime["Service"];
         const promptReceived = yield* Deferred.make<Parameters<RuntimeService["prompt"]>[0]>();
         const instanceId = ProviderInstanceId.make("antigravity-system-prompt-test");
+        const configuredServer = { name: "example", command: "node", args: ["mcp.mjs"], env: [] };
         const adapter = yield* makeAntigravityAdapterV2({
           instanceId,
+          additionalMcpServers: [configuredServer],
           selfInvocation: yield* resolveSelfInvocation(),
           makeRuntime: (input) =>
             makeAntigravityAcpRuntime({
@@ -1601,8 +1603,15 @@ describe("AntigravityAdapterV2 session system prompt", () => {
         const sessionNew = (yield* fileSystem.readFileString(requestLog))
           .trim()
           .split("\n")
-          .map((line) => JSON.parse(line) as { method?: string; params?: { _meta?: unknown } })
+          .map(
+            (line) =>
+              JSON.parse(line) as {
+                method?: string;
+                params?: { _meta?: unknown; mcpServers?: unknown[] };
+              },
+          )
           .find((request) => request.method === "session/new");
+        assert.deepInclude(sessionNew?.params?.mcpServers ?? [], configuredServer);
         const append = JSON.stringify(sessionNew?.params?._meta ?? null);
         // Identity stays per turn either way.
         assert.include(sent, "through the Antigravity harness, as gemini-test-low");

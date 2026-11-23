@@ -128,6 +128,7 @@ import {
   type TranscriptUsageIndex,
 } from "./usageRecordIndex.ts";
 import {
+  ANTIGRAVITY_QUOTA_HISTORY_FILE,
   CLAUDE_QUOTA_HISTORY_FILE,
   claudeQuotaHistories,
   decodeClaudeQuotaHistory,
@@ -652,6 +653,19 @@ export const make = Effect.gen(function* () {
   /** The pre-SQLite cache. Imported once, then kept beside the store as a backup. */
   const legacyScanCachePath = path.join(config.stateDir, "usage-scan-cache.json");
   const claudeQuotaHistoryPath = path.join(config.stateDir, CLAUDE_QUOTA_HISTORY_FILE);
+  const antigravityQuotaHistoryPath = path.join(config.stateDir, ANTIGRAVITY_QUOTA_HISTORY_FILE);
+  const readAntigravityQuota = fileSystem.readFileString(antigravityQuotaHistoryPath).pipe(
+    Effect.flatMap((text) => decodeScanCacheFile(text)),
+    Effect.map(decodeClaudeQuotaHistory),
+    Effect.orElseSucceed(() => emptyClaudeQuotaHistory),
+    Effect.map((history) => claudeQuotaHistories(history, "antigravity")),
+    Effect.map((histories) =>
+      histories.map((history) => ({
+        ...history,
+        samples: history.samples.slice(-1),
+      })),
+    ),
+  );
   // Parsed transcript records live in SQLite; only a small per-file index is
   // resident. See usageScanStore for why the whole-document cache was retired.
   const scanStore = UsageScanStore.open(path.join(config.stateDir, "usage-scan-cache.sqlite"));
@@ -1369,8 +1383,9 @@ export const make = Effect.gen(function* () {
         ? (progress?.providerQuotaHistories ??
           (yield* fileSystem.readFileString(claudeQuotaHistoryPath).pipe(
             Effect.flatMap((text) => decodeScanCacheFile(text)),
-            Effect.map((document) => claudeQuotaHistories(decodeClaudeQuotaHistory(document))),
-            Effect.orElseSucceed(() => claudeQuotaHistories(emptyClaudeQuotaHistory)),
+            Effect.map(decodeClaudeQuotaHistory),
+            Effect.orElseSucceed(() => emptyClaudeQuotaHistory),
+            Effect.map((document) => claudeQuotaHistories(document)),
           )))
         : undefined;
     if (progress !== undefined) {
@@ -1399,6 +1414,7 @@ export const make = Effect.gen(function* () {
         },
         scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
         quotaHistory,
+        ...(input.includeAntigravityQuota ? { antigravityQuota: yield* readAntigravityQuota } : {}),
         ...(providerQuotaHistories === undefined ? {} : { providerQuotaHistories }),
         quotaCostSnapshots:
           input.quotaIntervals === undefined
@@ -2431,6 +2447,7 @@ export const make = Effect.gen(function* () {
       pricing: scanPricing,
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
       ...(repeatedInput === undefined ? {} : { repeatedInput }),
+      ...(input.includeAntigravityQuota ? { antigravityQuota: yield* readAntigravityQuota } : {}),
       ...(quotaHistory === undefined ? {} : { quotaHistory }),
       ...(providerQuotaHistories === undefined ? {} : { providerQuotaHistories }),
       ...(input.quotaIntervals === undefined ? {} : { quotaCosts }),
@@ -3004,8 +3021,12 @@ export const make = Effect.gen(function* () {
       ...(input.mode !== "quota"
         ? {}
         : input.quotaIntervals === undefined
-          ? { quotaHistoryOnly: true }
-          : { includeQuotaHistory: true, quotaIntervals: input.quotaIntervals }),
+          ? { quotaHistoryOnly: true, includeAntigravityQuota: true }
+          : {
+              includeQuotaHistory: true,
+              includeAntigravityQuota: true,
+              quotaIntervals: input.quotaIntervals,
+            }),
     };
     const summary = yield* readSummary(summaryInput, input.mode !== "quota");
     const report = projectUsageReport(

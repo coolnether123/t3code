@@ -865,6 +865,16 @@ export type AntigravityAuthMethod = typeof AntigravityAuthMethod.Type;
 
 export const AntigravitySettings = makeProviderSettingsSchema(
   {
+    mcpServers: Schema.optional(
+      Schema.Array(
+        Schema.Struct({
+          name: TrimmedNonEmptyString,
+          command: TrimmedNonEmptyString,
+          args: Schema.Array(Schema.String),
+          env: Schema.Array(Schema.Struct({ name: TrimmedNonEmptyString, value: Schema.String })),
+        }),
+      ).pipe(Schema.annotateKey({ providerSettingsForm: { hidden: true } })),
+    ),
     enabled: Schema.Boolean.pipe(
       Schema.withDecodingDefault(Effect.succeed(false)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),

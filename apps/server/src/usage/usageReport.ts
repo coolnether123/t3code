@@ -603,6 +603,9 @@ export function projectUsageReport(
           ...history,
           samples: samples.slice(-limit),
         },
+        ...(summary.antigravityQuota === undefined
+          ? {}
+          : { antigravityQuota: summary.antigravityQuota }),
         samplesTruncated: samples.length > limit,
         totalSamples: samples.length,
         costs: costs.slice(-limit),
