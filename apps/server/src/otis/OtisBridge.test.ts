@@ -195,6 +195,47 @@ it.effect(
     }),
 );
 
+it.effect("reads the local fleet without granting actions or transcript access", () =>
+  Effect.gen(function* () {
+    const { fixture } = yield* producerFixture;
+    const tree = feed();
+    const waiting = feed();
+    const calls: string[] = [];
+    const bridge = yield* OtisBridge.make({
+      localReadOrigin: "http://127.0.0.1:5197",
+      reconnect: Effect.never,
+      fetch: async (url, init) => {
+        const path = new URL(String(url)).pathname;
+        calls.push(path);
+        const headers = new Headers(init?.headers);
+        expect(headers.get("x-otis-actor")).toBe("user:local");
+        expect(headers.has("authorization")).toBe(false);
+        if (path.endsWith("/tree-stream")) return tree.response;
+        if (path.endsWith("/waiting-stream")) return waiting.response;
+        if (path.endsWith("/tree-read")) return Response.json({ nodes: [], next: null });
+        throw Error("Unexpected route");
+      },
+    });
+    expect(yield* bridge.read({ parent: "lane:otis-1", settled: true })).toEqual({
+      nodes: [],
+      next: null,
+    });
+    const client = yield* connect(bridge);
+    expect((yield* client.next).type).toBe("unavailable");
+    tree.line(fixture[0]!);
+    expect((yield* client.next).type).toBe("snapshot");
+    const action = yield* Effect.flip(
+      bridge.act({ type: "seen", nodeId: "run", requestId: "one" }),
+    );
+    const tail = yield* Effect.flip(bridge.tail({ nodeId: "run" }));
+    expect(action.reason).toBe("unconfigured");
+    expect(tail.reason).toBe("unconfigured");
+    expect(calls.every((path) => /\/(tree-stream|waiting-stream|tree-read)$/.test(path))).toBe(
+      true,
+    );
+  }),
+);
+
 it.effect("keeps the bearer on loopback and separates read from operate grants", () =>
   Effect.gen(function* () {
     for (const origin of [

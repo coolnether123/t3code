@@ -12,12 +12,17 @@ import {
   type OtisTailInput,
 } from "@t3tools/contracts";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as ServerConfig from "../config.ts";
 
 interface Bridge {
   readonly subscribe: Stream.Stream<OtisFleetEvent>;
@@ -63,14 +68,18 @@ const unreachable = () => new OtisRpcError({ reason: "unavailable" });
 export const make = Effect.fn("OtisBridge.make")(function* (options: {
   readonly origin?: string | undefined;
   readonly token?: string | undefined;
+  readonly localReadOrigin?: string | undefined;
   readonly fetch?: typeof fetch;
   readonly reconnect: Effect.Effect<void>;
 }) {
-  const origin = configuredOrigin(options.origin);
-  if (!origin || !options.token) return yield* OtisBridge;
+  const localRead = options.origin === undefined && options.localReadOrigin !== undefined;
+  const origin = configuredOrigin(options.origin ?? options.localReadOrigin);
+  if (!origin || (!localRead && !options.token)) return yield* OtisBridge;
   const fetchImpl = options.fetch ?? (yield* FetchHttpClient.Fetch);
   const encodeBody = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
-  const headers = { Authorization: `Bearer ${options.token}`, "Content-Type": "application/json" };
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (localRead) headers.set("X-Otis-Actor", "user:local");
+  else headers.set("Authorization", `Bearer ${options.token}`);
   const request = Effect.fn("OtisBridge.request")(function* (path: string, body?: unknown) {
     const encoded =
       body === undefined
@@ -213,10 +222,12 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
     });
   });
   const act = Effect.fn("OtisBridge.act")(function* (input: OtisAction) {
+    if (localRead) return yield* unconfigured;
     const path = input.type === "child.start" ? "children" : "nodes/act";
     return yield* decodeAction(yield* post(path, input)).pipe(Effect.mapError(invalidResponse));
   });
   const tail = Effect.fn("OtisBridge.tail")(function* ({ nodeId, ...page }: OtisTailInput) {
+    if (localRead) return yield* unconfigured;
     const raw = yield* post(`nodes/${encodeURIComponent(nodeId)}/tail`, page);
     const result = yield* decodeTail(raw).pipe(Effect.mapError(invalidResponse));
     if (result.nodeId !== nodeId) return yield* invalidResponse();
@@ -231,9 +242,27 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
 
 export const layer = Layer.effect(
   OtisBridge,
-  make({
-    origin: process.env.T3_OTIS_ORIGIN,
-    token: process.env.T3_OTIS_TOKEN,
-    reconnect: Effect.sleep("2 seconds"),
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const localReadOrigin = yield* fs
+      .readFileString(path.join(config.baseDir, "otis-fleet-origin"))
+      .pipe(
+        Effect.map((value) => value.trim()),
+        Effect.orElseSucceed(() => undefined),
+      );
+    return yield* make({
+      origin: yield* Config.option(Config.String("T3_OTIS_ORIGIN")).pipe(
+        Effect.map(Option.getOrUndefined),
+        Effect.orElseSucceed(() => undefined),
+      ),
+      token: yield* Config.option(Config.String("T3_OTIS_TOKEN")).pipe(
+        Effect.map(Option.getOrUndefined),
+        Effect.orElseSucceed(() => undefined),
+      ),
+      localReadOrigin,
+      reconnect: Effect.sleep("2 seconds"),
+    });
   }),
 );
