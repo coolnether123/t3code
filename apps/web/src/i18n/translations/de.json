@@ -12105,5 +12105,21 @@
   "27d76249d09eb69f": "Review-Leitfaden bereit",
   "faa3bb26abb39c93": "Review-Leitfaden fehlgeschlagen",
   "b7df38b7d8792d78": "Leitfaden öffnen",
-  "9e91e9a77b664e4e": "Review-Leitfaden konnte nicht gestartet werden"
+  "9e91e9a77b664e4e": "Review-Leitfaden konnte nicht gestartet werden",
+  "aea3174865de0aac": "Abgeschlossene Chats werden geladen…",
+  "a3fe1dd63892577d": "Abgeschlossene Chats konnten nicht geladen werden. Öffne den Abschnitt erneut.",
+  "3aa6e4672de2d638": "Otis-Flotte",
+  "d9232238bf1e691c": "Zurück von {title}",
+  "e4dc84ad63135a41": "{tokens} heute",
+  "34f742896cfef4a4": "Chat öffnen",
+  "fe120bc687c8cde6": "Noch keine Einträge in der Flotte.",
+  "3955db21d2d8175b": "Weitere Chats · {count}",
+  "90ece2dcecb155b6": "Otis-Baum nicht verfügbar. Alle Chats werden angezeigt.",
+  "6dc00cff49f927ca": "Zurück zur Otis-Flotte",
+  "d25661576338fcf0": "Braucht dich",
+  "e197c4963bacc746": "{count} aktiv",
+  "8a9f50011cb2661a": "{count} brauchen dich",
+  "4d5bf65f7b3a7e59": "{count} brauchen dich",
+  "27e562fbab02e4f7": "{title} einklappen",
+  "56b72996012e60d8": "{title} ausklappen"
 }

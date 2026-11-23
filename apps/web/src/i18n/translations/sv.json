@@ -12112,5 +12112,21 @@
   "27d76249d09eb69f": "Granskningsguiden är klar",
   "faa3bb26abb39c93": "Granskningsguiden misslyckades",
   "b7df38b7d8792d78": "Öppna guiden",
-  "9e91e9a77b664e4e": "Kunde inte starta en granskningsguide"
+  "9e91e9a77b664e4e": "Kunde inte starta en granskningsguide",
+  "aea3174865de0aac": "Läser in avslutade chattar…",
+  "a3fe1dd63892577d": "Det gick inte att läsa in avslutade chattar. Öppna avsnittet igen.",
+  "3aa6e4672de2d638": "Otis-flottan",
+  "d9232238bf1e691c": "Tillbaka från {title}",
+  "e4dc84ad63135a41": "{tokens} i dag",
+  "34f742896cfef4a4": "Öppna chatt",
+  "fe120bc687c8cde6": "Flottan har inga noder än.",
+  "3955db21d2d8175b": "Andra chattar · {count}",
+  "90ece2dcecb155b6": "Otis-trädet är inte tillgängligt. Alla chattar visas.",
+  "6dc00cff49f927ca": "Tillbaka till Otis-flottan",
+  "d25661576338fcf0": "Behöver dig",
+  "e197c4963bacc746": "{count} körs",
+  "8a9f50011cb2661a": "{count} behöver dig",
+  "4d5bf65f7b3a7e59": "{count} behöver dig",
+  "27e562fbab02e4f7": "Fäll ihop {title}",
+  "56b72996012e60d8": "Fäll ut {title}"
 }

@@ -12104,5 +12104,21 @@
   "27d76249d09eb69f": "Guia de revisão pronto",
   "faa3bb26abb39c93": "O guia de revisão falhou",
   "b7df38b7d8792d78": "Abrir guia",
-  "9e91e9a77b664e4e": "Não foi possível iniciar um guia de revisão"
+  "9e91e9a77b664e4e": "Não foi possível iniciar um guia de revisão",
+  "aea3174865de0aac": "Carregando conversas concluídas…",
+  "a3fe1dd63892577d": "Não foi possível carregar as conversas concluídas. Reabra a seção para tentar de novo.",
+  "3aa6e4672de2d638": "Frota do Otis",
+  "d9232238bf1e691c": "Voltar de {title}",
+  "e4dc84ad63135a41": "{tokens} hoje",
+  "34f742896cfef4a4": "Abrir conversa",
+  "fe120bc687c8cde6": "A frota ainda não tem nós.",
+  "3955db21d2d8175b": "Outras conversas · {count}",
+  "90ece2dcecb155b6": "A árvore do Otis está indisponível. Exibindo todas as conversas.",
+  "6dc00cff49f927ca": "Voltar à frota do Otis",
+  "d25661576338fcf0": "Precisa de você",
+  "e197c4963bacc746": "{count} em execução",
+  "8a9f50011cb2661a": "{count} aguardando você",
+  "4d5bf65f7b3a7e59": "{count} aguardando você",
+  "27e562fbab02e4f7": "Recolher {title}",
+  "56b72996012e60d8": "Expandir {title}"
 }

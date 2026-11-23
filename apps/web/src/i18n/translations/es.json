@@ -12100,5 +12100,21 @@
   "27d76249d09eb69f": "Guía de revisión lista",
   "faa3bb26abb39c93": "Falló la guía de revisión",
   "b7df38b7d8792d78": "Abrir guía",
-  "9e91e9a77b664e4e": "No se pudo iniciar una guía de revisión"
+  "9e91e9a77b664e4e": "No se pudo iniciar una guía de revisión",
+  "aea3174865de0aac": "Cargando chats finalizados…",
+  "a3fe1dd63892577d": "No se pudieron cargar los chats finalizados. Vuelve a abrir la sección.",
+  "3aa6e4672de2d638": "Flota de Otis",
+  "d9232238bf1e691c": "Volver desde {title}",
+  "e4dc84ad63135a41": "{tokens} hoy",
+  "34f742896cfef4a4": "Abrir chat",
+  "fe120bc687c8cde6": "Todavía no hay nodos en la flota.",
+  "3955db21d2d8175b": "Otros chats · {count}",
+  "90ece2dcecb155b6": "El árbol de Otis no está disponible. Se muestran todos los chats.",
+  "6dc00cff49f927ca": "Volver a la flota de Otis",
+  "d25661576338fcf0": "Te necesita",
+  "e197c4963bacc746": "{count} en ejecución",
+  "8a9f50011cb2661a": "{count} requieren tu atención",
+  "4d5bf65f7b3a7e59": "{count} requieren tu atención",
+  "27e562fbab02e4f7": "Contraer {title}",
+  "56b72996012e60d8": "Expandir {title}"
 }

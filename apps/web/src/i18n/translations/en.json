@@ -12114,5 +12114,21 @@
   "27d76249d09eb69f": "Review guide ready",
   "faa3bb26abb39c93": "Review guide failed",
   "b7df38b7d8792d78": "Open guide",
-  "9e91e9a77b664e4e": "Could not start a review guide"
+  "9e91e9a77b664e4e": "Could not start a review guide",
+  "aea3174865de0aac": "Loading done chats…",
+  "a3fe1dd63892577d": "Could not load done chats. Reopen Done to try again.",
+  "3aa6e4672de2d638": "Otis fleet",
+  "d9232238bf1e691c": "Back from {title}",
+  "e4dc84ad63135a41": "{tokens} today",
+  "34f742896cfef4a4": "Open chat",
+  "fe120bc687c8cde6": "No fleet nodes yet.",
+  "3955db21d2d8175b": "Other chats · {count}",
+  "90ece2dcecb155b6": "Otis tree unavailable. Showing all chats.",
+  "6dc00cff49f927ca": "Back to Otis fleet",
+  "d25661576338fcf0": "Needs you",
+  "e197c4963bacc746": "{count} running",
+  "8a9f50011cb2661a": "{count} needs you",
+  "4d5bf65f7b3a7e59": "{count} need you",
+  "27e562fbab02e4f7": "Collapse {title}",
+  "56b72996012e60d8": "Expand {title}"
 }

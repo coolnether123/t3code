@@ -3,6 +3,9 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./rpc/otis-history": "./src/rpc/otisHistory.ts",
+    "./otis/tree": "./src/otis/tree.ts",
+    "./state/otis-tree": "./src/state/otisTree.ts",
     "./pull-request-diff-fold": {
       "types": "./src/pullRequestDiffFold.ts",
       "default": "./src/pullRequestDiffFold.ts"

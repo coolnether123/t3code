@@ -42,6 +42,7 @@ import {
 import { BackgroundThreadAnnouncer } from "./BackgroundThreadAnnouncer";
 import { HistorySwipeNavigation } from "./HistorySwipeNavigation";
 import ThreadSidebar from "./Sidebar";
+import { OtisSidebar } from "./otis/sidebar/OtisSidebar";
 import { SidebarBrandWidthProbe } from "./sidebar/SidebarChrome";
 import { isAppModalPage } from "./sidebar/mainAppLocation";
 import type { SidebarRouteReveal } from "./sidebar/routeReveal";
@@ -495,7 +496,9 @@ export function AppSidebarLayout({
               }}
               style={windowControlsInsetStyle}
             >
-              <ThreadSidebar routeReveal={sidebarRouteReveal} />
+              <OtisSidebar>
+                <ThreadSidebar routeReveal={sidebarRouteReveal} />
+              </OtisSidebar>
               <SidebarRail onDoubleClick={resetSidebarWidth} />
             </Sidebar>
           </>
