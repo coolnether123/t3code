@@ -14,6 +14,7 @@ import { createModelCapabilities } from "@t3tools/shared/model";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FiberHandle from "effect/FiberHandle";
 import * as Option from "effect/Option";
@@ -170,6 +171,10 @@ interface AntigravityProviderOptions {
   readonly supportsTextGeneration: Effect.Effect<boolean>;
   readonly probeUsage?: Effect.Effect<ServerProviderUsageLimits>;
   readonly clearUsage?: Effect.Effect<void>;
+  readonly quotaSampling?: {
+    readonly interval: Effect.Effect<Duration.Duration>;
+    readonly allowed: Effect.Effect<boolean>;
+  };
   readonly maintenanceCapabilities?: ProviderMaintenanceCapabilities;
   readonly auth?: { readonly type: string; readonly label: string };
   /** Modes the last session advertised, saved because initialize alone does not report them. */
@@ -401,6 +406,19 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
       ),
   });
   yield* Deferred.succeed(republish, managed.refresh);
+
+  const sampling = options.quotaSampling;
+  if (settings.enabled && sampling) {
+    // Healthy provider snapshots stop polling. Quota history still needs fresh readings.
+    yield* Effect.gen(function* () {
+      const interval = yield* sampling.interval;
+      yield* Effect.sleep(interval);
+      const state = yield* SubscriptionRef.get(metadata);
+      if (state.draft.auth.status !== "unauthenticated" && (yield* sampling.allowed)) {
+        yield* refreshUsage();
+      }
+    }).pipe(Effect.forever, Effect.forkScoped);
+  }
 
   const onSessionStarted = Effect.fn("AntigravityProvider.onSessionStarted")(function* (
     started: AcpSessionRuntime.AcpSessionRuntimeStartResult,

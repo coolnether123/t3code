@@ -11,6 +11,7 @@ import {
   type ServerProviderUsageLimits,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -140,6 +141,7 @@ const makeHarness = Effect.fn("makeAntigravityProviderHarness")(function* (
     readonly safe?: boolean;
     readonly probeUsage?: Effect.Effect<ServerProviderUsageLimits>;
     readonly rememberedRuntimeModes?: ReadonlyArray<RuntimeMode>;
+    readonly samplingAllowed?: Effect.Effect<boolean>;
   } = {},
 ) {
   const savedRuntimeModes = yield* Ref.make<ReadonlyArray<ReadonlyArray<RuntimeMode>>>([]);
@@ -160,6 +162,14 @@ const makeHarness = Effect.fn("makeAntigravityProviderHarness")(function* (
         ? { rememberedRuntimeModes: options.rememberedRuntimeModes }
         : {}),
       rememberRuntimeModes: (modes) => Ref.update(savedRuntimeModes, (saved) => [...saved, modes]),
+      ...(options.samplingAllowed
+        ? {
+            quotaSampling: {
+              interval: Effect.succeed(Duration.minutes(5)),
+              allowed: options.samplingAllowed,
+            },
+          }
+        : {}),
       probe: Ref.update(probeCalls, (count) => count + 1).pipe(
         Effect.andThen(Ref.get(probe)),
         Effect.flatten,
@@ -795,6 +805,37 @@ it.layer(layerTest)("Antigravity provider snapshots", (it) => {
         yield* harness.provider.snapshot.refresh;
         expect((yield* unsupported)?.usageLimits?.windows).toEqual([]);
       }),
+  );
+
+  it.effect("samples Gemini quota without provider status demand when the host allows it", () =>
+    Effect.gen(function* () {
+      const allowed = yield* Ref.make(false);
+      const reads = yield* Ref.make(0);
+      const initialRead = yield* Deferred.make<void>();
+      const intervalRead = yield* Deferred.make<void>();
+      const limits = {
+        checkedAt: "2026-10-09T12:00:00.000Z",
+        windows: [{ id: "gemini-5h", kind: "session", label: "Gemini", usedPercent: 10 }],
+      } satisfies ServerProviderUsageLimits;
+      const harness = yield* makeHarness({
+        samplingAllowed: Ref.get(allowed),
+        probeUsage: Ref.updateAndGet(reads, (count) => count + 1).pipe(
+          Effect.tap((count) =>
+            Deferred.succeed(count === 1 ? initialRead : intervalRead, undefined),
+          ),
+          Effect.as(limits),
+        ),
+      });
+      yield* harness.provider.onSessionStarted(started);
+      yield* Deferred.await(initialRead);
+      yield* TestClock.adjust("5 minutes");
+      expect(yield* Ref.get(reads)).toBe(1);
+
+      yield* Ref.set(allowed, true);
+      yield* TestClock.adjust("5 minutes");
+      yield* Deferred.await(intervalRead);
+      expect(yield* Ref.get(reads)).toBe(2);
+    }),
   );
 
   it.effect("a quota read finishing after sign-out cannot restore account limits", () =>

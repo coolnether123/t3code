@@ -603,6 +603,14 @@ export function projectUsageReport(
           ...history,
           samples: samples.slice(-limit),
         },
+        ...(summary.providerQuotaHistories === undefined
+          ? {}
+          : {
+              providerQuotaHistories: summary.providerQuotaHistories.map((window) => ({
+                ...window,
+                samples: window.samples.slice(-limit),
+              })),
+            }),
         ...(summary.antigravityQuota === undefined
           ? {}
           : { antigravityQuota: summary.antigravityQuota }),
