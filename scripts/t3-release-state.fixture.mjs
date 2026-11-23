@@ -11,6 +11,20 @@ import {
   ReleaseTransaction,
 } from "./t3-release-state.mjs";
 
+NodeTest.test(
+  "a red surface preflight records the failure before stopping either owner",
+  async (t) => {
+    const f = fixture(t);
+    f.adapter.surfaces = async () => {
+      throw new Error("usage-claude: stale");
+    };
+    await NodeAssert.rejects(f.transaction.switchTo("candidate"), /usage-claude: stale/);
+    NodeAssert.deepEqual(f.calls, ["idle"]);
+    NodeAssert.equal(readReleaseState(f.root).current, "old");
+    NodeAssert.equal(readReleaseState(f.root).pending, null);
+  },
+);
+
 function fixture(t) {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-release-fixture-"));
   t.after(() => NodeFS.rmSync(root, { recursive: true, force: true }));

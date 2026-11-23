@@ -79,6 +79,7 @@ export class ReleaseTransaction {
       try {
         await this.adapter.validate(candidate);
         receipt.idle = await this.adapter.waitForIdle();
+        if (this.adapter.surfaces) receipt.surfaces = await this.adapter.surfaces();
       } catch (error) {
         receipt.result = "preflight-failed";
         receipt.failure = String(error);

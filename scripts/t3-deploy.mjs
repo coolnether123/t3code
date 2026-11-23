@@ -1,5 +1,6 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeTimersPromises from "node:timers/promises";
@@ -172,6 +173,14 @@ export function productionAdapter(config, io = {}) {
     } while (offset !== null);
     return pages;
   };
+  const observeIdle = async () => {
+    const pages = await snapshotPages();
+    const router =
+      pages[0].voice === undefined
+        ? await http("http://127.0.0.1:8085/health").then((response) => response.json())
+        : undefined;
+    return idleEvidence(pages, router);
+  };
   const liveUserdata = () => NodeFS.realpathSync(NodePath.join(config.baseDir, "userdata"));
   return {
     async validate(candidate) {
@@ -200,14 +209,22 @@ export function productionAdapter(config, io = {}) {
           throw new Error("Prepared artifact identity changed");
       }
     },
+    async surfaces() {
+      const root = NodePath.join(process.env.LOCALAPPDATA, "Otis", "gateway");
+      const { release } = readJson(NodePath.join(root, "active.json"));
+      if (!/^[a-f0-9]{12,64}$/.test(release)) throw new Error("Invalid serving Otis release");
+      const script = NodePath.join(root, "releases", release, "tools/jared-surfaces/probe.mjs");
+      if (!NodeFS.existsSync(script))
+        throw new Error("Jared's surfaces probe missing from serving Otis");
+      const { runProbe, requireGreen } = await import(NodeURL.pathToFileURL(script).href);
+      const report = await runProbe();
+      requireGreen(report);
+      if (!(await observeIdle()).idle) throw new Error("T3 became busy during the surface probe");
+      return report;
+    },
     async waitForIdle() {
       idle = await until(async () => {
-        const pages = await snapshotPages();
-        const router =
-          pages[0].voice === undefined
-            ? await http("http://127.0.0.1:8085/health").then((r) => r.json())
-            : undefined;
-        const evidence = idleEvidence(pages, router);
+        const evidence = await observeIdle();
         return evidence.idle ? evidence : undefined;
       }, config.idleTimeoutSeconds ?? 3600);
       oldRuntime = idle.runtime;
