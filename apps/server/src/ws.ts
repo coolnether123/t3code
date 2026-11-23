@@ -1,5 +1,6 @@
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import { LegacyUsageRpcGroup } from "@t3tools/contracts";
+import { otisRpcHandlers } from "./otis/otisRpc.ts";
 import * as UsageResetCheck from "./usage/UsageResetCheck.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- A synchronous digest inside the pure provider mapping.
@@ -1443,6 +1444,7 @@ export const layerWsRpc = (
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
   reportProfiles: ServerBrowser.ProfileReporter,
   settingsClient: { readonly secretReferences: boolean },
+  fleet = otisRpcHandlers,
 ) =>
   Layer.effectContext(
     Effect.gen(function* () {
@@ -1987,6 +1989,7 @@ export const layerWsRpc = (
       });
 
       const handlers = ServerWsRpcGroup.of({
+        ...(yield* fleet),
         [WS_METHODS.issuesList]: (input) => issues.list(input),
         [WS_METHODS.issuesDetail]: (input) => issues.detail(input),
         [WS_METHODS.issuesComments]: (input) => issues.comments(input),
@@ -3626,6 +3629,7 @@ export const WS_RPC_SERVER_OPTIONS = {
 
 export const layer = Layer.unwrap(
   Effect.gen(function* () {
+    const fleet = Effect.succeed(yield* otisRpcHandlers);
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
     const serverBrowser = yield* ServerBrowser.ServerBrowser;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
@@ -3720,6 +3724,7 @@ export const layer = Layer.unwrap(
               serverBrowser,
               reportProfiles,
               readSettingsClient(url.value),
+              fleet,
             ).pipe(
               Layer.provide(
                 Layer.succeed(
