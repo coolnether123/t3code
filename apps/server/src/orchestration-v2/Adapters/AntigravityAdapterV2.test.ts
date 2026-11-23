@@ -1611,7 +1611,10 @@ describe("AntigravityAdapterV2 session system prompt", () => {
               },
           )
           .find((request) => request.method === "session/new");
-        assert.deepInclude(sessionNew?.params?.mcpServers ?? [], configuredServer);
+        assert.deepInclude(sessionNew?.params?.mcpServers ?? [], {
+          type: "stdio",
+          ...configuredServer,
+        });
         const append = JSON.stringify(sessionNew?.params?._meta ?? null);
         // Identity stays per turn either way.
         assert.include(sent, "through the Antigravity harness, as gemini-test-low");
