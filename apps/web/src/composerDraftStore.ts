@@ -47,6 +47,7 @@ import {
   createModelSelection,
   draftModelPickMatchesThread,
   resolveSelectableModel,
+  resolveStaticModelAlias,
   normalizeCustomModelSlug,
   normalizeModelSlug,
 } from "@t3tools/shared/model";
@@ -1265,15 +1266,16 @@ function composerModelIdentity(
 ) {
   const models =
     input.providers.find((provider) => provider.instanceId === instanceId)?.models ?? [];
+  const slug =
+    resolveSelectableModel(input.selectedProvider, model, models) ??
+    normalizeCustomModelSlug(model);
+  if (slug === null) return null;
   const isCustom =
-    models.some((entry) => entry.slug === model && entry.isCustom) ||
+    models.some((entry) => entry.slug === slug && entry.isCustom) ||
     readInstanceCustomModels(input.settings, instanceId, input.selectedProvider).some(
-      (entry) => entry.slug === model,
+      (entry) => entry.slug === model || entry.slug === slug,
     );
-  return isCustom
-    ? model
-    : (resolveSelectableModel(input.selectedProvider, model, models) ??
-        normalizeModelSlug(model, input.selectedProvider));
+  return isCustom ? null : resolveStaticModelAlias(input.selectedProvider, slug);
 }
 
 export function deriveEffectiveComposerModelState(input: {
@@ -1445,11 +1447,9 @@ export function isSameModel(
   a: InstanceModel,
   b: InstanceModel,
 ): boolean {
-  return (
-    a.model === b.model ||
-    composerModelIdentity(input, a.instanceId, a.model) ===
-      composerModelIdentity(input, b.instanceId, b.model)
-  );
+  if (a.model === b.model) return true;
+  const aIdentity = composerModelIdentity(input, a.instanceId, a.model);
+  return aIdentity !== null && aIdentity === composerModelIdentity(input, b.instanceId, b.model);
 }
 
 function revokeObjectPreviewUrl(previewUrl: string): void {

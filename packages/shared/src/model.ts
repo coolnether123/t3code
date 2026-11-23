@@ -443,6 +443,11 @@ export function normalizeCustomModelSlug(model: string | null | undefined): stri
   return model.trim() || null;
 }
 
+export function resolveStaticModelAlias(provider: ProviderDriverKind, slug: string): string {
+  const aliases = MODEL_SLUG_ALIASES_BY_PROVIDER[provider] ?? {};
+  return Object.hasOwn(aliases, slug) ? (aliases[slug] ?? slug) : slug;
+}
+
 /** Compare Codex model families without changing provider-owned dispatch IDs. */
 export function codexModelFamily(slug: string): string {
   return slug.startsWith("openai.gpt-") ? slug.slice("openai.".length) : slug;
@@ -536,15 +541,7 @@ export function resolveSelectableModel(
     return byAlias.slug;
   }
 
-  const aliases = MODEL_SLUG_ALIASES_BY_PROVIDER[provider] ?? {};
-  const aliased = Object.prototype.hasOwnProperty.call(aliases, trimmed)
-    ? aliases[trimmed]
-    : undefined;
-  const normalized = typeof aliased === "string" ? aliased : trimmed;
-  if (!normalized) {
-    return null;
-  }
-
+  const normalized = resolveStaticModelAlias(provider, trimmed);
   const resolved = options.find((option) => option.slug === normalized);
   return resolved ? resolved.slug : null;
 }
