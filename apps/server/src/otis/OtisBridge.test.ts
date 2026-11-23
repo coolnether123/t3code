@@ -18,13 +18,13 @@ import {
   offlineFleet,
 } from "../../../../packages/client-runtime/src/otis/tree.ts";
 
+const decodeFixtureBatch = Schema.decodeUnknownEffect(Schema.fromJsonString(OtisTreeBatch));
 const producerFixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const file = yield* path.fromFileUrl(new URL("./fixtures/tree-stream.ndjson", import.meta.url));
   const fixture = (yield* fs.readFileString(file)).trimEnd().split(/\r?\n/);
-  const decode = Schema.decodeUnknownSync(Schema.fromJsonString(OtisTreeBatch));
-  return { fixture, batches: fixture.map((line) => decode(line)) };
+  return { fixture, batches: yield* Effect.forEach(fixture, (line) => decodeFixtureBatch(line)) };
 }).pipe(Effect.provide(NodeServices.layer));
 
 function feed() {

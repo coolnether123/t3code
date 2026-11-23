@@ -12,6 +12,13 @@ import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { RpcSession } from "../rpc/session.ts";
+import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
+import {
+  AVAILABLE_CONNECTION_STATE,
+  PrimaryConnectionTarget,
+  type PreparedConnection,
+  type NetworkStatus,
+} from "../connection/model.ts";
 import { createOtisTreeAtoms } from "./otisTree.ts";
 
 it.effect("a mounted environment atom switches to stock and back on the same subscription", () =>
@@ -21,10 +28,22 @@ it.effect("a mounted environment atom switches to stock and back on the same sub
       client: { "otis.subscribe": () => Stream.fromQueue(frames) },
     } as unknown as RpcSession;
     const supervisor = Layer.mock(EnvironmentSupervisor.EnvironmentSupervisor)({
+      target: new PrimaryConnectionTarget({
+        environmentId: EnvironmentId.make("home"),
+        label: "Fixture",
+        httpBaseUrl: "http://fixture.test",
+        wsBaseUrl: "ws://fixture.test",
+      }),
+      state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
+      prepared: yield* SubscriptionRef.make<Option.Option<PreparedConnection>>(Option.none()),
       session: yield* SubscriptionRef.make(Option.some(session)),
     });
     const runtime = Atom.runtime(
       Layer.mock(EnvironmentRegistry.EnvironmentRegistry)({
+        entries: yield* SubscriptionRef.make<ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>>(
+          new Map(),
+        ),
+        networkStatus: yield* SubscriptionRef.make<NetworkStatus>("online"),
         followStream: (_id, source) => source.pipe(Stream.provide(supervisor)),
       }),
     );
