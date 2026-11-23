@@ -164,6 +164,7 @@ export const AntigravityDriver: ProviderDriver<
     const settings = { ...config, enabled } satisfies AntigravitySettings;
     const auth: AntigravityAuthConfig = {
       authMethod: settings.authMethod,
+      oauthPersonalStorage: settings.oauthPersonalStorage,
       // The instance registry has already read a referenced key from its secret provider.
       apiKey: settingsSecretLiteral(settings.apiKey),
       gcpProject: settings.gcpProject,
@@ -599,6 +600,9 @@ export const AntigravityDriver: ProviderDriver<
     const usage = yield* makeAntigravityUsageProbe({
       profileDirectory,
       authMethod: auth.authMethod,
+      ...(auth.authMethod === "oauth-personal"
+        ? { oauthPersonalStorage: settings.oauthPersonalStorage }
+        : {}),
       refreshSignIn: refreshCatalogSession(undefined).pipe(Effect.ignore),
     }).pipe(
       Effect.provideService(FileSystem.FileSystem, fileSystem),

@@ -92,6 +92,7 @@ export interface AntigravityProfile {
 
 export interface AntigravityAuthConfig {
   readonly authMethod: AntigravityAuthMethod;
+  readonly oauthPersonalStorage?: "profile" | "keyring";
   readonly apiKey: string;
   readonly gcpProject: string;
   readonly gcpLocation: string;
@@ -204,10 +205,15 @@ function antigravityEnvironment(
   auth: AntigravityAuthConfig,
   runtimeTempDirectory?: string,
 ) {
+  const useKeyring =
+    auth.authMethod === "oauth-personal" && auth.oauthPersonalStorage === "keyring";
   const environment: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(baseEnv)) {
     // Windows treats environment keys as case-insensitive. Remove aliases too.
-    if (!removedEnvironmentKeys.has(key.toUpperCase())) environment[key] = value;
+    const normalized = key.toUpperCase();
+    if (removedEnvironmentKeys.has(normalized)) continue;
+    if (useKeyring && ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"].includes(normalized)) continue;
+    environment[key] = value;
   }
   // Put the GCP pair in settings.json because GOOGLE_API_KEY takes precedence in the environment.
   const credential =
@@ -228,11 +234,11 @@ function antigravityEnvironment(
       : {}),
     // The 1.5 CLI ignores AGY_ACP_FORCE_FILE_STORAGE and keeps Google sign-ins in one OS keyring
     // entry for every profile, unless it believes it runs over SSH. Sign-in then uses `--login`.
-    ...(auth.authMethod === "oauth-personal"
+    ...(auth.authMethod === "oauth-personal" && !useKeyring
       ? { SSH_CONNECTION: baseEnv.SSH_CONNECTION || "127.0.0.1 0 127.0.0.1 0" }
       : {}),
     GEMINI_HOME: profile.geminiHome,
-    AGY_ACP_FORCE_FILE_STORAGE: "1",
+    ...(useKeyring ? {} : { AGY_ACP_FORCE_FILE_STORAGE: "1" }),
     BROWSER: profile.browserCommand,
     PYTHONUNBUFFERED: "1",
     ELECTRON_RUN_AS_NODE: "1",

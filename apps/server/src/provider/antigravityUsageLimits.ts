@@ -333,6 +333,7 @@ function modelWindows(models: typeof Models.Type, includeShared: boolean) {
 export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(function* (input: {
   readonly profileDirectory: string;
   readonly authMethod: AntigravitySettings["authMethod"];
+  readonly oauthPersonalStorage?: AntigravitySettings["oauthPersonalStorage"];
   readonly refreshSignIn?: Effect.Effect<void>;
   readonly readKeyringSecret?: Effect.Effect<string | undefined, AntigravityKeyringError>;
 }) {
@@ -371,10 +372,12 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
     let accessToken: string;
     let account: string;
     let projectId: string | undefined;
-    if (!(yield* fs.exists(tokenPath))) {
+    if (input.oauthPersonalStorage === "keyring" || !(yield* fs.exists(tokenPath))) {
       cached = undefined;
       const readStored = Effect.gen(function* () {
+        if (input.oauthPersonalStorage === "keyring") return yield* readKeyringSecret;
         if (yield* fs.exists(cliTokenPath)) return yield* fs.readFileString(cliTokenPath);
+        if (input.oauthPersonalStorage === "profile") return undefined;
         return yield* readKeyringSecret;
       });
       const stored = yield* readStored;

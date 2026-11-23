@@ -865,6 +865,21 @@ export type AntigravityAuthMethod = typeof AntigravityAuthMethod.Type;
 
 export const AntigravitySettings = makeProviderSettingsSchema(
   {
+    oauthPersonalStorage: Schema.Literals(["profile", "keyring"]).pipe(
+      Schema.withDecodingDefault(Effect.succeed("profile" as const)),
+      Schema.annotateKey({
+        title: "Google account storage",
+        description: "Use a separate Antigravity profile or the host user's shared system keyring.",
+        providerSettingsForm: {
+          control: "select",
+          options: [
+            { value: "profile", label: "Separate profile" },
+            { value: "keyring", label: "System keyring" },
+          ],
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     mcpServers: Schema.optional(
       Schema.Array(
         Schema.Struct({
@@ -935,7 +950,16 @@ export const AntigravitySettings = makeProviderSettingsSchema(
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
-  { order: ["authMethod", "apiKey", "gcpProject", "gcpLocation", "binaryPath"] },
+  {
+    order: [
+      "authMethod",
+      "oauthPersonalStorage",
+      "apiKey",
+      "gcpProject",
+      "gcpLocation",
+      "binaryPath",
+    ],
+  },
 );
 export type AntigravitySettings = typeof AntigravitySettings.Type;
 

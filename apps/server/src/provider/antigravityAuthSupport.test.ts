@@ -178,6 +178,27 @@ describe("Antigravity process environment", () => {
     ).toBe("127.0.0.1 0 127.0.0.1 0");
   });
 
+  it("lets a personal account use the native keyring even with an inherited SSH environment", () => {
+    const spawn = buildAntigravityAcpSpawnInput({
+      installation: { executablePath: "/release/agy", harnessPath: null },
+      profile,
+      cwd: "/project",
+      baseEnv: { ssh_connection: "sandbox", SSH_CLIENT: "sandbox", SSH_TTY: "sandbox" },
+      auth: {
+        authMethod: "oauth-personal",
+        oauthPersonalStorage: "keyring",
+        apiKey: "",
+        gcpProject: "",
+        gcpLocation: "",
+      },
+    });
+    const keys = Object.keys(spawn.env ?? {}).map((key) => key.toUpperCase());
+    expect(keys).not.toContain("SSH_CONNECTION");
+    expect(keys).not.toContain("SSH_CLIENT");
+    expect(keys).not.toContain("SSH_TTY");
+    expect(keys).not.toContain("AGY_ACP_FORCE_FILE_STORAGE");
+  });
+
   it("isolates TEMP and TMP to the profile directory on Windows", () => {
     const windowsProfile: AntigravityProfile = {
       platform: "win32",
