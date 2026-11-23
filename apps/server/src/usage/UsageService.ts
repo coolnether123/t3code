@@ -2563,326 +2563,327 @@ export const make = Effect.gen(function* () {
     } satisfies UsageSummary;
   });
 
-  const readScannedSummary: UsageSummaryReaderWithReportSnapshots = Effect.fn(
-    "UsageService.readScannedSummary",
-  )(function* (requested: UsageSummaryInput, rememberReport = false) {
-    const { modelFilter: requestedFilter, ...unfiltered } = requested;
-    const modelFilter = canonicalModelFilter(requestedFilter);
-    const input = modelFilter === undefined ? unfiltered : { ...unfiltered, modelFilter };
-    const startedAtMs = yield* Clock.currentTimeMillis;
-    let resolvedDirs: readonly { readonly provider: UsageProviderKind; readonly dir: string }[] =
-      [];
-    let progress: UsageReadProgress = {
-      sources: [],
-      pendingSources: [],
-      quotaCosts: [],
-      quotaHistory: undefined,
-      providerQuotaHistories: undefined,
-      aggregator: undefined,
-    };
-    let savedCosts: UsageQuotaCost[] = [];
-    const withSavedCosts = (summary: UsageSummary): UsageSummary => ({
-      ...summary,
-      quotaCosts:
-        input.quotaIntervals === undefined
-          ? undefined
-          : [
-              ...savedCosts,
-              ...(summary.quotaCosts ?? []).filter(
-                (cost) =>
-                  !savedCosts.some(
-                    (saved) =>
-                      saved.intervalId === cost.intervalId &&
-                      JSON.stringify(saved.fingerprint) === JSON.stringify(cost.fingerprint),
-                  ),
-              ),
-            ],
-      quotaCostSnapshots: !isWholeQuotaWindow(input)
-        ? []
-        : [
-            ...(summary.quotaCostSnapshots ?? []),
-            ...savedCosts.flatMap((cost) => {
-              const row = quotaCostLedger.find(
-                (row) =>
-                  JSON.stringify(row.fingerprint) === JSON.stringify(cost.fingerprint) &&
-                  row.sinceTime ===
-                    input.quotaIntervals?.find((interval) => interval.id === cost.intervalId)
-                      ?.sinceTime &&
-                  row.untilTime ===
-                    input.quotaIntervals?.find((interval) => interval.id === cost.intervalId)
-                      ?.untilTime,
-              );
-              return row ? [{ ...row, intervalId: cost.intervalId }] : [];
-            }),
-          ],
-    });
-    return yield* Effect.gen(function* () {
-      const read = Effect.gen(function* () {
-        if (input.sinceDay > input.untilDay) {
-          return yield* new UsageReadError({
-            reason: "invalidWindow",
-            detail: `sinceDay '${input.sinceDay}' is after untilDay '${input.untilDay}'`,
-          });
-        }
-        if (input.quotaHistoryOnly) return yield* readSummaryUnlocked(input, undefined, progress);
-        yield* ensureCachedRates;
-        const context = yield* resolveReadContext();
-        resolvedDirs = context.dirs;
-        const key = repeatedAwareSummaryCacheKey(
-          input,
-          context.settings.usagePriceOverrides,
-          context.settings.usageModelAliases,
-        );
-        const reportKey = rememberReport ? encodeBatchKey([key, context.dirs]) : undefined;
-        if (!input.refresh && reportKey !== undefined) {
-          const snapshot = reportSnapshots.get(reportKey, yield* Clock.currentTimeMillis);
-          if (snapshot !== undefined) return snapshot;
-        }
-        // Establish source identities before waiting for a scan so saved interval
-        // calculations remain usable when this request reaches its deadline.
-        const sources = yield* Effect.forEach(
-          context.dirs.filter(
-            ({ provider }) =>
-              (input.quotaIntervals === undefined ||
-                provider === (input.quotaProvider ?? "codex")) &&
-              (input.providers === undefined || input.providers.includes(provider)),
-          ),
-          Effect.fnUntraced(function* ({ provider, dir }) {
-            const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
-            const exists = yield* fileSystem.exists(dir).pipe(Effect.orElseSucceed(() => false));
-            return {
-              fingerprint: {
-                hostId,
-                provider,
-                resolvedHomePath: dir,
-                volumeId,
-              },
-              status: exists ? ("partial" as const) : ("missing" as const),
-              scannedFiles: 0,
-              skippedFiles: 0,
-              malformedRecords: 0,
-              distinctSessions: 0,
-              message: exists
-                ? "Usage is partial because its response budget expired before this source finished."
-                : "No transcript directory on this environment.",
-            };
-          }),
-          { concurrency: 8 },
-        );
-        progress.pendingSources.push(...sources);
-        if (!validQuotaIntervals(input.quotaIntervals ?? [], input.sinceDay, input.untilDay)) {
-          return yield* new UsageReadError({
-            reason: "invalidWindow",
-            detail:
-              "Quota intervals must be ordered, disjoint, and inside the scanned window with two days of padding.",
-          });
-        }
-        const intervals = input.quotaIntervals ?? [];
-        const saved = (isWholeQuotaWindow(input) ? sources : [])
-          .filter((source) => source.status !== "missing")
-          .flatMap((source) =>
-            intervals.flatMap((interval) => {
-              const row = quotaCostLedger.find(
-                (row) =>
-                  JSON.stringify(row.fingerprint) === JSON.stringify(source.fingerprint) &&
-                  row.sinceTime === interval.sinceTime &&
-                  row.untilTime === interval.untilTime &&
-                  (Date.parse(row.resetsAt) <= startedAtMs ||
-                    quotaCostLedger.some(
-                      (next) =>
-                        JSON.stringify(next.fingerprint) === JSON.stringify(row.fingerprint) &&
-                        !/^(api-pace:|compare:|month:|codex-resets:)/.test(next.intervalId) &&
-                        Date.parse(next.sinceTime) >= Date.parse(row.untilTime),
-                    )),
-              );
-              return row ? [{ ...row, intervalId: interval.id, complete: true }] : [];
-            }),
-          );
-        savedCosts = saved;
-        if (
-          intervals.length > 0 &&
-          saved.length > 0 &&
-          saved.length ===
-            sources.filter((source) => source.status !== "missing").length * intervals.length
-        ) {
-          const history = yield* readSummaryUnlocked(
-            { ...input, quotaHistoryOnly: true },
-            undefined,
-          );
-          return {
-            ...history,
-            sources: sources.map((source) => ({
-              ...source,
-              status: source.status === "missing" ? ("missing" as const) : ("ok" as const),
-              message: null,
-            })),
-            quotaCosts: saved,
-            quotaCostSnapshots: saved,
-            pricing: pricing(),
-          };
-        }
-
-        if (!input.refresh) {
-          const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
-          if (cached !== undefined) return cached;
-        }
-        const selectedInput =
-          intervals.length === 0
-            ? input
-            : {
-                ...input,
-                quotaIntervals: intervals.filter(
-                  (interval) =>
-                    saved.filter((row) => row.intervalId === interval.id).length !==
-                    sources.filter((source) => source.status !== "missing").length,
+  const readSummary: UsageSummaryReaderWithReportSnapshots = Effect.fn("UsageService.readSummary")(
+    function* (requested: UsageSummaryInput, rememberReport = false) {
+      const { modelFilter: requestedFilter, ...unfiltered } = requested;
+      const modelFilter = canonicalModelFilter(requestedFilter);
+      const input = modelFilter === undefined ? unfiltered : { ...unfiltered, modelFilter };
+      const startedAtMs = yield* Clock.currentTimeMillis;
+      let resolvedDirs: readonly { readonly provider: UsageProviderKind; readonly dir: string }[] =
+        [];
+      let progress: UsageReadProgress = {
+        sources: [],
+        pendingSources: [],
+        quotaCosts: [],
+        quotaHistory: undefined,
+        providerQuotaHistories: undefined,
+        aggregator: undefined,
+      };
+      let savedCosts: UsageQuotaCost[] = [];
+      const withSavedCosts = (summary: UsageSummary): UsageSummary => ({
+        ...summary,
+        quotaCosts:
+          input.quotaIntervals === undefined
+            ? undefined
+            : [
+                ...savedCosts,
+                ...(summary.quotaCosts ?? []).filter(
+                  (cost) =>
+                    !savedCosts.some(
+                      (saved) =>
+                        saved.intervalId === cost.intervalId &&
+                        JSON.stringify(saved.fingerprint) === JSON.stringify(cost.fingerprint),
+                    ),
                 ),
-              };
-        // Readers with different response deadlines share the same underlying scan.
-        const scanInput = { ...selectedInput, awaitRefresh: true, provisional: false };
-        const batchKey = encodeBatchKey([
-          usageReadBatchKey(scanInput),
-          context.settings.usagePriceOverrides,
-          context.settings.usageModelAliases,
-          ratesRevision,
-          context.dirs,
-        ]);
-        let shared = inFlightSummaries.get(batchKey);
-        if (shared?.started) {
-          const active = mergeUsageReads(shared.inputs);
-          const covered =
-            active.sinceDay <= scanInput.sinceDay &&
-            active.untilDay >= scanInput.untilDay &&
-            (!scanInput.includeQuotaHistory ||
-              active.includeQuotaHistory === true ||
-              active.quotaIntervals !== undefined) &&
-            (scanInput.providers !== undefined ||
-              scanInput.quotaIntervals !== undefined ||
-              active.providers === undefined) &&
-            (active.providers === undefined ||
-              (scanInput.providers ?? [scanInput.quotaProvider ?? "codex"]).every((provider) =>
-                active.providers!.includes(provider),
-              )) &&
-            (scanInput.quotaIntervals ?? []).every((interval) =>
-              active.quotaIntervals?.some(
-                (candidate) => JSON.stringify(candidate) === JSON.stringify(interval),
-              ),
-            );
-          if (!covered) shared = undefined;
-        }
-        if (
-          shared &&
-          (input.quotaIntervals ?? []).some((interval) =>
-            shared!.inputs.some((other) =>
-              other.quotaIntervals?.some(
-                (candidate) =>
-                  candidate.id === interval.id &&
-                  JSON.stringify(candidate) !== JSON.stringify(interval),
-              ),
+              ],
+        quotaCostSnapshots: !isWholeQuotaWindow(input)
+          ? []
+          : [
+              ...(summary.quotaCostSnapshots ?? []),
+              ...savedCosts.flatMap((cost) => {
+                const row = quotaCostLedger.find(
+                  (row) =>
+                    JSON.stringify(row.fingerprint) === JSON.stringify(cost.fingerprint) &&
+                    row.sinceTime ===
+                      input.quotaIntervals?.find((interval) => interval.id === cost.intervalId)
+                        ?.sinceTime &&
+                    row.untilTime ===
+                      input.quotaIntervals?.find((interval) => interval.id === cost.intervalId)
+                        ?.untilTime,
+                );
+                return row ? [{ ...row, intervalId: cost.intervalId }] : [];
+              }),
+            ],
+      });
+      return yield* Effect.gen(function* () {
+        const read = Effect.gen(function* () {
+          if (input.sinceDay > input.untilDay) {
+            return yield* new UsageReadError({
+              reason: "invalidWindow",
+              detail: `sinceDay '${input.sinceDay}' is after untilDay '${input.untilDay}'`,
+            });
+          }
+          if (input.quotaHistoryOnly) return yield* readSummaryUnlocked(input, undefined, progress);
+          yield* ensureCachedRates;
+          const context = yield* resolveReadContext();
+          resolvedDirs = context.dirs;
+          const key = repeatedAwareSummaryCacheKey(
+            input,
+            context.settings.usagePriceOverrides,
+            context.settings.usageModelAliases,
+          );
+          const reportKey = rememberReport ? encodeBatchKey([key, context.dirs]) : undefined;
+          if (!input.refresh && reportKey !== undefined) {
+            const snapshot = reportSnapshots.get(reportKey, yield* Clock.currentTimeMillis);
+            if (snapshot !== undefined) return snapshot;
+          }
+          // Establish source identities before waiting for a scan so saved interval
+          // calculations remain usable when this request reaches its deadline.
+          const sources = yield* Effect.forEach(
+            context.dirs.filter(
+              ({ provider }) =>
+                (input.quotaIntervals === undefined ||
+                  provider === (input.quotaProvider ?? "codex")) &&
+                (input.providers === undefined || input.providers.includes(provider)),
             ),
+            Effect.fnUntraced(function* ({ provider, dir }) {
+              const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
+              const exists = yield* fileSystem.exists(dir).pipe(Effect.orElseSucceed(() => false));
+              return {
+                fingerprint: {
+                  hostId,
+                  provider,
+                  resolvedHomePath: dir,
+                  volumeId,
+                },
+                status: exists ? ("partial" as const) : ("missing" as const),
+                scannedFiles: 0,
+                skippedFiles: 0,
+                malformedRecords: 0,
+                distinctSessions: 0,
+                message: exists
+                  ? "Usage is partial because its response budget expired before this source finished."
+                  : "No transcript directory on this environment.",
+              };
+            }),
+            { concurrency: 8 },
+          );
+          progress.pendingSources.push(...sources);
+          if (!validQuotaIntervals(input.quotaIntervals ?? [], input.sinceDay, input.untilDay)) {
+            return yield* new UsageReadError({
+              reason: "invalidWindow",
+              detail:
+                "Quota intervals must be ordered, disjoint, and inside the scanned window with two days of padding.",
+            });
+          }
+          const intervals = input.quotaIntervals ?? [];
+          const saved = (isWholeQuotaWindow(input) ? sources : [])
+            .filter((source) => source.status !== "missing")
+            .flatMap((source) =>
+              intervals.flatMap((interval) => {
+                const row = quotaCostLedger.find(
+                  (row) =>
+                    JSON.stringify(row.fingerprint) === JSON.stringify(source.fingerprint) &&
+                    row.sinceTime === interval.sinceTime &&
+                    row.untilTime === interval.untilTime &&
+                    (Date.parse(row.resetsAt) <= startedAtMs ||
+                      quotaCostLedger.some(
+                        (next) =>
+                          JSON.stringify(next.fingerprint) === JSON.stringify(row.fingerprint) &&
+                          !/^(api-pace:|compare:|month:|codex-resets:)/.test(next.intervalId) &&
+                          Date.parse(next.sinceTime) >= Date.parse(row.untilTime),
+                      )),
+                );
+                return row ? [{ ...row, intervalId: interval.id, complete: true }] : [];
+              }),
+            );
+          savedCosts = saved;
+          if (
+            intervals.length > 0 &&
+            saved.length > 0 &&
+            saved.length ===
+              sources.filter((source) => source.status !== "missing").length * intervals.length
+          ) {
+            const history = yield* readSummaryUnlocked(
+              { ...input, quotaHistoryOnly: true },
+              undefined,
+            );
+            return {
+              ...history,
+              sources: sources.map((source) => ({
+                ...source,
+                status: source.status === "missing" ? ("missing" as const) : ("ok" as const),
+                message: null,
+              })),
+              quotaCosts: saved,
+              quotaCostSnapshots: saved,
+              pricing: pricing(),
+            };
+          }
+
+          if (!input.refresh) {
+            const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
+            if (cached !== undefined) return cached;
+          }
+          const selectedInput =
+            intervals.length === 0
+              ? input
+              : {
+                  ...input,
+                  quotaIntervals: intervals.filter(
+                    (interval) =>
+                      saved.filter((row) => row.intervalId === interval.id).length !==
+                      sources.filter((source) => source.status !== "missing").length,
+                  ),
+                };
+          // Readers with different response deadlines share the same underlying scan.
+          const scanInput = { ...selectedInput, awaitRefresh: true, provisional: false };
+          const batchKey = encodeBatchKey([
+            usageReadBatchKey(scanInput),
+            context.settings.usagePriceOverrides,
+            context.settings.usageModelAliases,
+            ratesRevision,
+            context.dirs,
+          ]);
+          let shared = inFlightSummaries.get(batchKey);
+          if (shared?.started) {
+            const active = mergeUsageReads(shared.inputs);
+            const covered =
+              active.sinceDay <= scanInput.sinceDay &&
+              active.untilDay >= scanInput.untilDay &&
+              (!scanInput.includeQuotaHistory ||
+                active.includeQuotaHistory === true ||
+                active.quotaIntervals !== undefined) &&
+              (scanInput.providers !== undefined ||
+                scanInput.quotaIntervals !== undefined ||
+                active.providers === undefined) &&
+              (active.providers === undefined ||
+                (scanInput.providers ?? [scanInput.quotaProvider ?? "codex"]).every((provider) =>
+                  active.providers!.includes(provider),
+                )) &&
+              (scanInput.quotaIntervals ?? []).every((interval) =>
+                active.quotaIntervals?.some(
+                  (candidate) => JSON.stringify(candidate) === JSON.stringify(interval),
+                ),
+              );
+            if (!covered) shared = undefined;
+          }
+          if (
+            shared &&
+            (input.quotaIntervals ?? []).some((interval) =>
+              shared!.inputs.some((other) =>
+                other.quotaIntervals?.some(
+                  (candidate) =>
+                    candidate.id === interval.id &&
+                    JSON.stringify(candidate) !== JSON.stringify(interval),
+                ),
+              ),
+            )
           )
-        )
-          shared = undefined;
-        if (shared === undefined) {
-          const batch = {
-            inputs: [scanInput],
-            reportInputs: new Map(reportKey === undefined ? [] : [[reportKey, input]]),
-            started: false,
-            progress,
-            result: Deferred.makeUnsafe<Exit.Exit<UsageSummary, UsageReadError>>(),
-          };
-          inFlightSummaries.set(batchKey, batch);
-          shared = batch;
-          // Capture queued windows after acquiring the lock. They use one
-          // inventory, parse and priced index pass, including overlapping quotas.
-          yield* Effect.forkIn(
-            Effect.yieldNow.pipe(
-              Effect.andThen(
-                scanSemaphore.withPermits(1)(
-                  Effect.gen(function* () {
-                    const queued = mergeUsageReads(batch.inputs);
-                    if (queued.includeQuotaHistory || queued.quotaIntervals !== undefined) {
-                      yield* readSummaryUnlocked(
-                        { ...queued, quotaHistoryOnly: true },
-                        undefined,
+            shared = undefined;
+          if (shared === undefined) {
+            const batch = {
+              inputs: [scanInput],
+              reportInputs: new Map(reportKey === undefined ? [] : [[reportKey, input]]),
+              started: false,
+              progress,
+              result: Deferred.makeUnsafe<Exit.Exit<UsageSummary, UsageReadError>>(),
+            };
+            inFlightSummaries.set(batchKey, batch);
+            shared = batch;
+            // Capture queued windows after acquiring the lock. They use one
+            // inventory, parse and priced index pass, including overlapping quotas.
+            yield* Effect.forkIn(
+              Effect.yieldNow.pipe(
+                Effect.andThen(
+                  scanSemaphore.withPermits(1)(
+                    Effect.gen(function* () {
+                      const queued = mergeUsageReads(batch.inputs);
+                      if (queued.includeQuotaHistory || queued.quotaIntervals !== undefined) {
+                        yield* readSummaryUnlocked(
+                          { ...queued, quotaHistoryOnly: true },
+                          undefined,
+                          batch.progress,
+                          true,
+                        );
+                      }
+                      yield* ensureLegacyScanCacheImported;
+                      batch.started = true;
+                      return yield* readSummaryUnlocked(
+                        mergeUsageReads(batch.inputs),
+                        context,
                         batch.progress,
                         true,
-                      );
-                    }
-                    yield* ensureLegacyScanCacheImported;
-                    batch.started = true;
-                    return yield* readSummaryUnlocked(
-                      mergeUsageReads(batch.inputs),
-                      context,
-                      batch.progress,
-                      true,
-                    ).pipe(Effect.ensuring(Effect.sync(() => scanStore.release())));
-                  }),
+                      ).pipe(Effect.ensuring(Effect.sync(() => scanStore.release())));
+                    }),
+                  ),
+                ),
+                // A report caller can time out while the shared scan is still running.
+                Effect.tap((summary) =>
+                  Clock.currentTimeMillis.pipe(
+                    Effect.map((now) => {
+                      for (const [key, input] of batch.reportInputs) {
+                        reportSnapshots.set(key, now, projectUsageRead(summary, input));
+                      }
+                    }),
+                  ),
+                ),
+                Effect.onExit((exit) =>
+                  Effect.sync(() => {
+                    if (inFlightSummaries.get(batchKey) === batch)
+                      inFlightSummaries.delete(batchKey);
+                  }).pipe(Effect.andThen(Deferred.succeed(batch.result, exit))),
                 ),
               ),
-              // A report caller can time out while the shared scan is still running.
-              Effect.tap((summary) =>
-                Clock.currentTimeMillis.pipe(
-                  Effect.map((now) => {
-                    for (const [key, input] of batch.reportInputs) {
-                      reportSnapshots.set(key, now, projectUsageRead(summary, input));
-                    }
-                  }),
-                ),
-              ),
-              Effect.onExit((exit) =>
-                Effect.sync(() => {
-                  if (inFlightSummaries.get(batchKey) === batch) inFlightSummaries.delete(batchKey);
-                }).pipe(Effect.andThen(Deferred.succeed(batch.result, exit))),
-              ),
-            ),
-            serviceScope,
-            { startImmediately: true },
-          );
-        } else {
-          if (!shared.started) shared.inputs.push(scanInput);
-          if (reportKey !== undefined) shared.reportInputs.set(reportKey, input);
-          progress = shared.progress;
-        }
-        const exit = yield* Deferred.await(shared.result);
-        if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
-        const summary = withSavedCosts(projectUsageRead(exit.value, input));
-        if (
-          summary.sources.length > 0 &&
-          summary.sources.every((source) => source.status === "missing")
-        ) {
-          summaryCache.set(key, yield* Clock.currentTimeMillis, summary);
-        }
-        return summary;
-      });
-      if (input.awaitRefresh) return yield* read;
-      const result = yield* read.pipe(Effect.timeoutOption(MAX_USAGE_READ_DURATION_MS));
-      if (Option.isSome(result)) return result.value;
-      if (resolvedDirs.length === 0) {
-        return yield* new UsageReadError({
-          reason: "scanFailed",
-          detail: "Usage response budget expired before source coverage could be established.",
+              serviceScope,
+              { startImmediately: true },
+            );
+          } else {
+            if (!shared.started) shared.inputs.push(scanInput);
+            if (reportKey !== undefined) shared.reportInputs.set(reportKey, input);
+            progress = shared.progress;
+          }
+          const exit = yield* Deferred.await(shared.result);
+          if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
+          const summary = withSavedCosts(projectUsageRead(exit.value, input));
+          if (
+            summary.sources.length > 0 &&
+            summary.sources.every((source) => source.status === "missing")
+          ) {
+            summaryCache.set(key, yield* Clock.currentTimeMillis, summary);
+          }
+          return summary;
         });
-      }
-      return withSavedCosts(
-        projectUsageRead(
-          yield* partialSummaryAtDeadline(input, startedAtMs, resolvedDirs, progress),
-          input,
-        ),
-      );
-    });
-  });
-
-  const readSummary: UsageSummaryReaderWithReportSnapshots = Effect.fn("UsageService.readSummary")(
-    function* (
-      { includeAntigravityQuota, ...scanInput }: UsageSummaryInput,
-      rememberReport = false,
-    ) {
-      const summary = yield* readScannedSummary(scanInput, rememberReport);
-      return includeAntigravityQuota
-        ? { ...summary, antigravityQuota: yield* readAntigravityQuota }
-        : summary;
+        if (input.awaitRefresh) return yield* read;
+        const result = yield* read.pipe(Effect.timeoutOption(MAX_USAGE_READ_DURATION_MS));
+        if (Option.isSome(result)) return result.value;
+        if (resolvedDirs.length === 0) {
+          return yield* new UsageReadError({
+            reason: "scanFailed",
+            detail: "Usage response budget expired before source coverage could be established.",
+          });
+        }
+        return withSavedCosts(
+          projectUsageRead(
+            yield* partialSummaryAtDeadline(input, startedAtMs, resolvedDirs, progress),
+            input,
+          ),
+        );
+      });
     },
   );
+
+  const readSummaryWithQuota: UsageSummaryReaderWithReportSnapshots = Effect.fn(
+    "UsageService.readSummaryWithQuota",
+  )(function* (
+    { includeAntigravityQuota, ...scanInput }: UsageSummaryInput,
+    rememberReport = false,
+  ) {
+    const summary = yield* readSummary(scanInput, rememberReport);
+    return includeAntigravityQuota
+      ? { ...summary, antigravityQuota: yield* readAntigravityQuota }
+      : summary;
+  });
 
   const readReport = Effect.fn("UsageService.readReport")(function* (input: UsageReportInput) {
     if (input.mode === "prompts") {
@@ -3037,7 +3038,7 @@ export const make = Effect.gen(function* () {
               quotaIntervals: input.quotaIntervals,
             }),
     };
-    const summary = yield* readSummary(summaryInput, input.mode !== "quota");
+    const summary = yield* readSummaryWithQuota(summaryInput, input.mode !== "quota");
     const report = projectUsageReport(
       summary,
       input,
@@ -3102,7 +3103,7 @@ export const make = Effect.gen(function* () {
   });
 
   return {
-    readSummary,
+    readSummary: readSummaryWithQuota,
     readReport: readReport as UsageService["Service"]["readReport"],
     refreshRates,
   } as const;
