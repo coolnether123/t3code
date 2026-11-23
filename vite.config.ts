@@ -1,5 +1,10 @@
 import "vite-plus/test/config";
 import { defineConfig } from "vite-plus";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Vite loads its lint configuration before the Effect runtime starts.
+import * as NodeCrypto from "node:crypto";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Inspect the files oxlint will read while building its configuration.
+import * as NodeFS from "node:fs";
+import inheritedCopy from "./docs/fork/inherited-untranslated-copy.json" with { type: "json" };
 import * as NodeURL from "node:url";
 import { remoteCacheUrl } from "./infra/task-cache/src/remoteCache.ts";
 import { cachedTestTasks } from "./scripts/lib/cached-tests.ts";
@@ -23,6 +28,20 @@ const TEST_CONFIG_PACKAGES = [
   "apps/web",
   "packages/client-runtime",
 ];
+
+// A changed fork file must pass the upstream rule in full. Hash canonical Git line endings.
+const inheritedCopyOverrides = Object.entries(inheritedCopy).flatMap(([file, baseline]) => {
+  const path = new URL(file, import.meta.url);
+  if (!NodeFS.existsSync(path)) return [];
+  const source = NodeFS.readFileSync(path, "utf8").replaceAll("\r\n", "\n");
+  if (NodeCrypto.createHash("sha256").update(source).digest("hex") !== baseline.sha256) return [];
+  return [
+    {
+      files: [file],
+      rules: { "t3code/no-untranslated-copy": ["error", baseline.sites] as ["error", string[]] },
+    },
+  ];
+});
 
 // `vp test run <file>` from the repo root hands each file to its package's
 // config. Packages that borrow this config (`--config ../../vite.config.ts`) run
@@ -65,7 +84,7 @@ const RESTRICTED_UI_VARIANT_PATTERNS = [
     group: ["**/components/ui/*", "**/ui/*", "./ui/*"],
     importNames: ["buttonVariants", "toggleVariants", "badgeVariants", "selectTriggerVariants"],
     message:
-      "Render the components/ui export instead of borrowing its class recipe (render={<Button …/>}, SelectButton, ToggleGroup).",
+      "Render the components/ui export instead of borrowing its class recipe (render={<Button â€¦/>}, SelectButton, ToggleGroup).",
   },
 ];
 
@@ -128,7 +147,7 @@ export default defineConfig({
     // Web test peers create another Vite+ instance under pnpm. Transform the
     // Effect wrapper so its test API uses this runner's module context.
     server: { deps: { inline: ["@effect/vitest"] } },
-    // Fixture subprocesses must not inherit the outer task runner’s cache policy.
+    // Fixture subprocesses must not inherit the outer task runnerâ€™s cache policy.
     env: { VP_REMOTE_CACHE: "off", VP_REMOTE_CACHE_URL: "" },
     exclude: TEST_EXCLUDE,
     hookTimeout: 60_000,
@@ -595,7 +614,7 @@ export default defineConfig({
               allow: ["layout"],
               contracts: [
                 {
-                  // CollapsibleTrigger has no styled counterpart; other triggers use render={<Button …/>}.
+                  // CollapsibleTrigger has no styled counterpart; other triggers use render={<Button â€¦/>}.
                   pattern: "^CollapsibleTrigger$",
                   allow: ["layout", "color", "typography", "spacing", "shape", "effects", "motion"],
                 },
@@ -618,6 +637,7 @@ export default defineConfig({
         ],
         rules: { "t3code/no-untranslated-copy": "error" },
       },
+      ...inheritedCopyOverrides,
       {
         // React Compiler owns memoization; upstream rules do not ban redundant useMemo/useCallback.
         files: ["apps/web/src/**/*.{ts,tsx}"],

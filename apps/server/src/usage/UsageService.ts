@@ -61,6 +61,7 @@ import {
   canonicalModelFilter,
   makeDayFormatter,
   resolveModelAliases,
+  usageTimestampFilter,
   UsageAggregator,
 } from "./usageAggregation.ts";
 import {
@@ -1518,6 +1519,12 @@ export const make = Effect.gen(function* () {
     // a window is filtered without decoding any history it does not need.
     const cacheEntryTouchesWindow = (meta: CachedFileMeta) => meta.latestMs >= windowStartMs;
 
+    const inWindow = usageTimestampFilter({ ...input, ...hourlyWindow });
+    const countMalformed = (entry: CachedFile | undefined) =>
+      entry?.codexState?.providerState?.malformedRecordTimestamps?.filter(inWindow).length ??
+      entry?.codexState?.providerState?.malformedRecords ??
+      entry?.malformedRecords ??
+      0;
     const aggregator = new UsageAggregator({
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
@@ -1713,9 +1720,7 @@ export const make = Effect.gen(function* () {
           scannedFiles,
           skippedFiles: 0,
           malformedRecords: retainedFiles.reduce(
-            (sum, [, entry]) =>
-              sum +
-              (entry.codexState?.providerState?.malformedRecords ?? entry.malformedRecords ?? 0),
+            (sum, [, entry]) => sum + countMalformed(entry),
             0,
           ),
           distinctSessions: sessionIds.size,
@@ -2182,7 +2187,11 @@ export const make = Effect.gen(function* () {
       const malformedRecords =
         provider === "codex"
           ? selection.files.reduce(
-              (sum, file) => sum + (scanStore.meta(file.path)?.malformedRecords ?? 0),
+              (sum, file) =>
+                sum +
+                (scanStore.meta(file.path)?.malformedRecords
+                  ? countMalformed(scanStore.load(file.path))
+                  : 0),
               0,
             )
           : 0;

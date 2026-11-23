@@ -98,7 +98,7 @@ describe("readTranscriptRecords resume", () => {
         }
         return TEST_FORMATS.claude.parseProjected(value, undefined);
       },
-      readMalformedRecords: (state: { errors: number }) => state.errors,
+      readMalformedRecords: (state) => Array.from({ length: state.errors }, () => 0),
     };
     const path = NodePath.join(dir, "diagnostics.jsonl");
     const malformed = JSON.stringify({ usage: "malformed" });

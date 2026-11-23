@@ -12,6 +12,8 @@ import {
   getProviderOptionCurrentLabel,
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
+  DEFAULT_VARIANT_CHOICE_ID,
+  getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
   readCustomModelEntries,
   toCustomModelSetting,
@@ -404,6 +406,22 @@ describe("provider-reported option display", () => {
     expect(
       getProviderOptionCurrentLabel({ ...descriptor, currentValue: "thinking" }, selection),
     ).toBe("Unknown");
+  });
+
+  it("shows the catalog's Default choice while no variant is chosen", () => {
+    const withDefault = {
+      ...descriptor,
+      options: [{ id: DEFAULT_VARIANT_CHOICE_ID, label: "Default" }, ...descriptor.options],
+      currentValue: DEFAULT_VARIANT_CHOICE_ID,
+    };
+    expect(getProviderOptionCurrentValue(withDefault, selection)).toBe(DEFAULT_VARIANT_CHOICE_ID);
+    expect(getProviderOptionCurrentLabel(withDefault, selection)).toBe("Default");
+    expect(
+      getProviderOptionCurrentLabel(withDefault, selection, {
+        ...reported,
+        options: [{ id: "variant", value: "thinking" }],
+      }),
+    ).toBe("Thinking");
   });
 
   it.each([

@@ -18,10 +18,11 @@ function Copy-T3ControlScripts {
     New-Item -ItemType Directory -Path $ControlRoot -Force | Out-Null
     [void](Assert-SafeRoot $ControlRoot 'maintenance controls')
     $target = Join-Path $ControlRoot $sha
-    $files = @('t3-nightly-sync.mjs','t3-nightly-check.mjs','t3-nightly-lint.mjs','t3-nightly-task-links.mjs','t3-build-job.mjs','t3-deploy.mjs','t3-deploy.ps1','t3-prepare-release.ps1','t3-build-common.ps1','t3-deploy-idle.mjs','t3-release-state.mjs','t3-supervisor.mjs','t3-restore-userdata.mjs')
+    $files = @('t3-nightly-sync.mjs','t3-nightly-check.mjs','t3-nightly-lint.mjs','lib/check-file-batches.ts','lib/nightly-related-tests.mjs','t3-nightly-task-links.mjs','t3-build-job.mjs','t3-deploy.mjs','t3-deploy.ps1','t3-prepare-release.ps1','t3-build-common.ps1','t3-deploy-idle.mjs','t3-release-state.mjs','t3-supervisor.mjs','t3-restore-userdata.mjs')
     if (-not (Test-Path -LiteralPath $target)) {
         $staging = Join-Path $ControlRoot ('.copy-' + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $staging | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $staging 'lib') | Out-Null
         foreach ($name in $files) { Copy-Item -LiteralPath (Join-Path $Repository ('scripts/' + $name)) -Destination (Join-Path $staging $name) }
         [IO.File]::WriteAllText((Join-Path $staging 'maintenance-control.json'), (@{commit=$sha;files=@($files | ForEach-Object { @{path=$_;sha256=(Get-FileSha256 (Join-Path $staging $_))} })} | ConvertTo-Json -Depth 6))
         [IO.Directory]::Move($staging, $target)

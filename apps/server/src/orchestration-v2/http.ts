@@ -8,6 +8,7 @@ import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import {
   AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
+  AuthProvidersManageScope,
   EnvironmentHttpApi,
   type OrchestrationProjectShell,
 } from "@t3tools/contracts";
@@ -217,7 +218,7 @@ export const layer = HttpApiBuilder.group(
         "dispatch",
         Effect.fn("environment.orchestration.dispatch")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          const session = yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
           const result = yield* startup
             .enqueueCommand(
               ThreadMessageIntake.dispatchCommand(
@@ -225,6 +226,7 @@ export const layer = HttpApiBuilder.group(
                   createdBy: "agent",
                   creationSource: "server",
                 }),
+                { managesProviders: session.scopes.has(AuthProvidersManageScope) },
               ).pipe(Effect.provide(dispatchContext)),
             )
             .pipe(Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)));

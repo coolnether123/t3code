@@ -49,6 +49,7 @@ const FORWARDING_FAILED_MESSAGE = "Could not deliver the sign-in response. Start
 const LOGIN_CODE_FIELD = "code";
 const isSetupError = Schema.is(ProviderSetupError);
 const isAcpRequestError = Schema.is(AcpErrors.AcpRequestError);
+const isAcpProcessExitedError = Schema.is(AcpErrors.AcpProcessExitedError);
 
 interface AuthSnapshot {
   readonly ownerSessionId: string | null;
@@ -81,6 +82,8 @@ export interface AntigravityAuth {
     stop: Effect.Effect<void>,
     task: Effect.Effect<A, E, R>,
   ) => Effect.Effect<A, E | ProviderSetupError, R | Scope.Scope>;
+  /** A session started outside a flow, so an earlier flow's failure no longer describes sign-in. */
+  readonly onSignedInElsewhere: Effect.Effect<void>;
 }
 
 /** `agy acp --login`: it prints a Google link and reads the code the Antigravity page shows. */
@@ -139,6 +142,16 @@ function safeAuthFailure(cause: Cause.Cause<unknown>, usesBrowser: boolean): str
   if (Option.isSome(error)) {
     if (isSetupError(error.value)) {
       return error.value.detail;
+    }
+    if (isAcpProcessExitedError(error.value)) {
+      const { code, signal } = error.value;
+      const reason =
+        signal !== undefined
+          ? ` after signal ${signal}`
+          : code !== undefined
+            ? ` with code ${code}`
+            : "";
+      return `Antigravity exited unexpectedly${reason}. Start sign-in again.`;
     }
     if (isAcpRequestError(error.value)) {
       if (error.value.errorMessage.includes("SUBSCRIPTION_REQUIRED")) {
@@ -692,5 +705,13 @@ export const makeAntigravityAuth = Effect.fn("makeAntigravityAuth")(function* <
     }),
   );
 
-  return { controller, withProcess };
+  const onSignedInElsewhere = SubscriptionRef.update(snapshot, (value) =>
+    activeFlow === undefined &&
+    operation === "idle" &&
+    (value.state.phase === "failed" || value.state.phase === "cancelled")
+      ? { ownerSessionId: null, state: emptyState }
+      : value,
+  );
+
+  return { controller, withProcess, onSignedInElsewhere };
 });

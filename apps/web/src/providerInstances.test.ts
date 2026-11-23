@@ -80,7 +80,7 @@ describe("isProviderInstancePickerReady", () => {
     expect(entry && isProviderInstancePickerReady(entry)).toBe(true);
   });
 
-  it("keeps cached models selectable while an installed provider has a probe warning", () => {
+  it("keeps cached models selectable after a probe warning when sign-in is confirmed", () => {
     const degraded = {
       ...provider({
         provider: ProviderDriverKind.make("codex"),
@@ -88,7 +88,6 @@ describe("isProviderInstancePickerReady", () => {
         status: "warning",
         models: [model("cached-codex")],
       }),
-      auth: { status: "unknown" },
     } as const satisfies ServerProvider;
     const [entry] = deriveProviderInstanceEntries([degraded]);
     expect(entry && isProviderInstancePickerReady(entry)).toBe(true);
@@ -99,7 +98,6 @@ describe("isProviderInstancePickerReady", () => {
       { ...degraded, availability: "unavailable" as const },
       { ...degraded, auth: { status: "unauthenticated" as const } },
       { ...degraded, models: [] },
-      { ...degraded, models: [model("custom-only", true)] },
       { ...degraded, status: "error" as const },
     ]) {
       const [unavailableEntry] = deriveProviderInstanceEntries([unavailable]);
@@ -130,6 +128,48 @@ describe("isProviderInstancePickerReady", () => {
     expect(ready(fx([model("default", false, true), backendModel("gpt-5.5", "Codex")]))).toBe(
       false,
     );
+  });
+
+  it("keeps offering the models a refresh retained when the catalog did not arrive in time", () => {
+    const [entry] = deriveProviderInstanceEntries([
+      {
+        ...provider({
+          provider: ProviderDriverKind.make("codex"),
+          instanceId: "codex",
+          status: "warning",
+          models: [model("gpt-5.5", false, true), model("gpt-5.4")],
+        }),
+        message: "Codex did not return its model catalog in time.",
+      },
+    ]);
+
+    expect(entry && isProviderInstancePickerReady(entry)).toBe(true);
+    expect(
+      entry && isProviderInstancePickerReady({ ...entry, models: [model("bailian", true)] }),
+    ).toBe(true);
+    expect(entry && isProviderInstancePickerReady({ ...entry, models: [] })).toBe(false);
+  });
+
+  it("offers a failed provider's models only while the server marks them retained", () => {
+    const failed = provider({
+      provider: ProviderDriverKind.make("codex"),
+      instanceId: "codex",
+      status: "error",
+      models: [model("gpt-5.5", false, true)],
+    });
+    const ready = (snapshot: ServerProvider) =>
+      deriveProviderInstanceEntries([snapshot]).map(isProviderInstancePickerReady)[0];
+
+    expect(ready({ ...failed, modelsRetained: true })).toBe(true);
+    expect(ready(failed)).toBe(false);
+    const unknownSignIn = {
+      ...failed,
+      status: "warning",
+      auth: { status: "unknown" },
+    } as const satisfies ServerProvider;
+    expect(ready(unknownSignIn)).toBe(false);
+    expect(ready({ ...unknownSignIn, modelsRetained: false })).toBe(false);
+    expect(ready({ ...unknownSignIn, modelsRetained: true })).toBe(true);
   });
 });
 

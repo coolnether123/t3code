@@ -24,7 +24,7 @@ import {
 } from "@tanstack/react-router";
 import * as Cause from "effect/Cause";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, onTestFinished, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
 import { act, render, type Screen } from "../../../test/render";
@@ -179,6 +179,10 @@ function deferred<T>() {
 }
 
 function setup() {
+  const drafts = useComposerDraftStore.getState();
+  onTestFinished(() => {
+    useComposerDraftStore.setState(drafts, true);
+  });
   vi.clearAllMocks();
   state.sessions.clear();
   for (const id of [primaryId, remoteId])
@@ -536,13 +540,16 @@ describe("project identity reset", () => {
         input: { projectId: state.projects[0]!.id, title: "No project" },
       }),
     );
-    await userEvent.click(resetButton(screen, "project icon")!);
+    const iconReset = resetButton(screen, "project icon")!;
+    const iconRow = iconReset.closest('[data-slot="settings-row"]');
+    await userEvent.click(iconReset);
     await vi.waitFor(() =>
       expect(state.update).toHaveBeenLastCalledWith({
         environmentId: primaryId,
         input: { projectId: state.projects[0]!.id, faviconPath: null, projectIcon: scratchIcon },
       }),
     );
+    expect(document.activeElement).toBe(iconRow);
   });
 
   it("resets each member of a mixed group to its own default icon", async () => {

@@ -56,7 +56,7 @@ describe("Antigravity process environment", () => {
     browserCommand: "managed-browser-helper",
   };
 
-  it("isolates the profile and harness after merging overrides without changing the base environment", () => {
+  it("runs `agy acp` with an isolated profile without changing the base environment", () => {
     const baseEnv = {
       HOME: "/home/developer",
       PATH: "/usr/bin",
@@ -72,7 +72,7 @@ describe("Antigravity process environment", () => {
       GEMINI_HOME: "/shared-gemini-home",
       gemini_home: "/alias-shared-home",
       AGY_ACP_FORCE_FILE_STORAGE: "0",
-      ANTIGRAVITY_HARNESS_PATH: "/wrong-version/harness",
+      agy_cli_disable_auto_update: "0",
       BROWSER: "open-real-browser",
       browser: "another-real-browser",
       PYTHONUNBUFFERED: "0",
@@ -83,7 +83,7 @@ describe("Antigravity process environment", () => {
     };
     const original = { ...baseEnv };
     const spawn = buildAntigravityAcpSpawnInput({
-      installation: { executablePath: "/release/acp", harnessPath: "/release/harness" },
+      installation: { executablePath: "/usr/bin/agy" },
       profile,
       cwd: "/project",
       baseEnv,
@@ -91,8 +91,8 @@ describe("Antigravity process environment", () => {
 
     expect(baseEnv).toEqual(original);
     expect(spawn).toEqual({
-      command: "/release/acp",
-      args: ["--uid="],
+      command: "/usr/bin/agy",
+      args: ["acp", "--gemini-dir", profile.geminiHome, "--app-data-dir", "antigravity-acp"],
       cwd: "/project",
       extendEnv: false,
       env: {
@@ -102,7 +102,7 @@ describe("Antigravity process environment", () => {
         SSH_CONNECTION: "127.0.0.1 0 127.0.0.1 0",
         GEMINI_HOME: profile.geminiHome,
         AGY_ACP_FORCE_FILE_STORAGE: "1",
-        ANTIGRAVITY_HARNESS_PATH: "/release/harness",
+        AGY_CLI_DISABLE_AUTO_UPDATE: "1",
         BROWSER: profile.browserCommand,
         PYTHONUNBUFFERED: "1",
         ELECTRON_RUN_AS_NODE: "1",
@@ -111,31 +111,11 @@ describe("Antigravity process environment", () => {
     });
   });
 
-  it("runs the agy CLI as `agy acp` without a harness", () => {
-    const spawn = buildAntigravityAcpSpawnInput({
-      installation: { executablePath: "/usr/bin/agy", harnessPath: null },
-      profile,
-      cwd: "/project",
-      baseEnv: { PATH: "/usr/bin", ANTIGRAVITY_HARNESS_PATH: "/stale/harness" },
-    });
-
-    expect(spawn.command).toBe("/usr/bin/agy");
-    expect(spawn.args).toEqual([
-      "acp",
-      "--gemini-dir",
-      profile.geminiHome,
-      "--app-data-dir",
-      "antigravity-acp",
-    ]);
-    expect(spawn.env).not.toHaveProperty("ANTIGRAVITY_HARNESS_PATH");
-    expect(spawn.env).toMatchObject({ GEMINI_HOME: profile.geminiHome, PATH: "/usr/bin" });
-  });
-
   it("passes only the configured method's credential and keeps the GCP pair out of the environment", () => {
     const baseEnv = { PATH: "/usr/bin", GOOGLE_API_KEY: "ambient-key" };
     const spawnFor = (auth: AntigravityAuthConfig) =>
       buildAntigravityAcpSpawnInput({
-        installation: { executablePath: "/release/acp", harnessPath: "/release/harness" },
+        installation: { executablePath: "/usr/bin/agy" },
         profile,
         cwd: "/project",
         baseEnv,
@@ -180,7 +160,7 @@ describe("Antigravity process environment", () => {
 
   it("lets a personal account use the native keyring even with an inherited SSH environment", () => {
     const spawn = buildAntigravityAcpSpawnInput({
-      installation: { executablePath: "/release/agy", harnessPath: null },
+      installation: { executablePath: "/release/agy" },
       profile,
       cwd: "/project",
       baseEnv: { ssh_connection: "sandbox", SSH_CLIENT: "sandbox", SSH_TTY: "sandbox" },
@@ -209,10 +189,7 @@ describe("Antigravity process environment", () => {
       browserCommand: "managed-browser-helper",
     };
     const input = {
-      installation: {
-        executablePath: "C:\\release\\agy_acp_server.exe",
-        harnessPath: "C:\\release\\localharness_external.exe",
-      },
+      installation: { executablePath: "C:\\release\\agy.exe" },
       profile: windowsProfile,
       cwd: "C:\\project",
       baseEnv: { PATH: "C:\\Windows\\system32", TEMP: "C:\\Users\\user\\AppData\\Local\\Temp" },
@@ -572,7 +549,7 @@ it.layer(NodeServices.layer)("Antigravity profile preparation", (it) => {
       }),
     );
     return buildAntigravityAcpSpawnInput({
-      installation: { executablePath: "/release/acp", harnessPath: "/release/harness" },
+      installation: { executablePath: "/usr/bin/agy" },
       profile,
       cwd: directory,
       baseEnv,
@@ -731,6 +708,88 @@ it.layer(NodeServices.layer)("Antigravity profile preparation", (it) => {
         yield* prepareAntigravityProfile({ profileDirectory, userHome });
         expect(yield* isLink(cliLink)).toBe(false);
       }),
+  );
+
+  it.effect.skipIf(!symlinksSupported)(
+    "links the user's global rule files and never replaces the profile's own",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const temporaryDirectory = yield* fs.makeTempDirectoryScoped();
+        const userHome = path.join(temporaryDirectory, "home");
+        const profileDirectory = path.join(temporaryDirectory, "profile");
+        const userGemini = path.join(userHome, ".gemini");
+        yield* fs.makeDirectory(path.join(userGemini, "config"), { recursive: true });
+        yield* fs.writeFileString(path.join(userGemini, "AGENTS.md"), "global agents rule");
+        yield* fs.writeFileString(path.join(userGemini, "GEMINI.md"), "global gemini rule");
+        yield* fs.writeFileString(
+          path.join(userGemini, "config", "skills.json"),
+          JSON.stringify({ entries: [{ path: "/tmp/shared-skills" }] }),
+        );
+
+        yield* prepareAntigravityProfile({ profileDirectory, userHome });
+        expect(yield* fs.readLink(path.join(profileDirectory, "AGENTS.md"))).toBe(
+          path.join(userGemini, "AGENTS.md"),
+        );
+        expect(yield* fs.readLink(path.join(profileDirectory, "GEMINI.md"))).toBe(
+          path.join(userGemini, "GEMINI.md"),
+        );
+        expect(yield* fs.readLink(path.join(profileDirectory, "config", "skills.json"))).toBe(
+          path.join(userGemini, "config", "skills.json"),
+        );
+
+        yield* fs.remove(path.join(userGemini, "AGENTS.md"));
+        yield* fs.remove(path.join(userGemini, "config", "skills.json"));
+        yield* fs.remove(path.join(profileDirectory, "GEMINI.md"));
+        yield* fs.writeFileString(path.join(profileDirectory, "GEMINI.md"), "profile's own rule");
+        yield* prepareAntigravityProfile({ profileDirectory, userHome });
+        expect(yield* fs.exists(path.join(profileDirectory, "AGENTS.md"))).toBe(false);
+        expect(yield* fs.exists(path.join(profileDirectory, "config", "skills.json"))).toBe(false);
+        expect(yield* fs.readFileString(path.join(profileDirectory, "GEMINI.md"))).toBe(
+          "profile's own rule",
+        );
+      }),
+  );
+
+  it.effect("copies the user's global rule files on Windows and keeps the profile's own", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const temporaryDirectory = yield* fs.makeTempDirectoryScoped();
+      const userHome = path.join(temporaryDirectory, "home");
+      const profileDirectory = path.join(temporaryDirectory, "profile");
+      const userGemini = path.join(userHome, ".gemini");
+      const prepare = prepareAntigravityProfile({ profileDirectory, userHome, platform: "win32" });
+      const profileAgents = path.join(profileDirectory, "AGENTS.md");
+      const profileGemini = path.join(profileDirectory, "GEMINI.md");
+      const profileSkillsJson = path.join(profileDirectory, "config", "skills.json");
+      const userSkillsJson = path.join(userGemini, "config", "skills.json");
+      yield* fs.makeDirectory(path.join(userGemini, "config"), { recursive: true });
+      yield* fs.writeFileString(path.join(userGemini, "AGENTS.md"), "global agents rule");
+      yield* fs.writeFileString(path.join(userGemini, "GEMINI.md"), "global gemini rule");
+      yield* fs.writeFileString(userSkillsJson, '{"entries":[]}');
+
+      yield* prepare;
+      expect(yield* fs.readFileString(profileAgents)).toBe("global agents rule");
+      expect(yield* fs.readFileString(profileGemini)).toBe("global gemini rule");
+      expect(yield* fs.readFileString(profileSkillsJson)).toBe('{"entries":[]}');
+
+      yield* fs.writeFileString(path.join(userGemini, "AGENTS.md"), "edited agents rule");
+      yield* fs.remove(path.join(userGemini, "GEMINI.md"));
+      yield* fs.writeFileString(userSkillsJson, '{"entries":[{"path":"/skills"}]}');
+      yield* prepare;
+      expect(yield* fs.readFileString(profileAgents)).toBe("edited agents rule");
+      expect(yield* fs.exists(profileGemini)).toBe(false);
+      expect(yield* fs.readFileString(profileSkillsJson)).toBe('{"entries":[{"path":"/skills"}]}');
+
+      yield* fs.writeFileString(profileGemini, "profile's own rule");
+      yield* fs.writeFileString(path.join(userGemini, "GEMINI.md"), "global gemini rule");
+      yield* fs.remove(userSkillsJson);
+      yield* prepare;
+      expect(yield* fs.readFileString(profileGemini)).toBe("profile's own rule");
+      expect(yield* fs.exists(profileSkillsJson)).toBe(false);
+    }),
   );
 
   it.effect("rewrites the GCP block on every launch and never stores the API key", () =>

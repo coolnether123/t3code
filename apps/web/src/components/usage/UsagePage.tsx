@@ -533,12 +533,12 @@ export function UsagePage() {
           <AppRouteModalClose />
         </header>
 
-        <ScrollArea className="min-h-0 flex-1">
+        <ScrollArea className="min-h-0 flex-1" observeContent>
           <WorkspacePageContainer width="wide">
             <BirthdayGreeting />
             <div className="mb-5 flex justify-end">
               <Link to="/usage-resets" className="text-sm underline">
-                Limits &amp; resets
+                <T>Limits &amp; resets</T>
               </Link>
             </div>
             {!showingLimits ? (
@@ -559,23 +559,29 @@ export function UsagePage() {
             {!showingLimits && merged.codexServiceTiers ? (
               <div
                 className="mb-4 text-xs text-muted-foreground"
-                aria-label="Codex Fast Mode accounting"
+                aria-label={gt("Codex Fast Mode accounting")}
               >
                 <CodexUsageButton
                   onOpen={() => {
                     void navigate({ to: "/usage-resets" });
                   }}
                 >
-                  Codex Fast Mode
+                  <T>Codex Fast Mode</T>
                 </CodexUsageButton>
                 <p>
-                  {formatUsd(merged.codexServiceTiers.fastCostUsd)} across{" "}
-                  {formatCount(merged.codexServiceTiers.fastRecords)} responses.
+                  {gt("{cost} across {count} responses.", {
+                    cost: formatUsd(merged.codexServiceTiers.fastCostUsd),
+                    count: formatCount(merged.codexServiceTiers.fastRecords),
+                  })}
                 </p>
                 <p>
-                  {formatCount(merged.codexServiceTiers.userReportedRecords)} responses use
-                  user-reported windows. {formatCount(merged.codexServiceTiers.unknownRecords)}{" "}
-                  responses have no speed metadata.
+                  {gt(
+                    "{reported} responses use user-reported windows. {unknown} responses have no speed metadata.",
+                    {
+                      reported: formatCount(merged.codexServiceTiers.userReportedRecords),
+                      unknown: formatCount(merged.codexServiceTiers.unknownRecords),
+                    },
+                  )}
                 </p>
               </div>
             ) : null}
@@ -749,8 +755,10 @@ function UsageOverview({
       !hiddenProviders.has("codex") &&
       savedCodexValue > 0 ? (
         <p className="text-sm text-muted-foreground">
-          Saved Codex reset value: {formatUsd(savedCodexValue)} across closed windows in this range.{" "}
-          The transcript total below is still counting.
+          {gt(
+            "Saved Codex reset value: {cost} across closed windows in this range. The transcript total below is still counting.",
+            { cost: formatUsd(savedCodexValue) },
+          )}
         </p>
       ) : null}
       {sourceMessages.map((message) => (

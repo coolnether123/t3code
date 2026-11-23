@@ -40,7 +40,10 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 const CODEX_TIMEOUT_MS = 180_000;
 const CODEX_MCP_LIST_TIMEOUT_MS = 10_000;
 // Plugins/apps add MCP servers; use trailing config overrides because --disable loses to user -c flags.
+// Codex also reads the legacy connectors key for apps.
 const CODEX_NO_PLUGIN_ARGS = [
+  "--config",
+  "features.connectors=false",
   "--config",
   "features.plugins=false",
   "--config",
@@ -58,9 +61,11 @@ const codexMcpServersOff = (names: ReadonlyArray<string>): string | null =>
     : `mcp_servers={${names.map((name) => `${JSON.stringify(name)}={enabled=false}`).join(",")}}`;
 // Codex splits -c keys at the first "=" and on every dot, so only those names take a dotted flag.
 const codexMcpServerOffFlags = (names: ReadonlyArray<string>) =>
-  names
-    .filter((name) => !name.includes(".") && !name.includes("="))
-    .flatMap((name) => ["--config", `mcp_servers.${name}.enabled=false`]);
+  names.flatMap((name) =>
+    name.includes(".") || name.includes("=")
+      ? []
+      : ["--config", `mcp_servers.${name}.enabled=false`],
+  );
 const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(function* (
   codexConfig: CodexSettings,

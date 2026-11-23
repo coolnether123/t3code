@@ -321,6 +321,26 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AntigravityAuth"
     }),
   );
 
+  it.effect("says Antigravity exited when its process dies during sign-in", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ interactive: false });
+      yield* harness.auth.controller.start(owner);
+      yield* Deferred.await(harness.authenticateCalled);
+      yield* Deferred.fail(
+        harness.authenticated,
+        new AcpErrors.AcpProcessExitedError({
+          signal: "SIGILL",
+          stderr: `runtime crashed ${callbackUrl}`,
+        }),
+      );
+      const failed = yield* phase(harness.auth, "failed");
+      assert.include(failed.message ?? "", "exited");
+      assert.include(failed.message ?? "", "SIGILL");
+      assert.notInclude(failed.message ?? "", "Google sign-in failed");
+      assert.notInclude(failed.message ?? "", "runtime crashed");
+    }),
+  );
+
   it.effect("tells the user when the agent cannot reach Google", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({ interactive: false });
@@ -338,6 +358,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AntigravityAuth"
       yield* TestClock.adjust("270 seconds");
       const failed = yield* phase(harness.auth, "failed");
       assert.include(failed.message ?? "", "could not reach Google");
+
+      yield* harness.auth.onSignedInElsewhere;
+      const cleared = yield* phase(harness.auth, "idle");
+      assert.isNull(cleared.message);
     }),
   );
 

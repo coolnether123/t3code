@@ -17,6 +17,10 @@
       "vite": { "entry": [".github/**/*.test.cjs"] },
       "vitest": { "entry": [".github/**/*.test.cjs"] },
     },
+    "evals": {
+      // The grader loads these answers by path, as the server loads a definitions file.
+      "entry": ["workflow-authoring/fixtures/*.ts"],
+    },
     "scripts": {
       // Knip loads its preprocessor through a CLI option; native verification and
       // worktree setup (from t3.json) run directly. release-desktop.yml bundles the
@@ -35,6 +39,7 @@
         "t3-supervisor.mjs",
         "t3-nightly-sync.mjs",
         "t3-nightly-check.mjs",
+        "lib/nightly-related-tests.mjs",
         "t3-install.mjs",
         "t3-nightly-task-links.mjs",
         "t3-*.fixture.mjs",
