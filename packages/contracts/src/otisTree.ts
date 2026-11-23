@@ -10,7 +10,7 @@ const optionalText = S.optionalKey(textOrNull);
 const tokens = S.Struct({ in: count, out: count, cached: count, total: count });
 const chat = S.Union([
   S.Struct({ host: S.Literal("t3"), environmentId: id, threadId: id }),
-  S.Struct({ host: S.Literal("otis") }),
+  S.Struct({ host: S.Literal("otis"), threadId: optionalText }),
 ]);
 export const OtisNode = S.Struct({
   id,

@@ -227,7 +227,6 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
     return yield* decodeAction(yield* post(path, input)).pipe(Effect.mapError(invalidResponse));
   });
   const tail = Effect.fn("OtisBridge.tail")(function* ({ nodeId, ...page }: OtisTailInput) {
-    if (localRead) return yield* unconfigured;
     const raw = yield* post(`nodes/${encodeURIComponent(nodeId)}/tail`, page);
     const result = yield* decodeTail(raw).pipe(Effect.mapError(invalidResponse));
     if (result.nodeId !== nodeId) return yield* invalidResponse();

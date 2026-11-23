@@ -195,7 +195,7 @@ it.effect(
     }),
 );
 
-it.effect("reads the local fleet without granting actions or transcript access", () =>
+it.effect("reads the local fleet and transcript without granting actions", () =>
   Effect.gen(function* () {
     const { fixture } = yield* producerFixture;
     const tree = feed();
@@ -213,6 +213,16 @@ it.effect("reads the local fleet without granting actions or transcript access",
         if (path.endsWith("/tree-stream")) return tree.response;
         if (path.endsWith("/waiting-stream")) return waiting.response;
         if (path.endsWith("/tree-read")) return Response.json({ nodes: [], next: null });
+        if (path.endsWith("/nodes/lane%3Aotis-1/tail")) {
+          expect(JSON.parse(String(init?.body))).toEqual({ after: 10 });
+          return Response.json({
+            nodeId: "lane:otis-1",
+            items: [],
+            prev: null,
+            next: null,
+            end: true,
+          });
+        }
         throw Error("Unexpected route");
       },
     });
@@ -227,12 +237,10 @@ it.effect("reads the local fleet without granting actions or transcript access",
     const action = yield* Effect.flip(
       bridge.act({ type: "seen", nodeId: "run", requestId: "one" }),
     );
-    const tail = yield* Effect.flip(bridge.tail({ nodeId: "run" }));
+    const tail = yield* bridge.tail({ nodeId: "lane:otis-1", after: 10 });
     expect(action.reason).toBe("unconfigured");
-    expect(tail.reason).toBe("unconfigured");
-    expect(calls.every((path) => /\/(tree-stream|waiting-stream|tree-read)$/.test(path))).toBe(
-      true,
-    );
+    expect(tail.nodeId).toBe("lane:otis-1");
+    expect(calls.some((path) => path.endsWith("/nodes/act"))).toBe(false);
   }),
 );
 

@@ -57,7 +57,7 @@ function HistoryPage({
   return (
     <>
       {result.page.nodes.map((node) =>
-        node.chat?.host === "t3" ? (
+        node.chat ? (
           <button data-fleet-link="" key={node.id} onClick={() => onOpen(node)}>
             <FleetTitle title={node.title} />
           </button>

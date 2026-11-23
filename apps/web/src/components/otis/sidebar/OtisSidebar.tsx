@@ -100,6 +100,10 @@ function FleetList({
           ThreadId.make(node.chat.threadId),
         ),
       );
+    if (node.chat?.host === "otis") {
+      if (isMobile) setOpenMobile(false);
+      void navigate({ to: "/otis/node/$nodeId", params: { nodeId: node.id } });
+    }
   });
   const expand = useStableCallback((id: string) => {
     if (isMobile) setPhonePath([...path, id]);
@@ -170,7 +174,7 @@ function FleetList({
               ? gt("{tokens} today", { tokens: fleetRowLabels(parent, nodes, false).tokens })
               : fleetRowLabels(parent, nodes, false).tokens}
           </div>
-          {parent.chat?.host === "t3" && (
+          {parent.chat && (
             <button data-fleet-link="" onClick={() => open(parent)}>
               {gt("Open chat")}
             </button>

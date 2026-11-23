@@ -25,7 +25,8 @@ vi.mock("../../../../../../packages/client-runtime/src/connection/driver.ts", as
   return { ...actual, layer: Layer.succeed(actual.ConnectionDriver, fakeDriver) };
 });
 
-import type { OtisFleetEvent, OtisNode, OtisTreeRead } from "@t3tools/contracts";
+import type { OtisFleetEvent, OtisNode, OtisTailInput, OtisTreeRead } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 import fixture from "../../../../../../apps/server/src/otis/fixtures/tree-stream.ndjson?raw";
 import { OtisTreeBatch } from "@t3tools/contracts";
@@ -43,7 +44,11 @@ function exampleTree() {
     model: models[i]!,
     tokens: tokens([1200000, 310000, 88000, 540000, 12000][i]!),
   }));
-  const parent = { ...roots[0]!, sub: { ...base.sub, nodes: 5, running: 2 } };
+  const parent: OtisNode = {
+    ...roots[0]!,
+    chat: { host: "otis", threadId: "fixture-parent" },
+    sub: { ...base.sub, nodes: 5, running: 2 },
+  };
   const a: OtisNode = {
     ...child,
     id: "a",
@@ -77,7 +82,7 @@ function exampleTree() {
   };
   return { nodes: [parent, ...roots.slice(1), a, b, c, d], a, b, finished };
 }
-it("keeps fleet rows in place, returns from stock, and drills into one phone level", async () => {
+it("opens the native parent chat, expands its children, and follows it on desktop and phone", async () => {
   await page.viewport(1280, 844);
   const { nodes, a, b, finished } = exampleTree();
   const frames = new TransformStream<OtisFleetEvent, OtisFleetEvent>();
@@ -87,6 +92,26 @@ it("keeps fleet rows in place, returns from stock, and drills into one phone lev
       ? Stream.make({ type: "read", result: { nodes: [finished], next: null } })
       : Stream.fromReadableStream({ evaluate: () => frames.readable, onError: String }),
   );
+  const tail = vi.fn(({ nodeId, after }: OtisTailInput) =>
+    Effect.succeed({
+      nodeId,
+      items: [
+        {
+          seq: after === undefined ? 10 : 20,
+          at: "2026-11-23T00:00:00Z",
+          role: "assistant" as const,
+          from: "self" as const,
+          text: after === undefined ? "Initial parent turn." : "New parent turn.",
+          cut: false,
+          tool: null,
+        },
+      ],
+      prev: null,
+      next: null,
+      end: true,
+    }),
+  );
+  using _tailRpc = answerRpc("otis.nodeTail", tail);
   const threads = [
     threadWithHistory("Fleet release verification", 1),
     threadWithHistory("November maintenance schedule", 1),
@@ -109,6 +134,12 @@ it("keeps fleet rows in place, returns from stock, and drills into one phone lev
   await writer.write({ type: "snapshot", seq: 1, nodes, waiting: null, load: null });
   await page.getByRole("button", { name: "Expand Otis #1" }).click();
   const lane = page.getByRole("region", { name: "Otis fleet" });
+  await expect.element(lane.getByText(a.title)).toBeVisible();
+  await lane.getByRole("button", { name: /^Otis #1/ }).click();
+  await expect.element(page.getByRole("heading", { name: "Otis #1" })).toBeVisible();
+  await expect.element(page.getByText("Initial parent turn.")).toBeVisible();
+  expect(router.state.location.pathname).toBe("/otis/node/lane%3Aotis-1");
+  expect(tail).toHaveBeenCalledExactlyOnceWith({ nodeId: "lane:otis-1" });
   const order = () =>
     Array.from(
       lane.element().querySelectorAll("[data-fleet-row]"),
@@ -124,10 +155,13 @@ it("keeps fleet rows in place, returns from stock, and drills into one phone lev
     type: "delta",
     seq: 2,
     nodes: [
+      { ...nodes[0]!, tailSeq: 20, rev: nodes[0]!.rev + 1 },
       { ...a, waiting: 1, rev: a.rev + 1 },
       { ...b, tokens: { in: 100000, out: 0, cached: 0, total: 100000 }, rev: b.rev + 1 },
     ],
   });
+  await expect.element(page.getByText("New parent turn.")).toBeVisible();
+  expect(tail).toHaveBeenLastCalledWith({ nodeId: "lane:otis-1", after: 10 });
   await expect.element(lane.getByText("Sol 6.2 · 100k")).toBeVisible();
   expect(order()).toEqual(original);
   await page.getByRole("button", { name: /Other chats/ }).click();
@@ -147,6 +181,13 @@ it("keeps fleet rows in place, returns from stock, and drills into one phone lev
   await expect.element(lane.getByText("Facilities")).not.toBeInTheDocument();
   await expect.element(lane.getByRole("button", { name: "Done · 1" })).toBeVisible();
   await page.screenshot({ path: "__screenshots__/fleet-v1-phone.png" });
+  await lane.getByRole("button", { name: "Open chat", exact: true }).click();
+  await expect.element(page.getByRole("heading", { name: "Otis #1" })).toBeVisible();
+  await expect.element(lane).not.toBeInTheDocument();
+  await page
+    .getByRole("button", { name: /Toggle main sidebar/ })
+    .first()
+    .click();
   await lane.getByRole("button", { name: "Back from Otis #1" }).click();
   await lane.getByRole("button", { name: /Otis #1/ }).click();
   await lane.getByRole("button", { name: new RegExp(a.title) }).click();

@@ -85,12 +85,8 @@ export const OtisTreeRow = memo(function OtisTreeRow({
           ? labels.model + " · " + labels.tokens
           : null);
   const detail = lane ? summary : childDetail;
-  const drill = branch && (narrow || node.chat?.host !== "t3");
-  const action = drill
-    ? () => onExpand(node.id)
-    : node.chat?.host === "t3"
-      ? () => onOpen(node)
-      : undefined;
+  const drill = narrow && (branch || (lane && node.chat !== null));
+  const action = drill ? () => onExpand(node.id) : node.chat ? () => onOpen(node) : undefined;
   const name = (
     <>
       <span className="flex min-w-0 items-center gap-1.5">
@@ -130,7 +126,7 @@ export const OtisTreeRow = memo(function OtisTreeRow({
           onClick={action}
         >
           <span className="min-w-0 flex-1">{name}</span>
-          {narrow && branch && <ChevronRight size={14} aria-hidden="true" />}
+          {drill && <ChevronRight size={14} aria-hidden="true" />}
         </button>
       ) : (
         <div className="min-w-0 flex-1">{name}</div>
