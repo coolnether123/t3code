@@ -1,0 +1,32 @@
+[data-fleet-row] {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 44px;
+}
+[data-fleet-row]:has(button):hover,
+[data-fleet-link]:hover {
+  background: var(--sidebar-row-hover);
+}
+[data-fleet-action],
+[data-fleet-link] {
+  cursor: pointer;
+}
+[data-fleet-action]:focus-visible,
+[data-fleet-link]:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+[data-fleet-link] {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.4rem;
+  text-align: left;
+  min-height: 28px;
+  padding: 0 0.65rem;
+}
+@media (max-width: 767px) {
+  [data-fleet-link],
+  [data-fleet-action] {
+    min-height: 44px;
+  }
+}

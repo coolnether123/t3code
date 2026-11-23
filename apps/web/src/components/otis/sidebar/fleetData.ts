@@ -1,0 +1,51 @@
+import { useAtomValue } from "@effect/atom-react";
+import { settledChildren } from "@t3tools/client-runtime/rpc/otis-history";
+import { runStreamInEnvironment } from "@t3tools/client-runtime/state/runtime";
+import type { EnvironmentId, OtisNode } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
+import * as Option from "effect/Option";
+import { Atom, AtomRegistry, AsyncResult } from "effect/reactivity";
+import { connectionAtomRuntime } from "~/connection/runtime";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
+import { createOtisTreeAtoms } from "@t3tools/client-runtime/state/otis-tree";
+import { offlineFleet } from "@t3tools/client-runtime/otis/tree";
+
+const { tree } = createOtisTreeAtoms(connectionAtomRuntime);
+const fleet = Atom.make((get) => {
+  const environmentId = get(primaryEnvironmentIdAtom);
+  if (!environmentId) return offlineFleet;
+  const result = get(tree({ environmentId, input: {} }));
+  return AsyncResult.isSuccess(result) ? result.value : offlineFleet;
+});
+
+export function useFleet() {
+  return useAtomValue(fleet);
+}
+
+export interface DonePage {
+  readonly nodes: readonly OtisNode[];
+  readonly next: string | null;
+}
+
+export async function readDonePage(
+  environmentId: EnvironmentId,
+  parent: string,
+  before: string | null,
+  signal: AbortSignal,
+): Promise<DonePage> {
+  const stream = settledChildren(parent, before);
+  const response = await Effect.runPromise(
+    AtomRegistry.getResult(appAtomRegistry, connectionAtomRuntime).pipe(
+      Effect.flatMap((context) =>
+        runStreamInEnvironment(environmentId, stream).pipe(Stream.runHead, Effect.provide(context)),
+      ),
+    ),
+    { signal },
+  );
+  const frame = Option.getOrNull(response);
+  if (frame?.type !== "read" || !("next" in frame.result))
+    throw new Error("Done chats unavailable");
+  return frame.result;
+}

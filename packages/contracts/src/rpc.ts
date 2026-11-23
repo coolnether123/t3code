@@ -52,6 +52,7 @@ import {
   ChatGptHandoffState,
 } from "./providerSetup.ts";
 import * as Schema from "effect/Schema";
+import { otisRpcs } from "./otisTree.ts";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
@@ -2543,6 +2544,7 @@ export const LegacyUsageRpcGroup = RpcGroup.make(
 ).middleware(RpcScopeAuthorization);
 
 export const WsRpcGroup = RpcGroup.make(
+  ...otisRpcs,
   WsServerGetUsageReportRpc,
   WsServerGetResetCheckRpc,
   WsServerStartResetCheckRpc,
