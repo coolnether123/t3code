@@ -2,6 +2,7 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   AntigravitySettings,
+  DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL,
   ProviderDriverKind,
   ProviderSetupError,
   type ServerProviderUsageLimits,
@@ -9,6 +10,7 @@ import {
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
+import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import {
   NodeRuntimeUnavailableError,
@@ -18,6 +20,7 @@ import * as Digest from "effect/crypto/Digest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -612,6 +615,24 @@ export const AntigravityDriver: ProviderDriver<
       probe,
       probeUsage: usage.probe.pipe(Effect.tap(saveQuota)),
       clearUsage: usage.clear,
+      ...(host.shouldSampleQuotaHistory &&
+      (auth.authMethod === "oauth-personal" || auth.authMethod === "oauth-business")
+        ? {
+            quotaSampling: {
+              allowed: host.shouldSampleQuotaHistory,
+              interval: host.settings.get.pipe(
+                Effect.map((settings) => {
+                  const interval =
+                    resolveServerBackgroundActivitySettings(settings).providerHealthRefreshInterval;
+                  return Duration.toMillis(interval) > 0
+                    ? interval
+                    : DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL;
+                }),
+                Effect.orElseSucceed(() => DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL),
+              ),
+            },
+          }
+        : {}),
       auth: { type: auth.authMethod, label: antigravityAuthLabel(auth.authMethod) },
       supportsTextGeneration: isAntigravityTextGenerationAvailable(profileDirectory).pipe(
         Effect.provideService(FileSystem.FileSystem, fileSystem),

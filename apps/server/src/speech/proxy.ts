@@ -28,7 +28,13 @@ const acquireSpeechLease = (url: string, init: RequestInit): Promise<Response> =
         );
       },
     );
-    request.on("error", reject);
+    request.on("error", (error) => {
+      reject(
+        init.signal?.aborted
+          ? (init.signal.reason ?? error)
+          : SpeechUnavailableError.new("Could not connect to the local speech router."),
+      );
+    });
     request.end(init.body);
   });
 

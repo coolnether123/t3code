@@ -1,4 +1,5 @@
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import { ProviderCredentialError } from "@t3tools/provider-core/server/errors";
 import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
@@ -43,6 +44,19 @@ export const layer = Layer.effect(
         subscribe: serverSettings.subscribeChanges,
       },
       shouldRunBackgroundWork: backgroundPolicy.shouldRunScopeWork,
+      shouldSampleQuotaHistory: Effect.all([
+        backgroundPolicy.snapshot,
+        serverSettings.getSettings,
+      ]).pipe(
+        Effect.map(
+          ([snapshot, settings]) =>
+            !BackgroundPolicy.isHostConstrained(
+              snapshot.hostPower,
+              resolveServerBackgroundActivitySettings(settings),
+            ),
+        ),
+        Effect.orElseSucceed(() => false),
+      ),
       ...Option.match(lifecycleEvents, {
         onNone: () => ({}),
         onSome: (events) => ({ awaitServerReady: events.awaitReady }),

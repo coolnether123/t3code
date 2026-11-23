@@ -248,6 +248,17 @@ describe("agent usage report projections", () => {
     const credits = { hasCredits: true, unlimited: false, balance: "49537.6424375" };
     const withCredits = {
       ...summary,
+      providerQuotaHistories: [
+        {
+          provider: "claude",
+          windowId: "seven_day",
+          label: "Weekly",
+          kind: "weekly",
+          status: "ready",
+          message: null,
+          samples: summary.quotaHistory!.samples,
+        },
+      ] satisfies UsageSummary["providerQuotaHistories"],
       quotaHistory: {
         ...summary.quotaHistory!,
         samples: summary.quotaHistory!.samples.map((sample) => ({ ...sample, credits })),
@@ -262,6 +273,15 @@ describe("agent usage report projections", () => {
       totalCosts: 1,
       costsTruncated: false,
     });
+    expect(decodeUsageReport(report)).toMatchObject({
+      providerQuotaHistories: report.providerQuotaHistories,
+    });
+    expect(report.providerQuotaHistories).toEqual([
+      {
+        ...withCredits.providerQuotaHistories[0],
+        samples: summary.quotaHistory!.samples.slice(-1),
+      },
+    ]);
     expect(report.quotaHistory.samples).toHaveLength(1);
     expect(report.quotaHistory.samples[0]?.remainingPercent).toBe(80);
     expect(report.quotaHistory.samples[0]?.credits).toEqual(credits);
