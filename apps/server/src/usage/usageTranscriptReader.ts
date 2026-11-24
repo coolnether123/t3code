@@ -7,9 +7,8 @@ import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 import * as NodeSqlite from "node:sqlite";
 import * as NodeCrypto from "node:crypto";
-import * as NodeStream from "node:stream";
-import * as NodeUtil from "node:util";
 import * as NodeZlib from "node:zlib";
+import * as NodeStream from "node:stream";
 
 import type { UsageProviderKind } from "@t3tools/contracts";
 
@@ -39,6 +38,7 @@ export interface TranscriptFile {
   readonly path: string;
   readonly size: number;
   readonly mtimeMs: number;
+  readonly ctimeMs?: number;
 }
 
 export interface TranscriptFileListing {
@@ -49,6 +49,7 @@ export interface TranscriptFileListing {
 
 interface TranscriptInventoryWalk {
   running: boolean;
+  incomplete: boolean;
   readonly directories: string[];
   directoryOffset: number;
   readonly transcripts: string[];
@@ -94,6 +95,7 @@ async function refreshKnownInventory(
   expired: () => boolean,
   wallClock: () => number,
 ): Promise<boolean> {
+  let complete = true;
   const changed: string[] = [];
   const directories = [...known.directoryMtimes.keys()];
   for (let offset = 0; offset < directories.length; offset += METADATA_BATCH) {
@@ -134,7 +136,10 @@ async function refreshKnownInventory(
       }),
     );
     for (const { directory, mtime, entries } of listings) {
-      if (entries === null || mtime === null) continue;
+      if (entries === null || mtime === null) {
+        complete = false;
+        continue;
+      }
       known.directoryMtimes.set(directory, mtime);
       const present = new Set<string>();
       for (const entry of entries) {
@@ -164,7 +169,7 @@ async function refreshKnownInventory(
       batch.map(async (path) => {
         try {
           const stats = await NodeFSP.stat(path);
-          return { path, size: stats.size, mtimeMs: stats.mtimeMs };
+          return { path, size: stats.size, mtimeMs: stats.mtimeMs, ctimeMs: stats.ctimeMs };
         } catch {
           return { path, size: -1, mtimeMs: -1 };
         }
@@ -176,7 +181,7 @@ async function refreshKnownInventory(
     }
     if (expired()) return false;
   }
-  return true;
+  return complete;
 }
 
 export interface TranscriptScanSelection<File extends TranscriptFile = TranscriptFile> {
@@ -201,6 +206,7 @@ export function selectTranscriptFilesForScan<File extends TranscriptFile>(
   files: readonly File[],
   bytesToRead: (file: File) => number,
   maxColdBytes: number,
+  attemptedAt?: (file: File) => number,
 ): TranscriptScanSelection<File> {
   const selected: File[] = [];
   let deferredFiles = 0;
@@ -210,7 +216,10 @@ export function selectTranscriptFilesForScan<File extends TranscriptFile>(
   let selectedColdFile = false;
 
   const newestFirst = [...files].sort(
-    (left, right) => right.mtimeMs - left.mtimeMs || left.path.localeCompare(right.path),
+    (left, right) =>
+      (attemptedAt === undefined ? 0 : attemptedAt(left) - attemptedAt(right)) ||
+      right.mtimeMs - left.mtimeMs ||
+      left.path.localeCompare(right.path),
   );
   for (const file of newestFirst) {
     const readBytes = bytesToRead(file);
@@ -303,6 +312,7 @@ export async function listTranscriptFilesBounded(
 
   const inventory = pendingTranscriptInventories.get(inventoryKey) ?? {
     running: false,
+    incomplete: false,
     directories: [root],
     directoryOffset: 0,
     transcripts: [],
@@ -338,8 +348,14 @@ export async function listTranscriptFilesBounded(
           paths.map(async (child) => {
             try {
               const stats = await NodeFSP.stat(child);
-              return { path: child, size: stats.size, mtimeMs: stats.mtimeMs };
-            } catch {
+              return {
+                path: child,
+                size: stats.size,
+                mtimeMs: stats.mtimeMs,
+                ctimeMs: stats.ctimeMs,
+              };
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") inventory.incomplete = true;
               return null;
             }
           }),
@@ -362,7 +378,9 @@ export async function listTranscriptFilesBounded(
             const mtime = await statMtime(dir);
             try {
               return { dir, mtime, entries: await NodeFSP.readdir(dir, { withFileTypes: true }) };
-            } catch {
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT" || dir === root)
+                inventory.incomplete = true;
               return { dir, mtime: null, entries: [] };
             }
           }),
@@ -381,6 +399,7 @@ export async function listTranscriptFilesBounded(
       if (pendingTranscriptInventories.get(inventoryKey) === inventory) {
         pendingTranscriptInventories.delete(inventoryKey);
       }
+      if (inventory.incomplete) return partial();
       knownTranscriptInventories.set(inventoryKey, {
         files: new Map(inventory.files),
         directoryMtimes: new Map(inventory.directoryMtimes),
@@ -461,31 +480,34 @@ export interface TranscriptReadResult {
   readonly decodedSize?: number;
 }
 
-const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
-const decompressArchive = NodeUtil.promisify(NodeZlib.zstdDecompress);
-
-async function readArchiveSnapshot(filePath: string): Promise<Buffer> {
-  const file = await NodeFSP.open(filePath, "r");
+/** Streams the decoded byte range without retaining an entire archive in memory. */
+async function* readArchiveChunks(
+  filePath: string,
+  start: number,
+  end?: number,
+  extent?: { decodedSize: number },
+) {
+  const source = NodeFS.createReadStream(filePath);
+  const decoded = NodeZlib.createZstdDecompress();
+  source.on("error", (error) => decoded.destroy(error));
+  source.pipe(decoded);
   try {
-    const stats = await file.stat();
-    if (stats.size > MAX_ARCHIVE_BYTES) throw new Error("Archive exceeds scan limit");
-    const compressed = Buffer.allocUnsafe(stats.size);
     let offset = 0;
-    while (offset < compressed.length) {
-      const { bytesRead } = await file.read(compressed, offset, compressed.length - offset, offset);
-      if (bytesRead === 0) throw new Error("Archive changed during scan");
-      offset += bytesRead;
+    for await (const chunk of decoded) {
+      const next = offset + chunk.length;
+      if (next > start && (end === undefined || offset <= end)) {
+        yield chunk.subarray(
+          Math.max(0, start - offset),
+          end === undefined ? undefined : end + 1 - offset,
+        );
+      }
+      offset = next;
+      if (end !== undefined && offset > end && extent === undefined) break;
     }
-    if ((await file.stat()).size !== stats.size) throw new Error("Archive changed during scan");
-    return await decompressArchive(compressed, { maxOutputLength: MAX_ARCHIVE_BYTES });
+    if (extent !== undefined) extent.decodedSize = offset;
   } finally {
-    await file.close();
-  }
-}
-
-function* snapshotChunks(snapshot: Buffer, start = 0, end = snapshot.length): Generator<Buffer> {
-  for (let offset = start; offset < end; offset += 64 * 1024) {
-    yield snapshot.subarray(offset, Math.min(end, offset + 64 * 1024));
+    source.destroy();
+    decoded.destroy();
   }
 }
 
@@ -599,7 +621,7 @@ async function readCompleteJsonlLines(
   >,
   visit: (line: string) => void,
   relevance: OversizedLineRelevance,
-  snapshot?: Buffer,
+  archive?: { decodedSize: number },
 ): Promise<JsonlReadProgress> {
   const start = options.startByte ?? 0;
   const end = options.endByte;
@@ -649,13 +671,9 @@ async function readCompleteJsonlLines(
     return bytes.subarray(lineEnd + 1);
   };
   const input =
-    snapshot === undefined
+    archive === undefined
       ? readFileChunks(filePath, start, end)
-      : snapshotChunks(
-          snapshot,
-          start,
-          Math.min(snapshot.length, end === undefined ? snapshot.length : end + 1),
-        );
+      : readArchiveChunks(filePath, start, end, archive);
   for await (const chunk of input) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     const remaining = discardingLine ? discardUntilLineEnd(bytes) : bytes;
@@ -676,20 +694,21 @@ async function readCompleteJsonlLines(
       startDiscarding(pending);
       nextByte += pending.length;
       pending = Buffer.alloc(0);
-    } else if (pending.length > 0 && snapshot === undefined) {
+    } else if (pending.length > 0) {
       pending = Buffer.from(pending);
     }
   }
 
   // Finish a skipped line past the range end rather than carrying it into the
   // next read: its relevance is known only while its first bytes are at hand.
+  const sourceSize = archive?.decodedSize ?? options.sourceSize;
   if (discardingLine && end !== undefined) {
-    const sourceEnd = options.sourceSize === undefined ? undefined : options.sourceSize - 1;
+    const sourceEnd = sourceSize === undefined ? undefined : sourceSize - 1;
     if (sourceEnd === undefined || sourceEnd > end) {
       const rest =
-        snapshot === undefined
+        archive === undefined
           ? readFileChunks(filePath, end + 1, sourceEnd)
-          : snapshotChunks(snapshot, end + 1);
+          : readArchiveChunks(filePath, end + 1);
       for await (const chunk of rest) {
         discardUntilLineEnd(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
         if (!discardingLine) break;
@@ -699,8 +718,7 @@ async function readCompleteJsonlLines(
 
   // JSONL producers occasionally omit the final newline. It is safe to parse
   // that final record only when this range reaches the known end of the file.
-  const reachesEnd =
-    end === undefined || options.sourceSize === undefined || end >= options.sourceSize - 1;
+  const reachesEnd = end === undefined || sourceSize === undefined || end >= sourceSize - 1;
   if (discardingLine) {
     // The line runs to the end of the file; it may still be being written.
     finishDiscarding();
@@ -766,9 +784,7 @@ export async function readTranscriptRecords(
   try {
     const start = options.startByte ?? 0;
     const end = options.endByte;
-    const snapshot = filePath.endsWith(".jsonl.zst")
-      ? await readArchiveSnapshot(filePath)
-      : undefined;
+    const archive = filePath.endsWith(".jsonl.zst") ? { decodedSize: 0 } : undefined;
     if (end !== undefined && end < start) {
       return provider === "codex"
         ? { records, nextByte: start, discardedLines: 0, discardingLine: false, codexState }
@@ -776,7 +792,7 @@ export async function readTranscriptRecords(
     }
     const progress = await readCompleteJsonlLines(
       filePath,
-      snapshot === undefined ? options : { ...options, sourceSize: snapshot.length },
+      options,
       (line) => {
         if (provider === "codex") {
           if (
@@ -795,13 +811,13 @@ export async function readTranscriptRecords(
         records.push(...parseClaudeRecords(line));
       },
       provider === "codex" ? CODEX_LINE_RELEVANCE : CLAUDE_LINE_RELEVANCE,
-      snapshot,
+      archive,
     );
     return {
       records,
       ...progress,
       ...(provider === "codex" ? { codexState } : {}),
-      ...(snapshot === undefined ? {} : { decodedSize: snapshot.length }),
+      ...archive,
     };
   } catch {
     return null;
@@ -830,24 +846,15 @@ export async function readRepeatedInputRecords(
   if (end !== undefined && end < start) return { observations, gaps, parserState };
 
   try {
-    const snapshot = filePath.endsWith(".jsonl.zst")
-      ? await readArchiveSnapshot(filePath)
-      : undefined;
+    const archive = filePath.endsWith(".jsonl.zst");
     const lines = NodeReadline.createInterface({
-      input:
-        snapshot === undefined
-          ? NodeFS.createReadStream(filePath, {
-              encoding: "utf8",
-              ...(start === 0 ? {} : { start }),
-              ...(end === undefined ? {} : { end }),
-            })
-          : NodeStream.Readable.from(
-              snapshotChunks(
-                snapshot,
-                start,
-                Math.min(snapshot.length, (end ?? snapshot.length - 1) + 1),
-              ),
-            ),
+      input: !archive
+        ? NodeFS.createReadStream(filePath, {
+            encoding: "utf8",
+            ...(start === 0 ? {} : { start }),
+            ...(end === undefined ? {} : { end }),
+          })
+        : NodeStream.Readable.from(readArchiveChunks(filePath, start, end)),
       crlfDelay: Infinity,
     });
     const parseOptions: ParseCodexRepeatedInputOptions = {

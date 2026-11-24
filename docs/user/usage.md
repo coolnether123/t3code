@@ -81,11 +81,10 @@ record are missing from the totals.
 Text generation (thread titles, commit messages, PR text, branch names and review guides) is not in
 the totals for Codex or Claude Code 2.0.63 and newer, because those runs save no session history.
 
-The server keeps scanned usage history for 92 days by default. Claude Code deletes its own
-transcripts after 30 days, so for older Claude usage this history is the only record left. To keep
-it longer, set `usageHistoryRetentionDays` in `<T3 home>/userdata/settings.json` to a number of days
-such as `365`, or to `"unlimited"`. Usage views still show at most 90 days. Lowering the value
-prunes older history on the next refresh, and raising it again does not bring pruned history back.
+The server keeps scanned usage history indefinitely by default. Claude Code deletes its own
+transcripts, so the scan cache may hold the only surviving usage records. Set
+`usageHistoryRetentionDays` in `<T3 home>/userdata/settings.json` to a number of days to limit
+retention. Lowering the value prunes older cached history on the next scan.
 While `settings.json` cannot be read, nothing is pruned.
 
 OpenCode reads its SQLite database and older JSON history. Antigravity reads local conversation
@@ -126,9 +125,10 @@ In **Hourly model usage**, each bar shows processed tokens for Astra, Sol, Luna,
 recorded model. Select an hour to see its token total and estimated dollar cost; token totals include
 cached input, and empty hours remain visible so the timeline stays accurate.
 
-Parsed transcripts are cached individually on the environment that owns them. Expanding to a range
-that has not been viewed before may briefly warm older history; afterward, unchanged chats reuse
-their cached records and only new or edited transcript files are parsed again.
+The server scans transcript history in the background, including when the Usage page is closed.
+It resumes unfinished scans and reuses cached records for unchanged files. A report can be
+partial while history is being scanned. Provider coverage shows which results are missing or
+incomplete.
 
 Usage history is independent from the providers enabled for new T3 Code chats. Disabling Claude
 Code or leaving Gemini unavailable as a chat provider does not remove their locally stored history

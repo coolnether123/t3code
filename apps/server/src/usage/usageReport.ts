@@ -310,7 +310,17 @@ function sourceCoverageStatus(
   return "complete";
 }
 
-function projectCoverage(summary: UsageSummary, mode: UsageReportInput["mode"]) {
+const defaultUsageProviders = [
+  "claude",
+  "codex",
+  "gemini",
+  "opencode",
+  "antigravity",
+  "chatgpt",
+  "aistudio",
+] as const;
+
+function projectCoverage(summary: UsageSummary, input: UsageReportInput) {
   const counts = {
     completeSources: 0,
     partialSources: 0,
@@ -336,13 +346,34 @@ function projectCoverage(summary: UsageSummary, mode: UsageReportInput["mode"]) 
     (total, bucket) => total + bucket.unpricedRecords,
     0,
   );
+  const mode = input.mode;
+  const wanted =
+    mode === "quota" || mode === "pricing" ? [] : (input.providers ?? defaultUsageProviders);
+  const providers = [
+    ...new Set([...wanted, ...summary.sources.map((source) => source.fingerprint.provider)]),
+  ].map((provider) => ({
+    provider,
+    status: sourceCoverageStatus(
+      summary.sources.filter((source) => source.fingerprint.provider === provider),
+      mode,
+    ),
+    records: summary.buckets.reduce(
+      (total, bucket) => total + (bucket.provider === provider ? bucket.records : 0),
+      0,
+    ),
+  }));
+  const sourceStatus = sourceCoverageStatus(summary.sources, mode);
   return {
-    status: sourceCoverageStatus(summary.sources, mode),
+    status:
+      sourceStatus === "complete" && providers.some((provider) => provider.status === "missing")
+        ? "partial"
+        : sourceStatus,
     sourceCount: summary.sources.length,
     ...counts,
     records,
     pricedRecords: Math.max(0, records - unpricedRecords),
     unpricedRecords,
+    providers,
   } as const;
 }
 
@@ -533,7 +564,7 @@ export function projectUsageReport(
   input: UsageReportInput,
   calculation: UsageReportCalculation,
 ): Exclude<UsageReport, { readonly mode: "prompts" }> {
-  const coverage = projectCoverage(summary, input.mode);
+  const coverage = projectCoverage(summary, input);
   const envelope = calculationEnvelope(summary, input, calculation, coverage);
 
   switch (input.mode) {

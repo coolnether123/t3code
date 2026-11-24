@@ -1,3 +1,4 @@
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
@@ -99,6 +100,94 @@ beforeEach(() => {
 });
 
 describe("incremental scan integration", () => {
+  it.effect("backfills older Codex files and keeps that coverage after a newer read", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const config = yield* ServerConfig.ServerConfig;
+      const timestampMs = Date.parse("2026-08-30T18:00:00Z");
+      yield* TestClock.setTime(Date.parse("2026-11-23T18:00:00Z"));
+      vi.mocked(listTranscriptFilesBounded).mockImplementation(async (root, sinceMs, provider) => ({
+        files:
+          provider === "codex" &&
+          /[\\/]sessions$/.test(root) &&
+          !/[\\/]codex-home[\\/]/.test(root) &&
+          sinceMs <= timestampMs
+            ? [{ path: path.join(root, "historical.jsonl"), size: 100, mtimeMs: timestampMs }]
+            : [],
+        complete: true,
+      }));
+      vi.mocked(readTranscriptRecords).mockResolvedValue({
+        records: [
+          {
+            provider: "codex",
+            timestampMs,
+            model: "gpt-6.2-sol",
+            sessionId: "older-session",
+            totals: {
+              uncachedInputTokens: 100,
+              cachedInputTokens: 25,
+              cacheCreationTokens: 0,
+              outputTokens: 10,
+              reasoningTokens: 5,
+            },
+            reportedCostUsd: null,
+            dedupeKey: "older-usage",
+          },
+        ],
+        nextByte: 100,
+        discardedLines: 0,
+        discardingLine: false,
+        codexState: initialCodexScanState(),
+      });
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(true),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const narrow = {
+        sinceDay: UsageDay.make("2026-11-23"),
+        untilDay: UsageDay.make("2026-11-23"),
+        timeZone: "UTC",
+        refresh: true,
+        providers: ["codex"] as const,
+      };
+      expect((yield* service.readReport({ ...narrow, mode: "overview" })).totals.records).toBe(0);
+      yield* service.refreshHistory(["codex"]);
+      expect(storedFiles(config.stateDir).map((file) => file.record_count)).toEqual([1]);
+      yield* TestClock.adjust("16 minutes");
+      yield* service.readReport({ ...narrow, mode: "overview" });
+      const db = new NodeSqlite.DatabaseSync(
+        path.join(config.stateDir, "usage-scan-cache.sqlite"),
+        { readOnly: true },
+      );
+      try {
+        expect(
+          db.prepare("SELECT MIN(since_ms) AS start FROM coverage WHERE provider = 'codex'").get()
+            ?.start,
+        ).toBe(0);
+      } finally {
+        db.close();
+      }
+      const older = yield* service.readReport({
+        ...narrow,
+        mode: "overview",
+        sinceDay: UsageDay.make("2026-08-24"),
+        untilDay: UsageDay.make("2026-08-31"),
+      });
+      expect(older.totals.records).toBe(1);
+      expect(older.totals.totals.outputTokens).toBe(10);
+      expect(older.coverage.providers).toEqual([
+        { provider: "codex", status: "complete", records: 1 },
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
+  );
+
   it.effect("resumes archive replacement across restart and invalidates a changed signature", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -1396,6 +1485,7 @@ describe("incremental scan integration", () => {
   it.effect("defers old warm entries until repeated-input metadata is rebuilt", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
+      const { baseDir } = yield* ServerConfig.ServerConfig;
       const encodedCache = encodeScanCache(
         new Map(
           files.map((file) => [
@@ -1413,6 +1503,7 @@ describe("incremental scan integration", () => {
       vi.mocked(readTranscriptRecords).mockClear();
       vi.mocked(readRepeatedInputRecords).mockClear();
       const service = yield* make.pipe(
+        Effect.provideService(HostProcess.Environment, { CODEX_HOME: baseDir + "/codex-fixture" }),
         Effect.provideService(FileSystem.FileSystem, {
           ...fs,
           exists: () => Effect.succeed(true),

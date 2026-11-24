@@ -224,6 +224,36 @@ describe("incremental transcript reads", () => {
       }
     },
   );
+  it("reads usage after 64 MiB of decoded archive data", async () => {
+    const directory = await NodeFSP.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "t3-usage-large-archive-"),
+    );
+    try {
+      const archive = NodePath.join(directory, "session.jsonl.zst");
+      const body = Buffer.alloc(65 * 1024 * 1024, " ".repeat(4095) + "\n");
+      const usage =
+        JSON.stringify({
+          type: "assistant",
+          sessionId: "large-archive",
+          timestamp: "2026-08-29T10:00:00Z",
+          message: {
+            id: "message-a",
+            model: "claude-sonnet-4-5",
+            usage: { input_tokens: 10, output_tokens: 2 },
+          },
+        }) + "\n";
+      await NodeFSP.writeFile(
+        archive,
+        NodeZlib.zstdCompressSync(Buffer.concat([body, Buffer.from(usage)])),
+      );
+      const result = await readTranscriptRecords(archive, "claude");
+      expect(result?.records.map((row) => row.totals.outputTokens)).toEqual([2]);
+      expect(result?.nextByte).toBe(body.length + Buffer.byteLength(usage));
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("discovers archived JSONL transcripts", async () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-archive-"));
     try {

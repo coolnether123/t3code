@@ -118,7 +118,16 @@ export const makeProviderUsageReader = Effect.gen(function* () {
         const instances = yield* instancesFor(driver, input.settings);
         let sources: readonly (ProviderUsageScan & { readonly malformedRecords?: number })[];
         if (reader.kind === "scan") {
-          sources = yield* reader.scan({ ...input, instances });
+          sources = yield* reader.scan({ ...input, instances }).pipe(
+            Effect.orElseSucceed(() => [
+              {
+                dir: config.baseDir,
+                files: null,
+                status: "failed" as const,
+                message: "This provider's usage scan failed. Other provider results are included.",
+              },
+            ]),
+          );
         } else {
           const directories = yield* Effect.forEach(
             (yield* Effect.forEach(instances, (instance) =>

@@ -17,7 +17,7 @@ import {
   type UsageRepeatedInputBreakdown,
   type UsageRepeatedInputItem,
   type UsageRepeatedInputModelCost,
-  type UsageDay,
+  UsageDay,
   type UsageQuotaCost,
   type ServerSettings as ServerSettingsValue,
   type UsagePricing,
@@ -604,6 +604,8 @@ export const make = Effect.gen(function* () {
   const scanSemaphore = yield* Semaphore.make(1);
 
   const recentScanAt = new Map<string, number>();
+  const backgroundAttempts = new Map<string, number>();
+  const archiveFingerprints = new Map<string, { identity: string; fingerprint: string }>();
   let repeatedInputCatalog: RepeatedInputCatalog | null = null;
   let repeatedInputCatalogRoots = "";
   let repeatedInputCatalogAtMs = 0;
@@ -1181,8 +1183,13 @@ export const make = Effect.gen(function* () {
     mtimeMs: number,
     provider: UsageProviderKind,
     requestedStartByte: number,
-    archiveFingerprint: string | null,
+    knownArchiveFingerprint: string | null,
   ): Effect.fn.Return<{ readonly records: readonly UsageRecord[]; readonly complete: boolean }> {
+    const archive = filePath.endsWith(".jsonl.zst");
+    const archiveFingerprint =
+      archive && knownArchiveFingerprint === null
+        ? yield* Effect.promise(() => readTranscriptPrefixFingerprint(filePath, size))
+        : knownArchiveFingerprint;
     const meta = scanStore.meta(filePath);
     // Provider is part of the identity: if both providers were ever pointed
     // at one directory, a hit parsed by the other parser must not be reused.
@@ -1221,9 +1228,11 @@ export const make = Effect.gen(function* () {
     const parsed = yield* Effect.promise(() =>
       readTranscriptRecords(filePath, provider, {
         startByte,
-        endByte: filePath.endsWith(".jsonl.zst")
-          ? startByte + MAX_TRANSCRIPT_READ_BYTES_PER_FILE - 1
-          : Math.min(size - 1, startByte + MAX_TRANSCRIPT_READ_BYTES_PER_FILE - 1),
+        ...(!archive
+          ? {
+              endByte: Math.min(size - 1, startByte + MAX_TRANSCRIPT_READ_BYTES_PER_FILE - 1),
+            }
+          : {}),
         sourceSize: size,
         ...(appendable && cached.scanDiscardingLine === true ? { discardPartialLine: true } : {}),
         ...(appendable && provider === "codex" && cached.codexState !== undefined
@@ -1308,7 +1317,7 @@ export const make = Effect.gen(function* () {
     input: UsageSummaryInput,
     context: UsageReadContext | undefined,
     progress: UsageReadProgress | undefined,
-    mode: "indexed" | "records",
+    mode: "indexed" | "records" | "background",
     batched: boolean,
   ) {
     if (input.sinceDay > input.untilDay) {
@@ -1512,8 +1521,10 @@ export const make = Effect.gen(function* () {
         detail: `sinceDay '${input.sinceDay}' is not a valid date`,
       });
     }
-    const windowStartMs =
-      (hourlyWindow?.sinceTimeMs ?? DateTime.toEpochMillis(windowStart.value)) - MTIME_SLACK_MS;
+    const background = mode === "background";
+    const windowStartMs = background
+      ? retentionCutoffMs
+      : (hourlyWindow?.sinceTimeMs ?? DateTime.toEpochMillis(windowStart.value)) - MTIME_SLACK_MS;
     // The index records each file's latest mtime, record, and observation, so
     // a window is filtered without decoding any history it does not need.
     const cacheEntryTouchesWindow = (meta: CachedFileMeta) => meta.latestMs >= windowStartMs;
@@ -1650,6 +1661,7 @@ export const make = Effect.gen(function* () {
       const physicalId = yield* physicalSourceId(dir);
       const identity = physicalId === undefined ? {} : { physicalSourceId: physicalId };
       if (!source.exists) {
+        if (background) continue;
         const coverage = scanStore.coverage(provider, dir);
         const retainedFiles = [...scanStore.index()].flatMap(([filePath, meta]) => {
           if (meta.provider !== provider || !cacheEntryTouchesWindow(meta)) return [];
@@ -1763,10 +1775,29 @@ export const make = Effect.gen(function* () {
         Effect.fnUntraced(function* (file) {
           const cached = scanStore.meta(file.path);
           const archive = file.path.endsWith(".jsonl.zst");
-          const archiveFingerprint =
-            archive && file.size <= 64 * 1024 * 1024
-              ? yield* Effect.promise(() => readTranscriptPrefixFingerprint(file.path, file.size))
-              : null;
+          let archiveFingerprint: string | null = null;
+          if (
+            archive &&
+            cached?.prefixFingerprint !== undefined &&
+            cached.size === file.size &&
+            cached.mtimeMs === file.mtimeMs
+          ) {
+            const identity =
+              file.ctimeMs === undefined
+                ? undefined
+                : `${file.ctimeMs}:${file.mtimeMs}:${file.size}`;
+            const remembered = archiveFingerprints.get(file.path);
+            if (!presentPaths.has(file.path)) archiveFingerprint = cached.prefixFingerprint;
+            else if (identity !== undefined && remembered?.identity === identity)
+              archiveFingerprint = remembered.fingerprint;
+            else {
+              archiveFingerprint = yield* Effect.promise(() =>
+                readTranscriptPrefixFingerprint(file.path, file.size),
+              );
+              if (identity !== undefined && archiveFingerprint !== null)
+                archiveFingerprints.set(file.path, { identity, fingerprint: archiveFingerprint });
+            }
+          }
           const archiveMatches =
             !archive ||
             (archiveFingerprint !== null && cached?.prefixFingerprint === archiveFingerprint);
@@ -1875,7 +1906,14 @@ export const make = Effect.gen(function* () {
                 file.size - file.repeatedInputStartByte,
               ),
         MAX_COLD_SCAN_BYTES_PER_SOURCE,
+        background ? (file) => backgroundAttempts.get(file.path) ?? 0 : undefined,
       );
+      if (background) {
+        for (const file of selection.files) {
+          if (!file.warm) backgroundAttempts.set(file.path, startedAtMs);
+          else backgroundAttempts.delete(file.path);
+        }
+      }
       if (repeatedInputEnabled && provider === "codex" && selection.deferredFiles > 0) {
         // The ordinary Usage scan may intentionally defer cold files to keep a
         // long-range request responsive. Repeated-input attribution must make
@@ -1921,6 +1959,7 @@ export const make = Effect.gen(function* () {
           duplicateArchives.add(file.path);
           continue;
         }
+        if (background && file.warm && scanStore.meta(original) === undefined) continue;
         if (!file.warm) transcriptIndexes.delete(file.path);
         const read = yield* readFileRecords(
           file.path,
@@ -1956,6 +1995,22 @@ export const make = Effect.gen(function* () {
           continue;
         }
         if (!presentPaths.has(file.path) && scanStore.meta(file.path) === undefined) continue;
+        if (background) {
+          if (file.unavailable) {
+            unavailableFiles += 1;
+          } else if (!file.warm && !readRecords.has(file.path)) {
+            transcriptIndexes.delete(file.path);
+            yield* readFileRecords(
+              file.path,
+              file.size,
+              file.mtimeMs,
+              provider,
+              file.startByte,
+              file.archiveFingerprint,
+            );
+          }
+          continue;
+        }
         if (file.unavailable) {
           const cached = scanStore.load(file.path);
           if (cached !== undefined) {
@@ -2191,6 +2246,7 @@ export const make = Effect.gen(function* () {
         unavailableFiles === 0 &&
         selection.deferredFiles === 0 &&
         selection.files.every((file) => {
+          if (supersededOriginals.has(file.path) || duplicateArchives.has(file.path)) return true;
           const cached = scanStore.meta(file.path);
           return (
             cached !== undefined &&
@@ -2206,7 +2262,11 @@ export const make = Effect.gen(function* () {
       if (shouldRefresh && scanCompleted) {
         recentScanAt.set(coverageKey, startedAtMs);
         const existingCoverage = scanStore.coverage(provider, dir);
-        if (!hasCurrentCoverage) {
+        // A successful narrow audit cannot move the start of wider coverage forward.
+        if (
+          !hasCurrentCoverage &&
+          (existingCoverage === undefined || scanStartMs <= existingCoverage.sinceMs)
+        ) {
           scanStore.setCoverage({
             provider,
             rootPath: dir,
@@ -2228,7 +2288,12 @@ export const make = Effect.gen(function* () {
       }
       sources.push({
         fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId, ...identity },
-        status: !scanCompleted || malformedRecords > 0 ? "partial" : "ok",
+        status:
+          !scanCompleted || malformedRecords > 0
+            ? "partial"
+            : (provider === "chatgpt" || provider === "aistudio") && scannedFiles === 0
+              ? "missing"
+              : "ok",
         scannedFiles,
         skippedFiles,
         malformedRecords,
@@ -2337,7 +2402,7 @@ export const make = Effect.gen(function* () {
       )
         continue;
       const sessions = new Set<string>();
-      for (const file of scan.files ?? []) {
+      for (const file of background ? [] : (scan.files ?? [])) {
         for (const record of file.records) {
           if (
             aggregator.add({ ...record, nativeSessionId: record.sessionId, sourcePath: scan.dir })
@@ -2352,7 +2417,14 @@ export const make = Effect.gen(function* () {
           resolvedHomePath: scan.dir,
           volumeId: scan.volumeId ?? (yield* Effect.promise(() => readDirectoryVolumeId(scan.dir))),
         },
-        status: scan.status ?? (scan.files === null ? "missing" : "ok"),
+        status:
+          scan.status === "failed" || scan.status === "partial"
+            ? scan.status
+            : scan.refreshing
+              ? "partial"
+              : scan.files === null
+                ? "missing"
+                : "ok",
         scannedFiles: scan.files?.length ?? 0,
         skippedFiles: 0,
         malformedRecords: scan.malformedRecords,
@@ -3102,11 +3174,47 @@ export const make = Effect.gen(function* () {
     };
   });
 
+  const refreshHistory = Effect.fn("UsageService.refreshHistory")(function* (
+    providers?: readonly UsageProviderKind[],
+  ) {
+    yield* ensureCachedRates;
+    const context = yield* resolveReadContext();
+    const today = DateTime.formatIsoDate(yield* DateTime.now);
+    yield* scanSemaphore.withPermits(1)(
+      readSummaryAttempt(
+        {
+          sinceDay: UsageDay.make(today),
+          untilDay: UsageDay.make(today),
+          timeZone: "UTC",
+          awaitRefresh: true,
+          ...(providers === undefined ? {} : { providers }),
+        },
+        context,
+        undefined,
+        "background",
+        false,
+      ).pipe(Effect.ensuring(Effect.sync(() => scanStore.release()))),
+    );
+  });
+
   return {
+    refreshHistory,
     readSummary: readSummaryWithQuota,
     readReport: readReport as UsageService["Service"]["readReport"],
     refreshRates,
   } as const;
 });
 
-export const layer = Layer.effect(UsageService, make);
+export const layer = Layer.effect(
+  UsageService,
+  Effect.tap(make, ({ refreshHistory }) =>
+    Effect.forkScoped(
+      Effect.forever(
+        refreshHistory().pipe(
+          Effect.catchCause(() => Effect.logWarning("Usage history refresh failed")),
+          Effect.andThen(Effect.sleep(Duration.millis(SUMMARY_CACHE_TTL_MS))),
+        ),
+      ),
+    ),
+  ),
+);

@@ -569,6 +569,15 @@ export const UsageReportCoverage = Schema.Struct({
   records: NonNegativeInt,
   pricedRecords: NonNegativeInt,
   unpricedRecords: NonNegativeInt,
+  providers: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        provider: UsageProviderKind,
+        status: UsageReportCoverageStatus,
+        records: NonNegativeInt,
+      }),
+    ),
+  ),
 });
 export type UsageReportCoverage = typeof UsageReportCoverage.Type;
 

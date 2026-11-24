@@ -1,7 +1,12 @@
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { AuthOrchestrationReadScope, LegacyUsageRpcGroup, WS_METHODS } from "@t3tools/contracts";
+import {
+  AuthDiagnosticsReadScope,
+  AuthOrchestrationReadScope,
+  LegacyUsageRpcGroup,
+  WS_METHODS,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -25,7 +30,7 @@ const routes = Layer.unwrap(
             [WS_METHODS.serverGetUsageSummary]: (input) => usage.readSummary(input),
             [WS_METHODS.serverGetUsageReport]: (input) => usage.readReport(input),
           }),
-          RpcAuthorization.layer([AuthOrchestrationReadScope]),
+          RpcAuthorization.layer([AuthDiagnosticsReadScope, AuthOrchestrationReadScope]),
           RpcSerialization.layerJson,
         ),
       ),
@@ -89,7 +94,7 @@ it.effect("keeps legacy usage Request/Exit frames and Ping/Pong over a real webs
               _tag: "Request",
               id: "2",
               tag: WS_METHODS.serverGetUsageReport,
-              payload: { ...usageWindow, mode: "overview" },
+              payload: { ...usageWindow, mode: "overview", providers: ["claude", "codex"] },
               headers: [],
             }),
           );
