@@ -8,7 +8,11 @@ import {
   type RelativeTimeState,
 } from "../timestampFormat";
 
-export function useRelativeTimeState(isoDate: string | null): RelativeTimeState {
+type RelativeTimeWithElapsed =
+  | Exclude<RelativeTimeState, { status: "relative" }>
+  | (Extract<RelativeTimeState, { status: "relative" }> & { elapsedMs: number });
+
+export function useRelativeTimeState(isoDate: string | null): RelativeTimeWithElapsed {
   const resolve = useMessages();
   const subscribe = (onChange: () => void) => {
     if (isoDate === null) return () => {};
@@ -29,5 +33,5 @@ export function useRelativeTimeState(isoDate: string | null): RelativeTimeState 
 
   if (isoDate === null) return { status: "missing" };
   if (elapsedMs === null) return { status: "invalid" };
-  return { status: "relative", ...formatRelativeElapsed(elapsedMs, resolve) };
+  return { status: "relative", elapsedMs, ...formatRelativeElapsed(elapsedMs, resolve) };
 }

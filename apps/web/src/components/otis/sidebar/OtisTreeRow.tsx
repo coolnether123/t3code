@@ -5,7 +5,6 @@ import type { OtisNode } from "@t3tools/contracts";
 import { ChevronDown, ChevronRight, Check, X, Square } from "lucide-react";
 import type { fleetRowLabels } from "@t3tools/client-runtime/otis/tree";
 import { useRelativeTimeState } from "~/hooks/useRelativeTimeState";
-import { formatRelativeElapsed } from "~/timestampFormat";
 import { runFleetAction } from "./fleetData";
 import { usePrimaryEnvironmentId } from "~/state/environments";
 import { memo, useRef, useState } from "react";
@@ -58,7 +57,7 @@ export function NeedsYouPill({ node }: { node: OtisNode }) {
   const gt = useGT();
   const count = node.waiting + node.sub.waiting;
   return count > 0 ? (
-    <span className="ml-auto shrink-0 rounded-full bg-warning px-2 text-xs font-semibold text-warning-foreground">
+    <span className="ml-auto shrink-0 rounded-full bg-warning-surface px-2 text-xs font-semibold text-warning-foreground">
       {gt("{count} needs you", { count })}
     </span>
   ) : null;
@@ -81,13 +80,8 @@ export function OtisRowMeta({
   ]
     .filter(Boolean)
     .join(" · ");
-  const age = useRelativeTimeState(!lane && !node.endedAt ? node.startedAt : null);
-  const elapsed = node.endedAt
-    ? formatRelativeElapsed(Math.max(0, Date.parse(node.endedAt) - Date.parse(node.startedAt)))
-        .value
-    : age.status === "relative"
-      ? age.value
-      : null;
+  const age = useRelativeTimeState(lane ? null : (node.endedAt ?? node.startedAt));
+  const elapsed = age.status === "relative" ? (node.endedAt ? age.label : age.value) : null;
   const detail = [
     labels.model,
     lane
@@ -95,7 +89,7 @@ export function OtisRowMeta({
       : node.waiting
         ? gt("Needs you")
         : labels.state || gt("Idle"),
-    lane ? null : elapsed,
+    elapsed,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -142,8 +136,21 @@ export const OtisTreeRow = memo(function OtisTreeRow({
   const [error, setError] = useState("");
   const attempt = useRef<{ type: "seen" | "retry"; id: string } | null>(null);
   const title = question || labels.title;
+  const failedAt = node.state === "failed" ? (node.endedAt ?? node.observedAt) : null;
+  const failureAge = useRelativeTimeState(failedAt);
+  const retryWindowMs = 24 * 60 * 60 * 1000;
+  const canRetry =
+    node.kind === "run" &&
+    labels.model !== "Neon" &&
+    failureAge.status === "relative" &&
+    failureAge.elapsedMs < retryWindowMs;
   async function runAction(type: "retry" | "seen") {
     if (!environmentId || sending) return;
+    if (
+      type === "retry" &&
+      (!canRetry || failedAt === null || Date.now() - Date.parse(failedAt) >= retryWindowMs)
+    )
+      return;
     setSending(true);
     setError("");
     if (attempt.current?.type !== type) attempt.current = { type, id: randomUUID() };
@@ -211,7 +218,7 @@ export const OtisTreeRow = memo(function OtisTreeRow({
       </div>
       {node.state === "failed" && !node.seenAt && (
         <div className="flex justify-end gap-3 px-2 text-xs">
-          {node.kind === "run" && (
+          {canRetry && (
             <button data-fleet-action="" disabled={sending} onClick={() => void runAction("retry")}>
               {gt("Retry")}
             </button>
