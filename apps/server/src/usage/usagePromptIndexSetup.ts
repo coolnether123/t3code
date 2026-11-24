@@ -28,9 +28,9 @@ export const setupUsagePromptIndex = Effect.gen(function* () {
         yield* sql`DELETE FROM usage_prompt_terms_v1`;
         yield* sql`DELETE FROM usage_prompt_words_v1`;
         yield* sql`DELETE FROM usage_prompt_pending_v1`;
+        yield* sql`INSERT INTO usage_prompt_pending_v1(message_id)
+    SELECT message_id FROM usage_prompt_messages_v2 WHERE role = 'user'`;
       }
-      yield* sql`INSERT OR IGNORE INTO usage_prompt_pending_v1(message_id)
-    SELECT message_id FROM usage_prompt_messages_v2 WHERE role = 'user' AND message_id NOT IN (SELECT message_id FROM usage_prompt_words_v1)`;
       yield* sql`CREATE TRIGGER IF NOT EXISTS usage_prompt_words_v2_inserted
     AFTER INSERT ON orchestration_v2_projection_messages WHEN NEW.role = 'user' AND json_extract(NEW.payload_json, '$.notification') IS NULL
     BEGIN

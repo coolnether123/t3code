@@ -293,6 +293,9 @@ export function getProviderOptionStatedValue(
   );
 }
 
+/** The variant choice that sends no variant; distinct from any variant name a provider defines. */
+export const DEFAULT_VARIANT_CHOICE_ID = "t3:default";
+
 export function getProviderOptionCurrentValue(
   descriptor: ProviderOptionDescriptor | null | undefined,
   selection?: ModelSelection | null,
@@ -305,6 +308,16 @@ export function getProviderOptionCurrentValue(
   // Reported values are display-only; callers that build dispatch options omit this context.
   const reportedValue = getReportedOptionValue(descriptor.id, selection, reportedSelection);
   if (reportedValue !== undefined) return reportedValue;
+  // Without an explicit variant none is sent, which is exactly the catalog's Default choice.
+  if (
+    descriptor.type === "select" &&
+    descriptor.id === "variant" &&
+    selection &&
+    !hasExplicitOption &&
+    descriptor.options.some((option) => option.id === DEFAULT_VARIANT_CHOICE_ID)
+  ) {
+    return DEFAULT_VARIANT_CHOICE_ID;
+  }
   if (descriptor.id === "variant" && selection && !hasExplicitOption) return undefined;
   if (descriptor.type === "boolean") {
     return descriptor.currentValue;
@@ -430,6 +443,11 @@ export function normalizeCustomModelSlug(model: string | null | undefined): stri
   return model.trim() || null;
 }
 
+export function resolveStaticModelAlias(provider: ProviderDriverKind, slug: string): string {
+  const aliases = MODEL_SLUG_ALIASES_BY_PROVIDER[provider] ?? {};
+  return Object.hasOwn(aliases, slug) ? (aliases[slug] ?? slug) : slug;
+}
+
 /** Compare Codex model families without changing provider-owned dispatch IDs. */
 export function codexModelFamily(slug: string): string {
   return slug.startsWith("openai.gpt-") ? slug.slice("openai.".length) : slug;
@@ -523,15 +541,7 @@ export function resolveSelectableModel(
     return byAlias.slug;
   }
 
-  const aliases = MODEL_SLUG_ALIASES_BY_PROVIDER[provider] ?? {};
-  const aliased = Object.prototype.hasOwnProperty.call(aliases, trimmed)
-    ? aliases[trimmed]
-    : undefined;
-  const normalized = typeof aliased === "string" ? aliased : trimmed;
-  if (!normalized) {
-    return null;
-  }
-
+  const normalized = resolveStaticModelAlias(provider, trimmed);
   const resolved = options.find((option) => option.slug === normalized);
   return resolved ? resolved.slug : null;
 }

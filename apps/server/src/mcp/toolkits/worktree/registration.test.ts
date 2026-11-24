@@ -1,3 +1,8 @@
+import { FeedbackStore } from "../../../feedback/FeedbackStore.ts";
+import { Workflows } from "../../../workflows/Workflows.ts";
+import { GitManager } from "../../../git/GitManager.ts";
+import { MilestoneHub } from "../../../milestones/MilestoneHub.ts";
+import { TaskFolders } from "../../../workspace/TaskFolders.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ChromeAutomation from "../../../browser/ChromeAutomation.ts";
 import * as ExternalLauncher from "../../../process/externalLauncher.ts";
@@ -18,7 +23,7 @@ import { HttpBody, HttpClient, HttpRouter } from "effect/http";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as GitWorkflowService from "../../../git/GitWorkflowService.ts";
 import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
-import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import { liveThreadShell, liveThreadsLayer } from "../../McpToolAccess.testkit.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
 import * as PullRequestReviewGuideService from "../../../pullRequest/PullRequestReviewGuideService.ts";
 import * as ProjectSetupScriptRunner from "../../../project/ProjectSetupScriptRunner.ts";
@@ -57,9 +62,14 @@ import * as ProjectCloneTracker from "../../../project/ProjectCloneTracker.ts";
 import * as PullRequestService from "../../../pullRequest/PullRequestService.ts";
 
 const layerStubServices = Layer.mergeAll(
+  Layer.mock(FeedbackStore)({}),
+  Layer.mock(Workflows)({}),
+  Layer.mock(GitManager)({}),
+  Layer.mock(MilestoneHub)({}),
+  Layer.mock(TaskFolders)({}),
   Layer.mock(AssetSigner.AssetSigner)({}),
   Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({}),
-  Layer.mock(PullRequestService.PullRequestService)({}),
+  Layer.mock(PullRequestService.PullRequestService)({ servesProject: () => Effect.succeed(false) }),
   Layer.mock(RemoteDelegation)({}),
   Layer.mock(PeerLinks)({}),
   Layer.mock(PeerLinkRequests)({}),
@@ -69,9 +79,11 @@ const layerStubServices = Layer.mergeAll(
   Layer.mock(ChromeAutomation.ChromeAutomation)({}),
   Layer.mock(ExternalLauncher.ExternalLauncher)({}),
   Layer.mock(Orchestrator.OrchestratorV2)({}),
-  Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
+  Layer.mock(ProjectionStore.ProjectionStoreV2)({
+    getThreadShell: (id) => Effect.succeed(liveThreadShell(id)),
+  }),
   Layer.mock(DeviceService.DeviceService)({}),
-  Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+  liveThreadsLayer,
   Layer.mock(ProviderRegistry.ProviderRegistry)({}),
   Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
   Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
@@ -136,7 +148,7 @@ it.effect("production mcp layer lists worktree tools over http", () =>
 
       const registry = McpSessionRegistry.issueActiveMcpCredential({
         threadId: ThreadId.make("thread-scratch"),
-        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
       });
       const credential = yield* registry;
       expect(credential).toBeDefined();

@@ -19,6 +19,7 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as PlatformPath from "@effect/platform-node/NodePath";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
@@ -787,6 +788,9 @@ export const makeDeviceTools = Effect.fn("evaluateMcpToolUse.makeDeviceTools")(f
       ),
       Layer.provideMerge(config),
       Layer.provideMerge(files),
+      Layer.provide(
+        environment.platform === "win32" ? PlatformPath.layerWin32 : PlatformPath.layerPosix,
+      ),
     ),
   );
   type Entry = Parameters<McpServer.McpServer["Service"]["addTool"]>[0];

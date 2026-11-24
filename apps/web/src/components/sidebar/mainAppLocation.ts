@@ -24,7 +24,8 @@ export function isSidebarUtilityPage(pathname: string) {
     pathname === "/repeated-input" ||
     pathname === "/codex" ||
     pathname === "/pull-requests" ||
-    pathname === "/issues"
+    pathname === "/issues" ||
+    pathname === "/workflows"
   );
 }
 

@@ -168,16 +168,10 @@ async function guardMatches(
   }
 }
 
-// Match markers in one latin1 alternation; one character per byte preserves exact ASCII offsets.
+// Match ASCII markers as raw bytes: UTF-8 cannot false-match them mid-sequence, and no line string is allocated.
 export function transcriptLineGate(markers: readonly [string, ...string[]]) {
-  if (markers.length === 1) {
-    const marker = Buffer.from(markers[0]);
-    return (line: Buffer) => line.includes(marker);
-  }
-  const pattern = new RegExp(
-    markers.map((marker) => marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
-  );
-  return (line: Buffer) => pattern.test(line.toString("latin1"));
+  const needles = markers.map((marker) => Buffer.from(marker));
+  return (line: Buffer) => needles.some((needle) => line.includes(needle));
 }
 
 /** Returns null on read failure; caching it as empty would hide usage until size/mtime changes. */
@@ -321,7 +315,7 @@ export async function readTranscriptRecords<State>(
     return {
       records,
       tailRecords,
-      malformedRecords: format.readMalformedRecords?.(tailState) ?? 0,
+      malformedRecords: format.readMalformedRecords?.(tailState).length ?? 0,
       position: {
         resumeOffset: compressed ? 0 : resumeOffset,
         guardLength,

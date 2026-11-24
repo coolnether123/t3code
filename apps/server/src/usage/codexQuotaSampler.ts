@@ -4,6 +4,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
 import type { UsageQuotaCredits } from "@t3tools/contracts";
 import { decodeQuotaCredits } from "@t3tools/shared/usageQuotaCredits";
+import * as Schema from "effect/Schema";
 
 const WEEK_MINUTES = 7 * 24 * 60;
 const MAX_SAMPLES = 5_000;
@@ -23,6 +24,29 @@ export interface CodexQuotaSample {
   readonly remainingPercent: number;
   readonly resetsAt: string;
   readonly credits?: UsageQuotaCredits;
+}
+
+export class CodexQuotaHistoryError extends Schema.TaggedError<CodexQuotaHistoryError>()(
+  "CodexQuotaHistoryError",
+  {
+    reason: Schema.Literals([
+      "invalid-history",
+      "invalid-sample",
+      "conflicting-sample",
+      "history-full",
+      "archive-conflict",
+      "history-locked",
+    ]),
+    detail: Schema.String,
+  },
+) {
+  override get message() {
+    return this.detail;
+  }
+}
+
+function historyError(reason: CodexQuotaHistoryError["reason"], detail: string) {
+  return new CodexQuotaHistoryError({ reason, detail });
 }
 
 interface RateLimitWindow {
@@ -59,15 +83,30 @@ export function codexWeeklyQuotaSample(
   response: CodexRateLimitsResponse,
   observedAt: string,
 ): CodexQuotaSample | null {
+  const reading = readCodexWeeklyQuota(response, observedAt);
+  return typeof reading === "string" ? null : reading;
+}
+
+export function readCodexWeeklyQuota(
+  response: CodexRateLimitsResponse,
+  observedAt: string,
+):
+  | CodexQuotaSample
+  | "invalid-observation"
+  | "missing-weekly-window"
+  | "invalid-window"
+  | "expired-window" {
   const observedAtMs = validIso(observedAt);
-  if (observedAtMs === null) return null;
+  if (observedAtMs === null) return "invalid-observation";
   const snapshot = response.rateLimitsByLimitId?.codex ?? response.rateLimits;
-  if (!snapshot || (snapshot.limitId != null && snapshot.limitId !== "codex")) return null;
+  if (!snapshot || (snapshot.limitId != null && snapshot.limitId !== "codex")) {
+    return "missing-weekly-window";
+  }
 
   const window = [snapshot.primary, snapshot.secondary].find(
     (candidate) => candidate?.windowDurationMins === WEEK_MINUTES,
   );
-  if (!window) return null;
+  if (!window) return "missing-weekly-window";
   const usedPercent = window.usedPercent;
   const resetSeconds = window.resetsAt;
   if (
@@ -78,15 +117,18 @@ export function codexWeeklyQuotaSample(
     typeof resetSeconds !== "number" ||
     !Number.isFinite(resetSeconds) ||
     resetSeconds <= 0
-  )
-    return null;
-  const resetMs = resetSeconds * 1_000;
-  if (resetMs < observedAtMs) return null;
+  ) {
+    return "invalid-window";
+  }
+  const resetAt = new Date(resetSeconds * 1_000);
+  const resetMs = resetAt.getTime();
+  if (!Number.isFinite(resetMs)) return "invalid-window";
+  if (resetMs <= observedAtMs) return "expired-window";
   const credits = decodeQuotaCredits(snapshot.credits ?? response.rateLimits?.credits);
   return {
     observedAt: new Date(observedAtMs).toISOString(),
     remainingPercent: 100 - usedPercent,
-    resetsAt: new Date(resetMs).toISOString(),
+    resetsAt: resetAt.toISOString(),
     ...(credits === undefined ? {} : { credits }),
   };
 }
@@ -97,22 +139,31 @@ function decodePrior(text: string): {
   rows: Record<string, unknown>[];
   samples: CodexQuotaSample[];
 } {
-  const root = object(JSON.parse(text));
+  let root: Record<string, unknown> | null;
+  try {
+    root = object(JSON.parse(text));
+  } catch {
+    throw historyError("invalid-history", "Existing quota history is not valid JSON.");
+  }
   const snapshot = object(root?.Snapshot);
   const mainLimit = object(snapshot?.MainLimit);
   const window = object(mainLimit?.Window);
   if (mainLimit?.LimitId !== "codex" || window?.DurationMinutes !== WEEK_MINUTES) {
-    throw new Error("Existing quota history is not a compatible Codex weekly history.");
+    throw historyError(
+      "invalid-history",
+      "Existing quota history is not a compatible Codex weekly history.",
+    );
   }
   if (!Array.isArray(root?.Samples) || root.Samples.length > MAX_SAMPLES) {
-    throw new Error("Existing quota history has an invalid sample list.");
+    throw historyError("invalid-history", "Existing quota history has an invalid sample list.");
   }
 
   const samples: CodexQuotaSample[] = [];
   const rows: Record<string, unknown>[] = [];
   for (const value of root.Samples) {
     const item = object(value);
-    if (!item) throw new Error("Existing quota history contains an invalid sample.");
+    if (!item)
+      throw historyError("invalid-history", "Existing quota history contains an invalid sample.");
     const observed = item.ObservedAt;
     const remaining = item.RemainingPercent;
     const resets = item.ResetsAt;
@@ -127,7 +178,7 @@ function decodePrior(text: string): {
       validIso(resets) === null ||
       Date.parse(observed) > Date.parse(resets)
     ) {
-      throw new Error("Existing quota history contains an invalid sample.");
+      throw historyError("invalid-history", "Existing quota history contains an invalid sample.");
     }
     const credits = decodeQuotaCredits(item.Credits);
     samples.push({
@@ -164,7 +215,7 @@ export function appendCodexQuotaSample(
     sample.remainingPercent > 100 ||
     !Number.isFinite(sample.remainingPercent)
   ) {
-    throw new Error("Quota sample is invalid.");
+    throw historyError("invalid-sample", "Quota sample is invalid.");
   }
 
   const credits = decodeQuotaCredits(sample.credits);
@@ -181,7 +232,10 @@ export function appendCodexQuotaSample(
       existing.resetsAt !== normalized.resetsAt ||
       JSON.stringify(existing.credits) !== JSON.stringify(normalized.credits))
   ) {
-    throw new Error("A conflicting quota sample already exists for this observation time.");
+    throw historyError(
+      "conflicting-sample",
+      "A conflicting quota sample already exists for this observation time.",
+    );
   }
   const rows = existing
     ? prior.rows
@@ -195,7 +249,10 @@ export function appendCodexQuotaSample(
         },
       ].sort((a, b) => String(a.ObservedAt).localeCompare(String(b.ObservedAt)));
   if (rows.length > MAX_SAMPLES) {
-    throw new Error("Quota history is full; existing observations were left unchanged.");
+    throw historyError(
+      "history-full",
+      "Quota history is full; existing observations were left unchanged.",
+    );
   }
   return `${JSON.stringify(
     {
@@ -267,7 +324,10 @@ export async function appendCodexQuotaSampleFile(
           },
         );
         if (archived !== null && archived !== archiveText) {
-          throw new Error("Existing quota archive differs from the observations being moved.");
+          throw historyError(
+            "archive-conflict",
+            "Existing quota archive differs from the observations being moved.",
+          );
         }
         if (archived === null) {
           const archiveTempPath = `${archivePath}.${NodeCrypto.randomUUID()}.tmp`;
@@ -297,9 +357,12 @@ export async function appendCodexQuotaSampleFile(
     });
     await NodeFSP.rename(tempPath, filePath);
   } finally {
-    await NodeFSP.rm(tempPath, { force: true });
-    await lock.close();
-    await NodeFSP.rm(lockPath, { force: true });
+    try {
+      await NodeFSP.rm(tempPath, { force: true });
+    } finally {
+      await lock.close();
+      await NodeFSP.rm(lockPath, { force: true });
+    }
   }
 }
 
@@ -323,7 +386,7 @@ async function openSamplerLock(lockPath: string) {
   }
   const after = await NodeFSP.stat(lockPath).catch(() => null);
   if (running || before === null || after === null || before.ino !== after.ino) {
-    throw new Error("Quota sampler is already running.");
+    throw historyError("history-locked", "Quota sampler is already running.");
   }
   await NodeFSP.rm(lockPath);
   return openSamplerLock(lockPath);

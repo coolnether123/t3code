@@ -8,7 +8,7 @@ import {
   type UsageSummary,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
+import { Atom, AtomRegistry } from "effect/reactivity";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { EnvironmentPresentation } from "../connection/presentation.ts";
@@ -45,9 +45,10 @@ function harness(ids = ["a"]) {
   registries.push(registry);
   const environments = ids.map((id) => {
     const environmentId = EnvironmentId.make(id);
-    const rates = Promise.withResolvers<
-      AsyncResult.Success<typeof pricing> | AsyncResult.Failure<never, unknown>
-    >();
+    const rates =
+      Promise.withResolvers<
+        Effect.Effect<typeof pricing, EnvironmentRpcUnavailableError | string>
+      >();
     const scan = Promise.withResolvers<UsageSummary>();
     const scanStarted = Promise.withResolvers<void>();
     const presentation = Atom.make({
@@ -81,7 +82,7 @@ function harness(ids = ["a"]) {
         run: (
           _registry: AtomRegistry.AtomRegistry,
           { environmentId }: { environmentId: EnvironmentId },
-        ) => get(environmentId).rates.promise,
+        ) => Effect.flatten(Effect.promise(() => get(environmentId).rates.promise)),
       },
     },
     presentations: {
@@ -104,9 +105,7 @@ describe("manual usage refresh", () => {
     });
     expect(finished).toBe(false);
     entry.rates.resolve(
-      result === "success"
-        ? AsyncResult.success(pricing)
-        : AsyncResult.fail(new Error("Pricing offline")),
+      result === "success" ? Effect.succeed(pricing) : Effect.fail("Pricing offline"),
     );
     await entry.scanStarted.promise;
     expect(finished).toBe(false);
@@ -123,7 +122,7 @@ describe("manual usage refresh", () => {
     } = harness();
     const entry = environment!;
     const refreshing = refresh();
-    entry.rates.resolve(AsyncResult.success(pricing));
+    entry.rates.resolve(Effect.succeed(pricing));
     await entry.scanStarted.promise;
     registry.set(entry.presentation, null);
     await refreshing;
@@ -137,7 +136,7 @@ describe("manual usage refresh", () => {
     const refreshing = refresh().then(() => {
       finished = true;
     });
-    for (const entry of environments) entry.rates.resolve(AsyncResult.success(pricing));
+    for (const entry of environments) entry.rates.resolve(Effect.succeed(pricing));
     await healthy!.scanStarted.promise;
     expect(finished).toBe(false);
     healthy!.scan.resolve(summary);
@@ -153,7 +152,7 @@ describe("manual usage refresh", () => {
     const entry = environment!;
     const refreshing = refresh();
     entry.rates.resolve(
-      AsyncResult.fail(
+      Effect.fail(
         new EnvironmentRpcUnavailableError({
           environmentId: entry.environmentId,
           message: "No session",
@@ -186,7 +185,7 @@ describe("manual usage refresh", () => {
     const unmount = registry.mount(query);
     expect(reads).toBe(1);
     const refreshing = refresh();
-    entry.rates.resolve(AsyncResult.success(pricing));
+    entry.rates.resolve(Effect.succeed(pricing));
     await rescanned.promise;
     await refreshing;
     expect(reads).toBe(2);

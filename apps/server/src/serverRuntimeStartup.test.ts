@@ -60,6 +60,8 @@ it.effect.each([
       scenario === "disabled-default" ? "custom" : "codex",
     );
     const events: ServerLifecycleStreamEvent[] = [];
+    const finishDelegatedRecovery = yield* Deferred.make<void>();
+    const delegatedRecoveryDone = yield* Deferred.make<void>();
     const recovery = {
       terminalizedRuns: 0,
       stoppedSessions: 0,
@@ -115,7 +117,11 @@ it.effect.each([
         prepareForShutdown: Effect.void,
         reconcile: () => Effect.succeed(recovery),
       }),
-      Layer.mock(Orchestrator.OrchestratorV2)({ recoverDelegatedTasks: Effect.void }),
+      Layer.mock(Orchestrator.OrchestratorV2)({
+        recoverDelegatedTasks: Deferred.await(finishDelegatedRecovery).pipe(
+          Effect.andThen(Deferred.succeed(delegatedRecoveryDone, undefined)),
+        ),
+      }),
       Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({ shutdown: Effect.void }),
       Layer.mock(AgentAwarenessRelay.AgentAwarenessRelay)({ start: () => Effect.void }),
       Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({ runOnce: () => Effect.never }),
@@ -224,6 +230,10 @@ it.effect.each([
       yield* startup.markHttpListening;
       const ready = yield* Effect.exit(startup.awaitCommandReady);
       assert.equal(Exit.isSuccess(ready), scenario !== "project-failure");
+      if (Exit.isSuccess(ready)) {
+        yield* Deferred.succeed(finishDelegatedRecovery, undefined);
+        yield* Deferred.await(delegatedRecoveryDone);
+      }
       const welcome = events.find((event) => event.type === "welcome");
       if (scenario === "project-failure") {
         assert.isUndefined(welcome);

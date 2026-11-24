@@ -202,7 +202,10 @@ export const autoPullProjects = Effect.fn("autoPullProjects")(function* (
     workspaceRoots,
     (cwd) =>
       Effect.gen(function* () {
-        const status = yield* git.statusDetails(cwd);
+        // Startup checks once, so it waits for the fetch rather than reading the old references.
+        const status = yield* git
+          .statusDetails(cwd)
+          .pipe(Effect.provideService(GitVcsDriver.AwaitStatusFetch, true));
         if (
           !status.isRepo ||
           !status.isDefaultBranch ||
@@ -424,24 +427,20 @@ const runOrderedV2StartupPhases = Effect.fn("serverRuntimeStartup.runOrderedV2St
     Bootstrap,
     ImportError,
     RecoveryError,
-    DelegationError,
     WorkerError,
     BootstrapError,
     ImportContext,
     RecoveryContext,
-    DelegationContext,
     WorkerContext,
     BootstrapContext,
   >(input: {
     readonly importLegacyShells: Effect.Effect<Import, ImportError, ImportContext>;
     readonly recover: Effect.Effect<Recovery, RecoveryError, RecoveryContext>;
-    readonly recoverDelegatedTasks: Effect.Effect<void, DelegationError, DelegationContext>;
     readonly startEffectWorker: Effect.Effect<void, WorkerError, WorkerContext>;
     readonly autoBootstrap: Effect.Effect<Bootstrap, BootstrapError, BootstrapContext>;
   }) {
     yield* input.importLegacyShells;
     const recovery = yield* input.recover;
-    yield* input.recoverDelegatedTasks;
     yield* input.startEffectWorker;
     const bootstrap = yield* input.autoBootstrap;
     return { recovery, bootstrap } as const;
@@ -551,10 +550,6 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
         ),
       ),
       recover: runStartupPhase("orchestration-v2.recovery", providerRuntimeRecovery.recover),
-      recoverDelegatedTasks: runStartupPhase(
-        "orchestration-v2.delegated-tasks.recover",
-        orchestrator.recoverDelegatedTasks,
-      ),
       startEffectWorker: runStartupPhase(
         "orchestration-v2.effect-worker.start",
         startEffectWorkerWithRelay({
@@ -670,6 +665,11 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
     yield* options?.activate ?? Effect.void;
     yield* Effect.logDebug("Accepting commands");
     yield* commandGate.signalCommandReady;
+    // Recovery takes the same per-thread locks as live commands. Unrelated requests can proceed.
+    yield* runStartupPhase(
+      "orchestration-v2.delegated-tasks.recover",
+      orchestrator.recoverDelegatedTasks,
+    ).pipe(Effect.forkScoped);
     yield* Effect.logDebug("startup phase: publishing ready event");
     yield* runStartupPhase(
       "ready.publish",

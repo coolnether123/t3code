@@ -61,6 +61,7 @@ import {
   canonicalModelFilter,
   makeDayFormatter,
   resolveModelAliases,
+  usageTimestampFilter,
   UsageAggregator,
 } from "./usageAggregation.ts";
 import {
@@ -933,11 +934,10 @@ export const make = Effect.gen(function* () {
     return { settings, dirs } satisfies UsageReadContext;
   });
 
-  /**
-   * Imports the pre-SQLite JSON cache once, in small transactions that yield
-   * between them so the server keeps answering while a large cache moves over.
-   * The legacy file is renamed, not deleted, so it remains a manual backup.
-   */
+  // Yield to Node's I/O queue between synchronous SQLite writes.
+  const yieldBeforeCacheImport = Effect.promise(
+    () => new Promise<void>((resolve) => setImmediate(resolve)),
+  );
   const importCustomScanCache = Effect.gen(function* () {
     if (!scanStore.persistent) {
       yield* Effect.logWarning("Usage scan cache database is unavailable; using a process cache.", {
@@ -970,7 +970,7 @@ export const make = Effect.gen(function* () {
           scanStore.setMany(batch);
           batch = [];
           rows = 0;
-          yield* Effect.yieldNow;
+          yield* yieldBeforeCacheImport;
         }
       }
       scanStore.setMany(batch);
@@ -1042,7 +1042,7 @@ export const make = Effect.gen(function* () {
           malformedRecords: entry.malformedRecords,
           ...(entry.size > 0 ? { scanCursor: 0 } : {}),
         });
-        yield* Effect.yieldNow;
+        yield* yieldBeforeCacheImport;
       }
     }
     if (scanStore.persistent) scanStore.writeFlag(flag, DateTime.formatIso(yield* DateTime.now));
@@ -1051,9 +1051,13 @@ export const make = Effect.gen(function* () {
   // deadline must not interrupt, and later restart, a half-finished import.
   let legacyScanCacheImport: Fiber.Fiber<void> | undefined;
   const ensureLegacyScanCacheImported = Effect.gen(function* () {
-    legacyScanCacheImport ??= yield* Effect.forkIn(importLegacyScanCache(), serviceScope, {
-      startImmediately: true,
-    });
+    legacyScanCacheImport ??= yield* Effect.forkIn(
+      yieldBeforeCacheImport.pipe(Effect.andThen(importLegacyScanCache())),
+      serviceScope,
+      {
+        startImmediately: true,
+      },
+    );
     yield* Fiber.await(legacyScanCacheImport);
   });
 
@@ -1529,6 +1533,12 @@ export const make = Effect.gen(function* () {
     // a window is filtered without decoding any history it does not need.
     const cacheEntryTouchesWindow = (meta: CachedFileMeta) => meta.latestMs >= windowStartMs;
 
+    const inWindow = usageTimestampFilter({ ...input, ...hourlyWindow });
+    const countMalformed = (entry: CachedFile | undefined) =>
+      entry?.codexState?.providerState?.malformedRecordTimestamps?.filter(inWindow).length ??
+      entry?.codexState?.providerState?.malformedRecords ??
+      entry?.malformedRecords ??
+      0;
     const aggregator = new UsageAggregator({
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
@@ -1725,9 +1735,7 @@ export const make = Effect.gen(function* () {
           scannedFiles,
           skippedFiles: 0,
           malformedRecords: retainedFiles.reduce(
-            (sum, [, entry]) =>
-              sum +
-              (entry.codexState?.providerState?.malformedRecords ?? entry.malformedRecords ?? 0),
+            (sum, [, entry]) => sum + countMalformed(entry),
             0,
           ),
           distinctSessions: sessionIds.size,
@@ -2237,7 +2245,11 @@ export const make = Effect.gen(function* () {
       const malformedRecords =
         provider === "codex"
           ? selection.files.reduce(
-              (sum, file) => sum + (scanStore.meta(file.path)?.malformedRecords ?? 0),
+              (sum, file) =>
+                sum +
+                (scanStore.meta(file.path)?.malformedRecords
+                  ? countMalformed(scanStore.load(file.path))
+                  : 0),
               0,
             )
           : 0;

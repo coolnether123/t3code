@@ -3,6 +3,8 @@ import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
 import * as NodeChildProcess from "node:child_process";
 
+import { checkFileBatches } from "./lib/check-file-batches.ts";
+
 export function newLintDiagnostics(candidate, baseline) {
   const key = (d) =>
     JSON.stringify([d.filename.replaceAll("\\", "/"), d.code, d.severity, d.message]);
@@ -35,21 +37,35 @@ export function lintAgainstBase(root, files, base, artifact) {
   const lint = (cwd, name) => {
     const existing = files.filter((file) => NodeFS.existsSync(NodePath.join(cwd, file)));
     if (existing.length === 0) return [];
-    const result = execute(
-      process.execPath,
-      [vp, "lint", "--format=json", "--report-unused-disable-directives", ...existing],
-      cwd,
-    );
-    NodeFS.writeFileSync(NodePath.join(artifact, `${name}.json`), result.stdout);
-    NodeFS.writeFileSync(NodePath.join(artifact, `${name}.stderr.log`), result.stderr);
-    const data = JSON.parse(result.stdout);
-    if (
-      !Array.isArray(data.diagnostics) ||
-      (result.status !== 0 && data.diagnostics.length === 0)
-    ) {
-      throw new Error(`Unclassified lint failure in ${name}, exit ${result.status}`);
+    const diagnostics = [];
+    for (const [index, batch] of checkFileBatches(existing).entries()) {
+      const result = execute(
+        process.execPath,
+        [
+          vp,
+          "lint",
+          "--no-error-on-unmatched-pattern",
+          "--format=json",
+          "--report-unused-disable-directives",
+          ...batch,
+        ],
+        cwd,
+      );
+      const prefix = NodePath.join(artifact, `${name}-${index + 1}`);
+      NodeFS.writeFileSync(`${prefix}.json`, result.stdout);
+      NodeFS.writeFileSync(`${prefix}.stderr.log`, result.stderr);
+      // Oxlint prefixes its JSON with this notice when the entire batch is ignored.
+      const json = result.stdout.replace(
+        /^No files found to lint\. Please check your paths and ignore patterns\.\r?\n/,
+        "",
+      );
+      const data = JSON.parse(json);
+      if (!Array.isArray(data.diagnostics) || (result.status !== 0 && !data.diagnostics.length)) {
+        throw new Error(`Unclassified lint failure in ${prefix}, exit ${result.status}`);
+      }
+      diagnostics.push(...data.diagnostics);
     }
-    return data.diagnostics;
+    return diagnostics;
   };
   const candidate = lint(root, "lint-candidate");
   if (!candidate.length) return { inherited: 0, failures: [] };

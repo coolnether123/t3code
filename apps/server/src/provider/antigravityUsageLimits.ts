@@ -41,7 +41,7 @@ const TokenFile = Schema.Struct({
   project_id: Schema.optional(Schema.String),
 });
 // The 1.5.x CLI never writes acp_token.json: it keeps its sign-in in the OS keyring, or in
-// antigravity-oauth-token without one. It stores no OAuth client, so T3 cannot refresh it.
+// antigravity-oauth-token without one or when T3 bypasses the keyring. It stores no OAuth client, so T3 cannot refresh it.
 const CliToken = Schema.Struct({
   token: Schema.Struct({
     access_token: Schema.NonEmptyString,
@@ -333,6 +333,7 @@ function modelWindows(models: typeof Models.Type, includeShared: boolean) {
 export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(function* (input: {
   readonly profileDirectory: string;
   readonly authMethod: AntigravitySettings["authMethod"];
+  readonly oauthPersonalStorage?: AntigravitySettings["oauthPersonalStorage"];
   readonly refreshSignIn?: Effect.Effect<void>;
   readonly readKeyringSecret?: Effect.Effect<string | undefined, AntigravityKeyringError>;
 }) {
@@ -371,11 +372,12 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
     let accessToken: string;
     let account: string;
     let projectId: string | undefined;
-    if (!(yield* fs.exists(tokenPath))) {
+    if (input.oauthPersonalStorage === "keyring" || !(yield* fs.exists(tokenPath))) {
       cached = undefined;
       const readStored = Effect.gen(function* () {
+        if (input.oauthPersonalStorage === "keyring") return yield* readKeyringSecret;
         if (yield* fs.exists(cliTokenPath)) return yield* fs.readFileString(cliTokenPath);
-        return yield* readKeyringSecret;
+        return input.authMethod === "oauth-business" ? yield* readKeyringSecret : undefined;
       });
       const stored = yield* readStored;
       if (stored === undefined) {

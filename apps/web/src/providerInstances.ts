@@ -1,3 +1,5 @@
+import { msg } from "gt-react";
+import { m } from "./i18n/messages";
 import { pipe } from "effect/Function";
 import {
   DEFAULT_MODEL_BY_PROVIDER,
@@ -60,7 +62,7 @@ export function isDesktopBackedProviderInstanceReady(entry: ProviderInstanceEntr
 /** Name the runtime, not just the Codex brand, on existing thread chrome. */
 export function codexThreadRuntimeLabel(entry: ProviderInstanceEntry | null): string | null {
   if (entry?.driverKind !== "codex") return null;
-  return entry.useDesktopAppDaemon === true ? "Codex desktop" : "Codex CLI";
+  return entry.useDesktopAppDaemon === true ? m(msg("Codex desktop")) : m(msg("Codex CLI"));
 }
 
 /** Keep an explicitly selected desktop-backed instance bound while it is unavailable. */
@@ -76,14 +78,14 @@ export function hasInstanceBadge(entries: ReadonlyArray<ProviderInstanceEntry>):
  * Disabled instances may retain ready status until reconciliation. A warning still offers
  * the models of sub-providers that report no problem of their own.
  */
-export function isProviderInstancePickerReady(entry: ProviderInstanceEntry): boolean {
+function isProviderInstanceHealthy(entry: ProviderInstanceEntry): boolean {
   if (!entry.enabled || !entry.isAvailable) return false;
   if (entry.status === "ready") return true;
   if (entry.status !== "warning") return false;
   if (!entry.snapshot.subProviders?.length)
     return (
       entry.installed &&
-      entry.snapshot.auth.status !== "unauthenticated" &&
+      entry.snapshot.auth.status === "authenticated" &&
       entry.models.some((model) => !model.isCustom)
     );
   const usable = new Set(
@@ -93,6 +95,21 @@ export function isProviderInstancePickerReady(entry: ProviderInstanceEntry): boo
   );
   return entry.models.some(
     (model) => model.subProvider !== undefined && usable.has(model.subProvider),
+  );
+}
+
+/** Also true after a check that only failed or ran late: an earlier check's models stay offered. */
+export function isProviderInstancePickerReady(entry: ProviderInstanceEntry): boolean {
+  if (isProviderInstanceHealthy(entry)) return true;
+  const { subProviders, auth, modelsRetained } = entry.snapshot;
+  if (!entry.enabled || !entry.isAvailable || subProviders !== undefined) return false;
+  if (modelsRetained === true) return true;
+  // The sign-in was confirmed, so the warning is about something else, such as a late catalog.
+  return (
+    entry.status === "warning" &&
+    entry.installed &&
+    auth.status === "authenticated" &&
+    entry.models.length > 0
   );
 }
 

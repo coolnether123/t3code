@@ -4,6 +4,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
+import { forkParked } from "../serverActivation.ts";
 import type { PromptUsageMessage } from "./usagePromptReport.ts";
 import { readPromptWordIndex, runPromptWordIndexer } from "./promptWordIndex.ts";
 
@@ -51,7 +52,7 @@ const make = Effect.gen(function* () {
     FROM orchestration_v2_projection_messages
     WHERE json_extract(payload_json, '$.notification') IS NULL`.pipe(Effect.mapError(failure));
   yield* setupUsagePromptIndex.pipe(Effect.mapError(failure));
-  yield* Effect.forkScoped(runPromptWordIndexer(sql, "usage_prompt_messages_v2"));
+  yield* forkParked(runPromptWordIndexer(sql, "usage_prompt_messages_v2"));
   return UsageProjection.of({
     getSnapshotSequence: Effect.fn("UsageProjection.getSnapshotSequence")(() =>
       sql<{ snapshotSequence: number }>`

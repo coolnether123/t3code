@@ -355,13 +355,21 @@ const isNonCopyProperty = (object: ESTree.ObjectExpression, name: string) => {
 export default defineRule({
   meta: {
     type: "suggestion",
+    schema: [{ type: "array", items: { type: "string" } }],
     docs: {
       description:
         "Flag user-facing English that is not wrapped for translation: JSX text, copy props, and copy keys.",
     },
   },
   create(context) {
-    const report = (node: ESTree.Node) => context.report({ node, message: MESSAGE });
+    const inheritedSites = new Set(Array.isArray(context.options[0]) ? context.options[0] : []);
+    const report = (node: ESTree.Node) => {
+      if (inheritedSites.size) {
+        const { line, column } = node.loc.start;
+        if (inheritedSites.has(`${line}:${column}`)) return;
+      }
+      context.report({ node, message: MESSAGE });
+    };
     const reportLeaves = (expression: unknown) => {
       for (const leaf of literalLeaves(expression)) report(leaf);
     };

@@ -72,6 +72,7 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
     missingToken?: boolean;
     authMethod?: "oauth-personal" | "oauth-business" | "gemini-api-key";
     keyringSecret?: string;
+    oauthPersonalStorage?: "profile" | "keyring";
     /** Reads the OS keyring instead of `keyringSecret`. */
     nativeKeyring?: boolean;
   } = {},
@@ -119,7 +120,11 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
             : Response.json({}, { status: 403 }),
         );
       }
-      expect(JSON.parse(body)).toEqual(options.missingToken ? {} : { project: "project-id" });
+      expect(JSON.parse(body)).toEqual(
+        options.missingToken || options.oauthPersonalStorage === "keyring"
+          ? {}
+          : { project: "project-id" },
+      );
       expect(request.headers["user-agent"]).toMatch(/^antigravity\/hub\/2\.24\.0 /);
       return HttpClientResponse.fromWeb(
         request,
@@ -140,6 +145,9 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
   const usage = yield* makeAntigravityUsageProbe({
     profileDirectory,
     authMethod: options.authMethod ?? "oauth-personal",
+    ...(options.oauthPersonalStorage === undefined
+      ? {}
+      : { oauthPersonalStorage: options.oauthPersonalStorage }),
     ...(options.nativeKeyring ? {} : { readKeyringSecret: Effect.succeed(options.keyringSecret) }),
   }).pipe(Effect.provideService(HttpClient.HttpClient, http));
   return { ...usage, requests, writeToken, tokenPath };
@@ -704,12 +712,23 @@ describe("Antigravity subscription limits", () => {
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
-  it.effect("reads the native CLI's keyring sign-in and reports when it has expired", () =>
+  it.effect("reads a Gemini Enterprise keyring sign-in and reports when it has expired", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-09T12:00:00Z")));
       const keyringSecret = (expiry: string) =>
         JSON.stringify({ token: { access_token: "access-token", refresh_token: "r", expiry } });
+      // Google account instances keep their own sign-in; the shared entry belongs to another app.
+      const personal = yield* fixture({
+        missingToken: true,
+        keyringSecret: keyringSecret("2026-10-09T14:00:00Z"),
+      });
+      expect((yield* personal.probe).unavailable?.message).toBe(
+        "Sign in with Google to see Antigravity limits.",
+      );
+      expect(personal.requests).toEqual([]);
+
       const signedIn = yield* fixture({
+        authMethod: "oauth-business",
         missingToken: true,
         userId: "google-user-1",
         keyringSecret: keyringSecret("2026-10-09T14:00:00.123456789+01:00"),
@@ -720,11 +739,31 @@ describe("Antigravity subscription limits", () => {
       expect(signedIn.requests.some((request) => request.url.endsWith("/token"))).toBe(false);
 
       const expired = yield* fixture({
+        authMethod: "oauth-business",
         missingToken: true,
         keyringSecret: keyringSecret("2026-10-09T12:00:30Z"),
       });
       expect((yield* expired.probe).unavailable?.reason).toBe("probeFailed");
       expect(expired.requests).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.effect("reads quota from the selected sign-in store", () =>
+    Effect.gen(function* () {
+      const keyringSecret = JSON.stringify({
+        token: { access_token: "access-token", expiry: "2099-01-01T00:00:00Z" },
+      });
+      const keyring = yield* fixture({ oauthPersonalStorage: "keyring", keyringSecret });
+      expect((yield* keyring.probe).windows).toHaveLength(4);
+      expect(keyring.requests.some((request) => request.url.endsWith("/token"))).toBe(false);
+
+      const profile = yield* fixture({
+        oauthPersonalStorage: "profile",
+        missingToken: true,
+        keyringSecret,
+      });
+      expect((yield* profile.probe).unavailable?.reason).toBe("unsupported");
+      expect(profile.requests).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
@@ -749,7 +788,11 @@ describe("Antigravity subscription limits", () => {
           Effect.promise(() => target.setSecret(stored)),
           () => Effect.promise(() => target.deleteCredential()),
         );
-        const { probe } = yield* fixture({ missingToken: true, nativeKeyring: true });
+        const { probe } = yield* fixture({
+          authMethod: "oauth-business",
+          missingToken: true,
+          nativeKeyring: true,
+        });
         const limits = yield* probe;
         expect(limits.unavailable).toBeUndefined();
         expect(limits.windows).toHaveLength(4);

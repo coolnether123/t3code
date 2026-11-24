@@ -792,6 +792,7 @@ export const UsageReportQuota = Schema.Struct({
   ...UsageReportEnvelope,
   mode: Schema.Literal("quota"),
   quotaHistory: UsageQuotaHistory,
+  providerQuotaHistories: Schema.optional(Schema.Array(UsageProviderQuotaHistory)),
   antigravityQuota: Schema.optional(Schema.Array(UsageAntigravityQuotaHistory)),
   samplesTruncated: Schema.Boolean,
   totalSamples: NonNegativeInt,

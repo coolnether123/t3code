@@ -364,7 +364,8 @@ it.effect("stores snapshot refs and supports click, fill, and type", () =>
       assert.instanceOf(staleRefError, ChromeAutomationError);
       assert.equal(staleRefError.operation, "target");
 
-      yield* automation.fill({ selector: "input[name=email]" }, "a@example.com");
+      const { fill: fillField } = automation;
+      yield* fillField({ selector: "input[name=email]" }, "a@example.com");
       yield* automation.type({ selector: "textarea[name=note]" }, "hello");
       assert.deepEqual(page.calls, [
         { kind: "click", selector: "#submit" },
@@ -563,7 +564,8 @@ it.effect("keeps explicit action targets independent of global tab selection", (
       const firstSnapshot = yield* automation.snapshot("tab-1-test");
       yield* automation.selectTab("tab-2-test");
       yield* automation.click({ ref: firstSnapshot.refs[0]!.ref }, "tab-1-test");
-      yield* automation.fill({ selector: "input" }, "first", "tab-1-test");
+      const { fill: fillField } = automation;
+      yield* fillField({ selector: "input" }, "first", "tab-1-test");
       yield* automation.type({ selector: "textarea" }, "message", "tab-1-test");
       yield* automation.navigate("https://one.test/next", { tabId: "tab-1-test" });
       assert.deepEqual(
@@ -772,7 +774,8 @@ it.effect("holds the action lock until cancelled browser input has settled", () 
       const interrupting = yield* Effect.forkChild(Fiber.interrupt(clicking), {
         startImmediately: true,
       });
-      const filling = yield* Effect.forkChild(automation.fill({ selector: "input" }, "hello"), {
+      const { fill: fillField } = automation;
+      const filling = yield* Effect.forkChild(fillField({ selector: "input" }, "hello"), {
         startImmediately: true,
       });
       assert.equal(page.calls.length, 1);

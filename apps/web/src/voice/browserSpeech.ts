@@ -4,7 +4,7 @@ import {
   SpeechPlaybackController,
   type PlaybackMetadata,
 } from "@t3tools/client-runtime/voice-call/playback";
-import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { shouldEndTurn } from "./turnEnding";
@@ -19,12 +19,13 @@ export async function requestSpeech(
   signal: AbortSignal,
   onAudio?: (chunk: { audio: string; sampleRate: number }) => void,
 ) {
-  const result = await speechRequest.run(appAtomRegistry, {
-    environmentId,
-    input: { request: input, signal, ...(onAudio ? { onAudio } : {}) },
-  });
-  if (result._tag === "Failure") throw Cause.squash(result.cause);
-  return result.value;
+  return Effect.runPromise(
+    speechRequest.run(appAtomRegistry, {
+      environmentId,
+      input: { request: input, signal, ...(onAudio ? { onAudio } : {}) },
+    }),
+    { signal },
+  );
 }
 
 /** Owns microphone tracks and playback nodes for one visible voice session. */

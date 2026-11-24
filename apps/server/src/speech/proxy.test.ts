@@ -8,6 +8,18 @@ import { proxySpeech, streamSpeech, speechInputMode } from "./proxy.ts";
 vi.mock("node:http", () => ({ request: vi.fn() }));
 
 describe("local speech proxy", () => {
+  it("classifies a refused lease connection as speech unavailable", async () => {
+    const request = Object.assign(new NodeEvents.EventEmitter(), { end: vi.fn() });
+    vi.mocked(NodeHttp.request).mockReturnValueOnce(request as unknown as NodeHttp.ClientRequest);
+
+    const result = proxySpeech({ action: "acquire" }, new AbortController().signal);
+    request.emit("error", Object.assign(new Error("connect refused"), { code: "ECONNREFUSED" }));
+    await expect(result).rejects.toMatchObject({
+      _tag: "SpeechUnavailableError",
+      message: "Could not connect to the local speech router.",
+    });
+  });
+
   it("carries transcript revision through the fixed router endpoint", async () => {
     const fetcher = vi
       .fn<typeof fetch>()
