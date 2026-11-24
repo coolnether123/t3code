@@ -54,6 +54,15 @@ export async function runNightly(configFile, io = {}) {
     configFailure = error;
   }
   const lock = NodeNet.createServer((s) => s.destroy());
+  const pc = config.pcUnattended === true;
+  const toolPath = [
+    NodePath.dirname(config.node),
+    config.pnpmBin,
+    process.env.Path ?? process.env.PATH,
+  ]
+    .filter(Boolean)
+    .join(NodePath.delimiter);
+  const readJson = (file) => JSON.parse(NodeFS.readFileSync(file, "utf8"));
   const dryRun = io.dryRun ?? process.argv.includes("--dry-run");
   const night = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Chicago",
@@ -93,7 +102,7 @@ export async function runNightly(configFile, io = {}) {
         maxBuffer: 64 * 1024 * 1024,
         env: {
           ...process.env,
-          PATH: `${NodePath.dirname(config.node)};${process.env.PATH}`,
+          PATH: toolPath,
           GIT_TERMINAL_PROMPT: "0",
           GCM_INTERACTIVE: "never",
         },
@@ -119,6 +128,7 @@ export async function runNightly(configFile, io = {}) {
         args,
         cwd,
         outputs: [artifact],
+        ...(pc ? { environment: { PATH: toolPath } } : {}),
         lane: "heavy",
         class: command === config.node ? "test-suite" : "build",
       }),
@@ -131,9 +141,15 @@ export async function runNightly(configFile, io = {}) {
       true,
     ).code;
   };
+  let ownedTree = false;
+  const skip = (result, reason) => {
+    ledger.result = result;
+    ledger.stopReason = reason;
+    return ledger;
+  };
   const worker = (reason) => {
     ledger.stopReason = reason;
-    ledger.result = "needs-parent";
+    ledger.result = pc ? "failed" : "needs-parent";
   };
   const alert = () => {
     const packet = NodePath.join(artifact, "repair.md");
@@ -182,6 +198,61 @@ export async function runNightly(configFile, io = {}) {
     if (!ledger.alertDelivered)
       ledger.alertFailure = "tell_jared failed; retained alert.json and NEEDS-PARENT.json";
   };
+  const otisReceipt = () => {
+    const request = NodePath.join(artifact, "otis-receipt-request.json");
+    NodeFS.writeFileSync(
+      request,
+      JSON.stringify({
+        requestId: NodeCrypto.randomUUID(),
+        taskId: config.taskId,
+        kind: "artifact",
+        locator: NodePath.join(artifact, "result.json"),
+        summary: "PC T3 nightly " + night + " " + ledger.result,
+        repo: null,
+        producedBy: { model: null, effort: null, runName: null },
+      }),
+    );
+    const result = run(
+      config.node,
+      [config.otisCall, "call", "tracker_register_output", "@" + request],
+      config.repository,
+      true,
+    );
+    if (result.code !== 0) throw new Error("Otis output registration failed");
+  };
+  const deployPc = (sha) => {
+    if (!NodeFS.existsSync(NodePath.join(config.releaseRoot, "auto-deploy-enabled")))
+      return skip("deploy-disabled", "Windows release auto-deploy marker is missing");
+    const deployment = run(
+      config.node,
+      [
+        NodePath.join(import.meta.dirname, "t3-deploy.mjs"),
+        "nightly",
+        config.deployConfig,
+        NodePath.join(config.releaseRoot, sha),
+        ledger.liveBefore,
+      ],
+      config.repository,
+      true,
+    );
+    let receipt;
+    try {
+      receipt = JSON.parse(deployment.text);
+    } catch {
+      throw new Error("Nightly deploy returned no transaction receipt");
+    }
+    ledger.deployId = receipt.id;
+    if (receipt.result === "preflight-failed") {
+      if (receipt.failure?.includes("Nightly deployment requires zero active turns"))
+        return skip("skipped-busy", receipt.failure);
+      return skip("skipped-deploy-preflight", receipt.failure);
+    }
+    if (deployment.code !== 0 || receipt.result !== "healthy")
+      return skip("deploy-failed", "Deployment transaction: " + receipt.result);
+    ledger.liveAfter = sha;
+    ledger.result = "deployed";
+    return ledger;
+  };
   try {
     if (configFailure) throw configFailure;
     lock.listen(config.lockName ?? "\\\\.\\pipe\\otis-t3-nightly-sync");
@@ -192,7 +263,21 @@ export async function runNightly(configFile, io = {}) {
     )
       throw new Error("Unexpected repository owner");
     const forkBranch = config.forkBranch ?? "feat/t3-workers-prototype";
-    if (!["main", "feat/t3-workers-prototype"].includes(forkBranch))
+    if (pc) {
+      if (
+        forkBranch !== "deploy/jared-pc-nightly" ||
+        config.upstreamBranch !== "main" ||
+        !/^[AF]:[\\/]/i.test(NodeFS.realpathSync(config.repository)) ||
+        !/^[AF]:[\\/]/i.test(NodeFS.realpathSync(config.worktreeRoot)) ||
+        !NodeFS.statSync(config.vp).isFile() ||
+        !NodeFS.statSync(NodePath.join(config.pnpmBin, "pnpm.cmd")).isFile() ||
+        NodePath.resolve(config.releaseRoot).toLowerCase() !==
+          NodePath.resolve("A:/Runtime/T3CodeReleases").toLowerCase() ||
+        NodePath.resolve(config.deployConfig) !==
+          NodePath.resolve(config.releaseRoot, "deploy-config.json")
+      )
+        throw new Error("Expected Jared's PC fork, SSD worktree and native release paths");
+    } else if (!["main", "feat/t3-workers-prototype"].includes(forkBranch))
       throw new Error("Unsupported fork branch");
     const forkRef = `refs/remotes/origin/${forkBranch}`;
     const refreshFork = () => git("fetch", "origin", `+refs/heads/${forkBranch}:${forkRef}`);
@@ -223,8 +308,75 @@ export async function runNightly(configFile, io = {}) {
     }
     ledger.tag = tag;
     ledger.upstreamCommit = upstreamCommit;
-    const base = git("rev-parse", forkRef);
+    const published = git("rev-parse", forkRef);
+    if (pc) {
+      // Receive-pack authenticates even when the remote already points to this commit.
+      ledger.publishReady =
+        run(
+          "git",
+          [
+            "-c",
+            "push.followTags=false",
+            "push",
+            "--dry-run",
+            "origin",
+            published + ":refs/heads/" + forkBranch,
+          ],
+          config.repository,
+          true,
+        ).code === 0;
+    }
+    let base = published;
+    const ancestor = (older, newer) => {
+      const result = run(
+        "git",
+        ["merge-base", "--is-ancestor", older, newer],
+        config.repository,
+        true,
+      );
+      if (result.code !== 0 && result.code !== 1)
+        throw new Error("Could not compare fork ancestry");
+      return result.code === 0;
+    };
+    const verification = (sha) => NodePath.join(config.artifactRoot, "pc-verified", sha + ".json");
+    if (pc) {
+      const state = readJson(NodePath.join(config.releaseRoot, "state.json"));
+      if (state.pending)
+        return skip("skipped-deploy-pending", "Windows release recovery is pending");
+      const live = NodePath.basename(state.current);
+      if (
+        !/^[a-f0-9]{40}$/.test(live) ||
+        NodePath.resolve(state.current) !== NodePath.resolve(config.releaseRoot, live) ||
+        readJson(NodePath.join(state.current, "release.json")).commit !== live
+      )
+        throw new Error("Current Windows release identity could not be verified");
+      ledger.liveBefore = live;
+      if (!ancestor(live, published)) {
+        if (!ancestor(published, live))
+          return skip(
+            "skipped-fork-diverged",
+            "The published PC fork and live release have diverged",
+          );
+        base = live;
+      }
+    }
     ledger.base = base;
+    if (pc) {
+      const proof = run(
+        config.node,
+        [NodePath.join(import.meta.dirname, "t3-deploy.mjs"), "owners", config.deployConfig],
+        config.repository,
+        true,
+      );
+      if (proof.code !== 0) throw new Error("Cannot attest to the two Windows release supervisors");
+      const owners = JSON.parse(proof.text);
+      if (
+        owners.length !== 2 ||
+        owners.some((owner) => NodePath.basename(owner.release) !== ledger.liveBefore)
+      )
+        throw new Error("Live Windows release changed during nightly preparation");
+      ledger.ownerModes = owners.map((owner) => owner.mode);
+    }
     if (process.argv.includes("--observe")) {
       ledger.sourceIntegrated =
         run("git", ["cat-file", "-e", `${base}:docs/fork/FEATURES.md`], config.repository, true)
@@ -247,11 +399,47 @@ export async function runNightly(configFile, io = {}) {
       run("git", ["merge-base", "--is-ancestor", upstreamCommit, base], config.repository, true)
         .code === 0
     ) {
-      ledger.result = "already-synced";
-      return ledger;
+      if (pc && base !== ledger.liveBefore && NodeFS.existsSync(verification(base))) {
+        const proof = readJson(verification(base));
+        if (
+          proof.commit !== base ||
+          NodePath.resolve(proof.buildReceipt) !==
+            NodePath.resolve(config.releaseRoot, base, "release.json") ||
+          !NodeFS.existsSync(proof.buildReceipt)
+        )
+          throw new Error("Published candidate verification receipt is invalid");
+        ledger.commit = base;
+        ledger.buildReceipt = proof.buildReceipt;
+        return deployPc(base);
+      }
+      return skip("already-synced", "The selected upstream commit is already integrated");
     }
+    if (pc) {
+      const preview = run(
+        "git",
+        ["merge-tree", "--write-tree", "--name-only", "--no-messages", base, upstreamCommit],
+        config.repository,
+        true,
+      );
+      if (preview.code === 1) {
+        ledger.conflicts = preview.text.split(/\r?\n/).slice(1).filter(Boolean);
+        if (!ledger.conflicts.length)
+          throw new Error("Merge preview failed without conflict paths");
+        return skip(
+          "skipped-conflicts",
+          "Upstream merge has " + ledger.conflicts.length + " conflicts",
+        );
+      }
+      if (preview.code !== 0) throw new Error("Upstream merge preview failed");
+    }
+    if (pc && !ledger.publishReady)
+      return skip(
+        "publish-unavailable",
+        "Scheduled Windows account could not authenticate to the PC fork",
+      );
     const branch = `sync/t3-nightly-${night}-${base.slice(0, 8)}${dryRun ? `-dry-${NodeCrypto.randomUUID().slice(0, 8)}` : ""}`;
     if (
+      !pc &&
       run(
         "git",
         ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
@@ -274,13 +462,16 @@ export async function runNightly(configFile, io = {}) {
     )
       throw new Error("Unsafe candidate worktree path");
     ledger.worktree = tree;
-    ledger.branch = branch;
-    git("worktree", "add", "-b", branch, tree, base);
+    ledger.branch = pc ? forkBranch : branch;
+    git("worktree", "add", ...(pc ? ["--detach"] : ["-b", branch]), tree, base);
+    ownedTree = true;
     const merge = run("git", ["merge", "--no-ff", "--no-commit", upstreamCommit], tree, true);
     if (merge.code !== 0) {
       ledger.conflicts = run("git", ["diff", "--name-only", "--diff-filter=U"], tree).text.split(
         /\r?\n/,
       );
+      if (pc && ledger.conflicts.some(Boolean))
+        return skip("skipped-conflicts", "Conflicts appeared during the candidate merge");
       const budgetPath = "apps/server/src/provider/agentContextBudget.json";
       if (ledger.conflicts.includes(budgetPath)) {
         const deltaPath = "docs/fork/agent-context-delta.json";
@@ -342,7 +533,7 @@ export async function runNightly(configFile, io = {}) {
       .filter(Boolean);
     const fileJson = NodePath.join(artifact, "changed.json");
     NodeFS.writeFileSync(fileJson, JSON.stringify(files));
-    const vp = NodePath.join(config.repository, "node_modules/vite-plus/bin/vp");
+    const vp = config.vp ?? NodePath.join(config.repository, "node_modules/vite-plus/bin/vp");
     if (queue("Nightly frozen dependency install", tree, [vp, "i", "--frozen-lockfile"]) !== 0) {
       ledger.result = "dependency-verification-unavailable";
       return ledger;
@@ -492,7 +683,7 @@ export async function runNightly(configFile, io = {}) {
     );
     if (dryRun) {
       refreshFork();
-      if (git("rev-parse", forkRef) !== base) throw new Error("Fork advanced during dry run");
+      if (git("rev-parse", forkRef) !== published) throw new Error("Fork advanced during dry run");
       run(
         "git",
         [
@@ -507,6 +698,24 @@ export async function runNightly(configFile, io = {}) {
       );
       ledger.result = "dry-run-passed";
       return ledger;
+    }
+    if (pc) {
+      const file = verification(sha);
+      NodeFS.mkdirSync(NodePath.dirname(file), { recursive: true });
+      NodeFS.writeFileSync(
+        file,
+        JSON.stringify({ commit: sha, buildReceipt: ledger.buildReceipt }),
+      );
+      refreshFork();
+      if (git("rev-parse", forkRef) !== published)
+        return skip("skipped-fork-advanced", "The published PC fork advanced during verification");
+      run(
+        "git",
+        ["-c", "push.followTags=false", "push", "origin", sha + ":refs/heads/" + forkBranch],
+        tree,
+      );
+      ledger.published = true;
+      return deployPc(sha);
     }
     run("git", ["-c", "push.followTags=false", "push", "-u", "origin", branch], tree);
     ledger.result = "candidate-pushed";
@@ -562,11 +771,14 @@ export async function runNightly(configFile, io = {}) {
         config.repository,
         true,
       );
-      if (removed.code !== 0) worker("Could not clean the owned upstream baseline worktree");
+      if (removed.code !== 0) {
+        ledger.cleanupFailure = "Could not remove the owned upstream baseline worktree";
+        if (!pc) worker(ledger.cleanupFailure);
+      }
     }
     if (
-      ["published", "deployed", "already-synced", "dry-run-passed"].includes(ledger.result) &&
-      ledger.worktree
+      ownedTree &&
+      (pc || ["published", "deployed", "already-synced", "dry-run-passed"].includes(ledger.result))
     ) {
       const removed = run(
         "git",
@@ -575,18 +787,19 @@ export async function runNightly(configFile, io = {}) {
         true,
       );
       ledger.worktreeRemoved = removed.code === 0;
-      if (!ledger.worktreeRemoved) worker("Could not clean the completed candidate worktree");
+      if (!ledger.worktreeRemoved) {
+        ledger.cleanupFailure = "Could not remove the owned candidate worktree";
+        if (!pc) worker(ledger.cleanupFailure);
+      }
     }
-    ledger.exitCode = [
-      "published",
-      "deployed",
-      "already-synced",
-      "dry-run-passed",
-      "observed",
-    ].includes(ledger.result)
-      ? 0
-      : 1;
-    if (ledger.exitCode !== 0) {
+    ledger.exitCode =
+      ["published", "deployed", "already-synced", "dry-run-passed", "observed"].includes(
+        ledger.result,
+      ) || ledger.result.startsWith("skipped-")
+        ? 0
+        : 1;
+    if (pc && ledger.cleanupFailure) ledger.exitCode = 1;
+    if (ledger.exitCode !== 0 && !pc) {
       try {
         alert();
       } catch (error) {
@@ -595,6 +808,16 @@ export async function runNightly(configFile, io = {}) {
     }
     ledger.finishedAt = new Date().toISOString();
     NodeFS.writeFileSync(NodePath.join(artifact, "result.json"), JSON.stringify(ledger, null, 2));
+    if (pc) {
+      try {
+        otisReceipt();
+        ledger.otisReceiptRegistered = true;
+      } catch {
+        ledger.otisReceiptRegistered = false;
+        ledger.exitCode = 1;
+      }
+      NodeFS.writeFileSync(NodePath.join(artifact, "result.json"), JSON.stringify(ledger, null, 2));
+    }
     NodeFS.appendFileSync(
       NodePath.join(config.artifactRoot, "nightly-ledger.jsonl"),
       JSON.stringify(ledger) + "\n",

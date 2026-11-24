@@ -175,6 +175,18 @@ export function productionAdapter(config, io = {}) {
   const liveUserdata = () => NodeFS.realpathSync(NodePath.join(config.baseDir, "userdata"));
   return {
     async validate(candidate) {
+      if (io.expectedCurrent) {
+        const state = readReleaseState(config.releaseRoot);
+        if (NodePath.basename(state.current) !== io.expectedCurrent)
+          throw new Error("The live Windows release advanced during nightly preparation");
+        const statuses = await owners("status");
+        if (
+          statuses.some(
+            (status) => !status.pid || status.paused || status.release !== state.current,
+          )
+        )
+          throw new Error("Windows supervisors do not agree with the live release");
+      }
       const receipt = readJson(NodePath.join(candidate, "release.json"));
       if (
         receipt.commit !== NodePath.basename(candidate) ||
@@ -201,7 +213,7 @@ export function productionAdapter(config, io = {}) {
       }
     },
     async waitForIdle() {
-      idle = await until(async () => {
+      const readIdle = async () => {
         const pages = await snapshotPages();
         const router =
           pages[0].voice === undefined
@@ -209,7 +221,11 @@ export function productionAdapter(config, io = {}) {
             : undefined;
         const evidence = idleEvidence(pages, router);
         return evidence.idle ? evidence : undefined;
-      }, config.idleTimeoutSeconds ?? 3600);
+      };
+      idle = io.checkIdleOnce
+        ? await readIdle()
+        : await until(readIdle, config.idleTimeoutSeconds ?? 3600);
+      if (!idle) throw new Error("Nightly deployment requires zero active turns and calls");
       oldRuntime = idle.runtime;
       if (io.recordIdle !== false)
         writeJson(NodePath.join(config.releaseRoot, "last-idle.json"), {
@@ -294,6 +310,7 @@ export function productionAdapter(config, io = {}) {
           migrations: "authenticated-projection-readable",
         };
       }, 300);
+      if (io.passiveHealth) return { ok: true, ...observed, idle };
       const threadId = NodeCrypto.randomUUID();
       const nonce = `deploy-proof-${NodeCrypto.randomUUID()}`;
       const act = async (command) => {
@@ -351,11 +368,12 @@ async function main() {
   const config = readJson(configFile);
   config.modelSelection = {
     ...config.modelSelection,
-    model: proofModel ?? "gpt-6.2-sol",
+    model: operation === "nightly" ? "gpt-6.2-sol" : (proofModel ?? "gpt-6.2-sol"),
     options: [{ id: "effort", value: "low" }],
   };
-  if (config.modelSelection.model !== "gpt-6.2-sol" || config.healthUrls.length !== 3)
-    throw new Error("Require Sol proof and all three health surfaces");
+  const nightly = operation === "nightly";
+  if ((!nightly && config.modelSelection.model !== "gpt-6.2-sol") || config.healthUrls.length !== 3)
+    throw new Error("Require all three health surfaces and Sol proof for manual deployment");
   if (
     config.fixtureLaunch ||
     !["3774", "6803", "9445"].every((port) =>
@@ -363,7 +381,21 @@ async function main() {
     )
   )
     throw new Error("Require production health ports 3774, 6803 and 9445");
-  const transaction = new ReleaseTransaction(config.releaseRoot, productionAdapter(config));
+  if (nightly && !/^[a-f0-9]{40}$/.test(proofModel ?? ""))
+    throw new Error("Nightly deployment requires the expected live commit");
+  const transaction = new ReleaseTransaction(
+    config.releaseRoot,
+    productionAdapter(
+      config,
+      nightly
+        ? {
+            expectedCurrent: proofModel,
+            checkIdleOnce: true,
+            passiveHealth: true,
+          }
+        : {},
+    ),
+  );
   const result =
     operation === "idle-preview"
       ? await productionAdapter(
@@ -388,7 +420,7 @@ async function main() {
             )
           : operation === "recover"
             ? await transaction.recover()
-            : operation === "deploy"
+            : operation === "deploy" || nightly
               ? await transaction.switchTo(candidate)
               : operation === "status"
                 ? {
