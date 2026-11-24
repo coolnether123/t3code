@@ -24,6 +24,10 @@ export function useFleet() {
   return useAtomValue(fleet);
 }
 
+export function readFleet() {
+  return appAtomRegistry.get(fleet);
+}
+
 export function runFleetAction(environmentId: EnvironmentId, input: OtisAction) {
   return Effect.runPromise(act.run(appAtomRegistry, { environmentId, input }));
 }

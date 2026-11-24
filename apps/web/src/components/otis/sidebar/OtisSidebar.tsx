@@ -24,6 +24,7 @@ import { useSidebar, useSidebarVisibility } from "../../ui/sidebar";
 import { OtisButton } from "../OtisButton";
 import { OtisDoneFold } from "./OtisDoneFold";
 import { OtisTreeRow, NeedsYouPill, OtisRowMeta } from "./OtisTreeRow";
+import { useOtisRowMenu } from "./useOtisRowMenu";
 import { useFleet } from "./fleetData";
 import { useConnectingParents } from "./MakeParent";
 import "./fleet.css";
@@ -107,6 +108,7 @@ function FleetList({
       void navigate({ to: "/otis/node/$nodeId", params: { nodeId: node.id } });
     }
   });
+  const parentMenu = useOtisRowMenu({ node: parent, environmentId, onOpen: open });
   const expand = useStableCallback((id: string) => {
     if (isMobile) setPhonePath([...path, id]);
     else
@@ -161,7 +163,10 @@ function FleetList({
       className="flex h-full min-h-0 flex-col bg-sidebar text-sm text-sidebar-foreground"
     >
       {parent ? (
-        <header className="border-b px-2 py-1">
+        <header
+          {...parentMenu}
+          className="border-b px-2 py-1 select-none [-webkit-touch-callout:none]"
+        >
           <button
             data-fleet-link=""
             onClick={() => setPhonePath(path.slice(0, -1))}
@@ -175,7 +180,7 @@ function FleetList({
             <OtisRowMeta node={parent} labels={fleetRowLabels(parent, nodes, false)} />
           </div>
           {parent.chat && (
-            <button data-fleet-link="" onClick={() => open(parent)}>
+            <button data-fleet-link="" aria-haspopup="menu" onClick={() => open(parent)}>
               {gt("Open chat")}
             </button>
           )}

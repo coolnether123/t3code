@@ -200,3 +200,73 @@ it("opens the native parent chat, expands its children, and follows it on deskto
     .poll(() => router.state.location.pathname)
     .toBe(`/${ENVIRONMENT_ID}/November maintenance schedule`);
 });
+
+it("opens the same Otis row menu by right click, keyboard, and touch hold", async () => {
+  await page.viewport(1280, 844);
+  const { nodes, a } = exampleTree();
+  using _rpc = answerRpc("otis.subscribe", () =>
+    Stream.concat(
+      Stream.make({ type: "snapshot", seq: 1, nodes, waiting: null, load: null } as const),
+      Stream.never,
+    ),
+  );
+  const thread = threadWithHistory("Fleet menu verification", 1);
+  using _environment = installFakeEnvironment([thread]);
+  __setClientSettingsForTests({
+    ...DEFAULT_CLIENT_SETTINGS,
+    boringSidebarEnabled: true,
+    onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
+    panelAnimationDurationMs: 0,
+  });
+  const router = getRouter(
+    createMemoryHistory({ initialEntries: [`/${ENVIRONMENT_ID}/${thread.id}`] }),
+  );
+  await router.load();
+  await using _app = await render(<AppRoot router={router} />, { router: false });
+  const lane = page.getByRole("region", { name: "Otis fleet" });
+  const parent = lane.getByRole("button", { name: /^Otis #1/ });
+  const menu = page.getByRole("menu", { name: "Context menu" });
+  await parent.click({ button: "right" });
+  await expect.element(menu.getByRole("menuitem", { name: "Copy link" })).toBeVisible();
+  expect(menu.element().querySelector("svg")).toBeNull();
+  (document.activeElement as HTMLElement).dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+  );
+  await expect.element(menu).not.toBeInTheDocument();
+
+  const parentElement = parent.element() as HTMLElement;
+  parentElement.focus();
+  parentElement.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "F10", shiftKey: true, bubbles: true }),
+  );
+  await expect.element(menu).toHaveFocus();
+  menu.element().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  const openChat = menu.getByRole("menuitem", { name: "Open chat" });
+  await expect.element(openChat).toHaveFocus();
+  openChat.element().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await expect.poll(() => router.state.location.pathname).toBe("/otis/node/lane%3Aotis-1");
+
+  await lane.getByRole("button", { name: "Expand Otis #1" }).click();
+  const worker = lane.getByRole("button", { name: new RegExp(a.title) });
+  await expect.element(worker).toBeVisible();
+  const workerElement = worker.element();
+  const { left, top } = workerElement.getBoundingClientRect();
+  workerElement.dispatchEvent(
+    new PointerEvent("pointerdown", {
+      bubbles: true,
+      pointerType: "touch",
+      isPrimary: true,
+      button: 0,
+      clientX: left + 4,
+      clientY: top + 4,
+    }),
+  );
+  await expect.element(menu.getByRole("menuitem", { name: "Copy run ID" })).toBeVisible();
+  workerElement.dispatchEvent(
+    new PointerEvent("pointerup", { bubbles: true, pointerType: "touch" }),
+  );
+  workerElement.dispatchEvent(
+    new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }),
+  );
+  expect(router.state.location.pathname).toBe("/otis/node/lane%3Aotis-1");
+});

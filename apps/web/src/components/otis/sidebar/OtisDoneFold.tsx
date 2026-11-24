@@ -1,3 +1,4 @@
+import { useOtisRowMenu } from "./useOtisRowMenu";
 import { FleetTitle } from "./FleetTitle";
 import { useGT } from "gt-react";
 import type { EnvironmentId, OtisNode } from "@t3tools/contracts";
@@ -56,17 +57,9 @@ function HistoryPage({
     return <p role="status">{gt("Could not load done chats. Reopen Done to try again.")}</p>;
   return (
     <>
-      {result.page.nodes.map((node) =>
-        node.chat ? (
-          <button data-fleet-link="" key={node.id} onClick={() => onOpen(node)}>
-            <FleetTitle title={node.title} />
-          </button>
-        ) : (
-          <div key={node.id} className="truncate px-3 py-1 text-muted-foreground">
-            <FleetTitle title={node.title} />
-          </div>
-        ),
-      )}
+      {result.page.nodes.map((node) => (
+        <HistoryRow key={node.id} node={node} environmentId={environmentId} onOpen={onOpen} />
+      ))}
       {result.page.next &&
         (more ? (
           <HistoryPage
@@ -84,6 +77,25 @@ function HistoryPage({
   );
 }
 
+function HistoryRow({
+  node,
+  environmentId,
+  onOpen,
+}: Pick<PageProps, "environmentId" | "onOpen"> & { node: OtisNode }) {
+  const menu = useOtisRowMenu({ node, environmentId, onOpen });
+  return (
+    <button
+      type="button"
+      data-fleet-link=""
+      {...menu}
+      className="min-w-0 select-none [-webkit-touch-callout:none]"
+      aria-haspopup="menu"
+      onClick={node.chat ? () => onOpen(node) : undefined}
+    >
+      <FleetTitle title={node.title} />
+    </button>
+  );
+}
 export function OtisDoneFold({
   environmentId,
   parent,

@@ -5,6 +5,7 @@ import type { OtisNode } from "@t3tools/contracts";
 import { ChevronDown, ChevronRight, Check, X, Square } from "lucide-react";
 import type { fleetRowLabels } from "@t3tools/client-runtime/otis/tree";
 import { useRelativeTimeState } from "~/hooks/useRelativeTimeState";
+import { useOtisRowMenu } from "./useOtisRowMenu";
 import { runFleetAction } from "./fleetData";
 import { usePrimaryEnvironmentId } from "~/state/environments";
 import { memo, useRef, useState } from "react";
@@ -162,6 +163,7 @@ export const OtisTreeRow = memo(function OtisTreeRow({
       setSending(false);
     }
   }
+  const menu = useOtisRowMenu({ node, environmentId, onOpen, canRetry, onWorkerAction: runAction });
   const action = node.chat ? () => onOpen(node) : branch ? () => onExpand(node.id) : undefined;
   const name = (
     <>
@@ -180,8 +182,9 @@ export const OtisTreeRow = memo(function OtisTreeRow({
   return (
     <>
       <div
+        {...menu}
         data-fleet-row=""
-        className={`flex min-w-0 items-center gap-1 rounded-md px-2 min-h-11`}
+        className={`flex min-w-0 items-center gap-1 rounded-md px-2 min-h-11 select-none [-webkit-touch-callout:none]`}
         style={{ paddingInlineStart: 8 + (narrow ? 0 : Math.min(depth, 4) * 12) }}
       >
         {branch ? (
@@ -205,12 +208,18 @@ export const OtisTreeRow = memo(function OtisTreeRow({
           <button
             data-fleet-action=""
             className="flex min-w-0 flex-1 self-stretch items-center gap-1 text-left"
+            aria-haspopup="menu"
             onClick={action}
           >
             <span className="min-w-0 flex-1">{name}</span>
           </button>
         ) : (
-          <div className="min-w-0 flex-1">{name}</div>
+          <div
+            tabIndex={0}
+            className="min-w-0 flex-1 focus-visible:outline-2 focus-visible:outline-ring"
+          >
+            {name}
+          </div>
         )}
         {branch && !expanded && !lane && childCount > 0 && (
           <span className="text-xs text-muted-foreground">{childCount}</span>
