@@ -54,25 +54,25 @@ function StateMark({ node, label }: { node: OtisNode; label: string }) {
   );
 }
 
-export const OtisTreeRow = memo(function OtisTreeRow({
+export function NeedsYouPill({ node }: { node: OtisNode }) {
+  const gt = useGT();
+  const count = node.waiting + node.sub.waiting;
+  return count > 0 ? (
+    <span className="ml-auto shrink-0 rounded-full bg-warning px-2 text-xs font-semibold text-warning-foreground">
+      {gt("{count} needs you", { count })}
+    </span>
+  ) : null;
+}
+
+export function OtisRowMeta({
   node,
-  depth,
-  narrow,
-  expanded,
-  childCount,
-  question,
-  onExpand,
-  onOpen,
-  ...labels
-}: Props) {
+  labels,
+}: {
+  node: OtisNode;
+  labels: ReturnType<typeof fleetRowLabels>;
+}) {
   const gt = useGT();
   const lane = node.kind === "lane";
-  const branch = !node.settled && (node.sub.nodes > 0 || childCount > 0);
-  const needs = node.sub.waiting + node.waiting;
-  const environmentId = usePrimaryEnvironmentId();
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState("");
-  const attempt = useRef<{ type: "seen" | "retry"; id: string } | null>(null);
   const counts = [
     node.sub.running && gt("{count} running", { count: node.sub.running }),
     node.sub.queued && gt("{count} queued", { count: node.sub.queued }),
@@ -90,7 +90,11 @@ export const OtisTreeRow = memo(function OtisTreeRow({
       : null;
   const detail = [
     labels.model,
-    lane ? counts || labels.state || gt("Idle") : node.waiting ? gt("Needs you") : labels.state,
+    lane
+      ? counts || labels.state || gt("Idle")
+      : node.waiting
+        ? gt("Needs you")
+        : labels.state || gt("Idle"),
     lane ? null : elapsed,
   ]
     .filter(Boolean)
@@ -106,6 +110,37 @@ export const OtisTreeRow = memo(function OtisTreeRow({
   ]
     .filter(Boolean)
     .join(" · ");
+  return (
+    <span className="flex items-baseline justify-between gap-1 text-xs text-muted-foreground">
+      <span className="min-w-0 flex-1">{detail}</span>
+      <span
+        className="shrink-0 whitespace-nowrap text-right tabular-nums"
+        aria-label={gt("API-equivalent cost and tokens: {metrics}", { metrics })}
+      >
+        {metrics}
+      </span>
+    </span>
+  );
+}
+
+export const OtisTreeRow = memo(function OtisTreeRow({
+  node,
+  depth,
+  narrow,
+  expanded,
+  childCount,
+  question,
+  onExpand,
+  onOpen,
+  ...labels
+}: Props) {
+  const gt = useGT();
+  const lane = node.kind === "lane";
+  const branch = !node.settled && (node.sub.nodes > 0 || childCount > 0);
+  const environmentId = usePrimaryEnvironmentId();
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState("");
+  const attempt = useRef<{ type: "seen" | "retry"; id: string } | null>(null);
   const title = question || labels.title;
   async function runAction(type: "retry" | "seen") {
     if (!environmentId || sending) return;
@@ -125,22 +160,13 @@ export const OtisTreeRow = memo(function OtisTreeRow({
     <>
       <span className="flex min-w-0 items-center gap-1.5">
         {!lane && <StateMark node={node} label={labels.state} />}
-        <FleetTitle title={title} detail={detail} />
-        {lane && needs > 0 && (
-          <span className="ml-auto shrink-0 rounded-full bg-warning px-2 text-xs font-semibold text-warning-foreground">
-            {gt("{count} needs you", { count: needs })}
-          </span>
-        )}
+        <FleetTitle
+          title={title}
+          detail={[labels.model, labels.state].filter(Boolean).join(" \u00b7 ")}
+        />
+        {lane && <NeedsYouPill node={node} />}
       </span>
-      <span className="flex items-baseline justify-between gap-1 text-xs text-muted-foreground">
-        <span className="min-w-0 flex-1">{detail}</span>
-        <span
-          className="shrink-0 whitespace-nowrap text-right tabular-nums"
-          aria-label={gt("API-equivalent cost and tokens: {metrics}", { metrics })}
-        >
-          {metrics}
-        </span>
-      </span>
+      <OtisRowMeta node={node} labels={labels} />
     </>
   );
   const Chevron = expanded ? ChevronDown : ChevronRight;

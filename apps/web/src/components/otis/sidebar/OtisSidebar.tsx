@@ -23,7 +23,7 @@ import { SidebarChromeHeader } from "../../sidebar/SidebarChrome";
 import { useSidebar, useSidebarVisibility } from "../../ui/sidebar";
 import { OtisButton } from "../OtisButton";
 import { OtisDoneFold } from "./OtisDoneFold";
-import { OtisTreeRow } from "./OtisTreeRow";
+import { OtisTreeRow, NeedsYouPill, OtisRowMeta } from "./OtisTreeRow";
 import { useFleet } from "./fleetData";
 import { useConnectingParents } from "./MakeParent";
 import "./fleet.css";
@@ -169,12 +169,10 @@ function FleetList({
           >
             <ChevronLeft size={16} />
             <span className="truncate">{path.map((id) => nodes.get(id)?.title).join(" / ")}</span>
+            {parent.kind === "lane" && <NeedsYouPill node={parent} />}
           </button>
-          <div className="px-3 text-xs text-muted-foreground">
-            {parent.model} ·{" "}
-            {parent.kind === "lane" && parent.tokens
-              ? gt("{tokens} today", { tokens: fleetRowLabels(parent, nodes, false).tokens })
-              : fleetRowLabels(parent, nodes, false).tokens}
+          <div className="px-3">
+            <OtisRowMeta node={parent} labels={fleetRowLabels(parent, nodes, false)} />
           </div>
           {parent.chat && (
             <button data-fleet-link="" onClick={() => open(parent)}>

@@ -183,6 +183,7 @@ it("opens the native parent chat, expands its children, and follows it on deskto
   await lane.getByRole("button", { name: "Expand Otis #1" }).click();
   await expect.element(lane.getByText(a.title)).toBeVisible();
   await expect.element(lane.getByText("Facilities")).not.toBeInTheDocument();
+  await expect.element(lane.getByText(/Astra \u00b7 2 running/)).toBeVisible();
   await expect.element(lane.getByRole("button", { name: "Done · 1" })).toBeVisible();
   await page.screenshot({ path: "__screenshots__/fleet-v1-phone.png" });
   await lane.getByRole("button", { name: "Open chat", exact: true }).click();
