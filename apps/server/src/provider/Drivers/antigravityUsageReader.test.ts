@@ -242,7 +242,8 @@ describe("readAntigravityUsage", () => {
           ...protoBytes(8, stamp),
           ...protoBytes(28, protoBytes(2, retry)),
         ];
-        yield* seedDatabase(path.join(dir, "session-1.db"), (db) =>
+        const nativeSession = "8b1e7e34-7220-4d58-9847-434d80168276";
+        yield* seedDatabase(path.join(dir, nativeSession + ".db"), (db) =>
           Effect.gen(function* () {
             yield* createTables(db);
             yield* db.run("INSERT INTO gen_metadata VALUES (?, ?)", [
@@ -259,7 +260,8 @@ describe("readAntigravityUsage", () => {
         const main = read.find((record) => record.model === "gemini-3-pro");
         assert.isDefined(main);
         assert.strictEqual(main?.timestampMs, 1780000000000);
-        assert.strictEqual(main?.sessionId, "session-1");
+        assert.strictEqual(main?.sessionId, nativeSession);
+        assert.strictEqual(main?.nativeSessionId, nativeSession);
         assert.deepStrictEqual(main?.totals, {
           uncachedInputTokens: 100,
           cachedInputTokens: 20,

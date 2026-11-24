@@ -17,6 +17,8 @@ export interface UsageRecord {
   readonly model: string;
   readonly rateModel?: string;
   readonly sessionId: string;
+  /** Exact provider-native session identity, when the source proves it. */
+  readonly nativeSessionId?: string;
   readonly totals: UsageTokenTotals;
   /** The part of `totals.cacheCreationTokens` written with a 1-hour TTL. */
   readonly cacheCreation1hTokens?: number;

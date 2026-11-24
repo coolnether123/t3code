@@ -72,6 +72,7 @@ import {
 import { mergeUsageReads, projectUsageRead, usageReadBatchKey } from "./usageReadBatch.ts";
 import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
 import { makeUsageReportCalculation, projectUsageReport } from "./usageReport.ts";
+import { publicApiRatesIdentity } from "./publicApiRates.ts";
 import {
   PromptUsageAccumulator,
   promptUsageTimeBounds,
@@ -691,7 +692,7 @@ export const make = Effect.gen(function* () {
     const parsed = parseRateTable(fromDisk.document);
     if (parsed.size === 0) return;
     rates = parsed;
-    const revisionDocument = encodeRateDocument(fromDisk.document);
+    const revisionDocument = encodeRateDocument([publicApiRatesIdentity, fromDisk.document]);
     ratesRevision = Buffer.from(
       yield* crypto.digest(Digest.sha256, Buffer.from(revisionDocument)).pipe(Effect.orDie),
     ).toString("hex");
@@ -752,7 +753,7 @@ export const make = Effect.gen(function* () {
 
             rates = fetched.parsed;
             ratesLastFailedAtMs = null;
-            const revisionDocument = encodeRateDocument(fetched.document);
+            const revisionDocument = encodeRateDocument([publicApiRatesIdentity, fetched.document]);
             ratesRevision = Buffer.from(
               yield* crypto.digest(Digest.sha256, Buffer.from(revisionDocument)).pipe(Effect.orDie),
             ).toString("hex");

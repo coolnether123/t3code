@@ -618,3 +618,11 @@ Use `Ctrl+Shift+1/2/3/4` (`Cmd+Shift+1/2/3/4` on macOS) for the past
 24 hours, 7 days, 30 days, or 90 days. Period shortcuts do nothing on Limits.
 Press `Escape` to return to the previous page. Customize these shortcuts in
 **Settings → Keybindings**.
+
+The first-party rate table in `apps/server/src/usage/publicApiRates.ts` records
+the verification date and publisher links for the supported current models.
+The calculator uses that table for recorded token categories and effective
+dates, with the imported catalogue as a fallback for other models. Reasoning
+tokens already count toward output. Antigravity conversation usage includes
+native run attribution when the source database name carries the provider's
+conversation UUID.

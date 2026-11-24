@@ -547,7 +547,9 @@ describe("UsageService", () => {
       assert.strictEqual(models.mode, "models");
       assert.strictEqual(runs.mode, "runs");
       const codex = models.rows.find((row) => row.model === "gpt-6.2-sol");
-      assert.closeTo(codex?.costUsd ?? -1, 2.4930008, 1e-12);
+      // This snapshot exceeds 272k input tokens, so the first-party long-context
+      // rates apply for the whole record.
+      assert.closeTo(codex?.costUsd ?? -1, 4.7402216, 1e-12);
       assert.strictEqual(models.rows.length, 2);
       assert.strictEqual(
         overview.totals.records,

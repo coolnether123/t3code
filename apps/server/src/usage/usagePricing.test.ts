@@ -30,6 +30,34 @@ const opus = {
 };
 
 describe("usage pricing", () => {
+  it("uses dated first-party rates for new models and bills thinking inside output", () => {
+    const table = parseRateTable({ "gemini-4-argon": rate(9e-6, 9e-6) });
+    const record = {
+      provider: "antigravity" as const,
+      model: "gemini-4-argon-trial",
+      rateModel: "gemini-4-argon",
+      sessionId: "fixture",
+      timestampMs: Date.parse("2026-11-24T00:00:00Z"),
+      dedupeKey: null,
+      reportedCostUsd: 0,
+      totals: { ...tokens, cacheCreationTokens: 0 },
+    };
+    expect(priceUsageRecord(table, record).costUsd).toBeCloseTo(0.0008);
+    expect(
+      priceUsageRecord(table, { ...record, timestampMs: Date.parse("2026-12-01T08:00:00Z") })
+        .costUsd,
+    ).toBeCloseTo(0.0016);
+    expect(
+      priceUsageRecord(table, {
+        ...record,
+        model: "gpt-6.2-astra",
+        rateModel: "gpt-6.2-astra",
+        serviceTier: "ultrafast",
+        totals: { ...record.totals, uncachedInputTokens: 300_000 },
+      }).costUsd,
+    ).toBeCloseTo(14.4114);
+  });
+
   it("prices one-hour Claude cache writes separately from five-minute writes", () => {
     const table = parseRateTable({
       "claude-opus-5": { ...opus, cache_creation_input_token_cost_above_1hr: 10e-6 },

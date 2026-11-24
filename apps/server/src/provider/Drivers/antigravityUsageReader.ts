@@ -14,6 +14,9 @@ import * as SqlClient from "effect/sql/SqlClient";
 type FieldValue = number | bigint | Uint8Array;
 type Fields = Map<number, FieldValue[]>;
 
+// Antigravity stores each ACP or CLI conversation in <session UUID>.db.
+const isNativeSessionId = Schema.is(Schema.String.check(Schema.isUUID(4)));
+
 function fields(bytes: Uint8Array): Fields {
   let offset = 0;
   const result: Fields = new Map();
@@ -130,7 +133,12 @@ const MODEL_IDS: Record<number, string> = {
 
 // Effort and routing variants share the base model's price.
 export const antigravityRateModel = (model: string) => {
-  const base = model.replace(/-(?:extra-low|low|medium|high|tiered|control|thinking|agent)$/, "");
+  const base = model.replace(
+    /(?:-(?:extra-low|low|medium|high|xhigh|tiered|control|thinking|agent))+$/,
+    "",
+  );
+  // Antigravity trial receipts carry a distinct entitlement label for this same model.
+  if (base === "gemini-4-argon-trial") return "gemini-4-argon";
   return /^gemini-3-flash-(?:agent(?:-[ab])?|[ab])$/.test(model)
     ? "gemini-3.5-flash"
     : model === "gemini-3.7-flash-safety-le"
@@ -379,6 +387,7 @@ function usageCandidates(
         const record: UsageRecord = {
           provider: "antigravity",
           sessionId,
+          ...(isNativeSessionId(sessionId) ? { nativeSessionId: sessionId } : {}),
           timestampMs: entry.timestampMs ?? trajectoryTimestamp ?? fallbackTimestamp,
           model,
           totals,
@@ -458,8 +467,13 @@ export const readAntigravityUsage = Effect.fn("readAntigravityUsage")(function* 
         : target;
     const x = target.record.totals;
     const y = source.record.totals;
+    const { nativeSessionId, ...common } = first.record;
     target.record = {
-      ...first.record,
+      ...common,
+      ...(nativeSessionId !== undefined &&
+      target.record.nativeSessionId === source.record.nativeSessionId
+        ? { nativeSessionId }
+        : {}),
       model: bestModel.record.model,
       timestampMs: bestTime.record.timestampMs,
       totals: {

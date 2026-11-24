@@ -24,6 +24,7 @@ import type {
   UsageTokenTotals,
 } from "@t3tools/contracts";
 
+import { publicApiRatesVerified } from "./publicApiRates.ts";
 import { addTotals, EMPTY_TOTALS } from "./usageTranscripts.ts";
 
 const DEFAULT_PROVIDER_LIMIT = 16;
@@ -46,8 +47,7 @@ export function makeUsageReportCalculation(
   return {
     formulaVersion: 1,
     costBasis: "apiEquivalent",
-    costSemantics:
-      "USD-equivalent value at the selected public model rates. A record is unpriced when no model rate matches or the matching rate cannot price all of its tokens. Unpriced records are excluded from the dollar total.",
+    costSemantics: `USD-equivalent value at the selected public model rates. The first-party rate table was verified ${publicApiRatesVerified}. A record is unpriced when no model rate matches or the matching rate cannot price all of its tokens. Unpriced records are excluded from the dollar total.`,
     cacheSavingsSemantics:
       "Full uncached input value minus the charged cache-read value for cacheable input tokens.",
     serviceTierPolicy:

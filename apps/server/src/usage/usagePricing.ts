@@ -6,6 +6,8 @@ import type {
   UsageTokenTotals,
 } from "@t3tools/contracts";
 
+import { publicApiRate } from "./publicApiRates.ts";
+
 /**
  * The subset of a LiteLLM entry we price against. All values are USD per token.
  *
@@ -353,7 +355,12 @@ const MODEL_RATE_ALIASES = new Map([
 
 export function isUnlistedModel(table: RateTable, model: string): boolean {
   const key = normalizeModelName(model).split("[", 1)[0]!;
-  return key.length > 0 && !UNPRICEABLE_MODELS.has(key) && lookupRate(table, model) === null;
+  return (
+    key.length > 0 &&
+    !UNPRICEABLE_MODELS.has(key) &&
+    publicApiRate(model, 0) === undefined &&
+    lookupRate(table, model) === null
+  );
 }
 
 export function lookupRate(table: RateTable, model: string): ModelRate | null {
@@ -394,7 +401,6 @@ function rateForTotals(
   totals: UsageTokenTotals,
   serviceTier?: string,
 ): ModelRate | null {
-  if (serviceTier === "ultrafast") return base.ultrafast ?? null;
   if (serviceTier === "fast" && base.fast !== undefined) return base.fast;
   const tier = serviceTier === "fast" ? "priority" : serviceTier;
   const rate =
@@ -404,14 +410,22 @@ function rateForTotals(
         ? base.priority
         : tier === "flex"
           ? base.flex
-          : undefined;
+          : tier === "ultrafast"
+            ? base.ultrafast
+            : undefined;
   if (rate === undefined) return null;
   const inputTokens =
     totals.uncachedInputTokens + totals.cachedInputTokens + totals.cacheCreationTokens;
-  if (inputTokens > 272_000 && (base.above272kTokens || rate.above272kTokens)) {
+  if (
+    inputTokens > 272_000 &&
+    (rate.above272kTokens || (tier !== "ultrafast" && base.above272kTokens))
+  ) {
     return rate.above272kTokens ?? null;
   }
-  if (inputTokens > 200_000 && (base.above200kTokens || rate.above200kTokens)) {
+  if (
+    inputTokens > 200_000 &&
+    (rate.above200kTokens || (tier !== "ultrafast" && base.above200kTokens))
+  ) {
     return rate.above200kTokens ?? null;
   }
   return rate;
@@ -432,11 +446,26 @@ export function priceUsage(
   overrides?: RateTable,
   cacheCreation1hTokens = 0,
 ): PricedUsage {
+  return priceAtRate(
+    lookupRate(overrides ?? table, model) ?? lookupRate(table, model),
+    totals,
+    reportedCostUsd,
+    serviceTier,
+    cacheCreation1hTokens,
+  );
+}
+
+function priceAtRate(
+  baseRate: ModelRate | null,
+  totals: UsageTokenTotals,
+  reportedCostUsd: number | null,
+  serviceTier?: string,
+  cacheCreation1hTokens = 0,
+): PricedUsage {
   if (reportedCostUsd !== null && finiteNumber(reportedCostUsd) !== null) {
     return { costUsd: reportedCostUsd, costSource: "providerReported" };
   }
 
-  const baseRate = lookupRate(overrides ?? table, model) ?? lookupRate(table, model);
   if (baseRate === null) return { costUsd: 0, costSource: "unpriced" };
   const rate = rateForTotals(baseRate, totals, serviceTier);
   if (rate === null) return { costUsd: 0, costSource: "unpriced" };
@@ -482,7 +511,8 @@ export function priceUsageRecord(
   const override = overrides?.get(record.model.trim());
   const model = override === undefined ? (record.rateModel ?? record.model) : record.model;
   const speedTier = record.speed === "standard" ? undefined : record.speed;
-  const base = override ?? lookupRate(table, model);
+  const publicRate = publicApiRate(model, record.timestampMs);
+  const base = override ?? publicRate ?? lookupRate(table, model);
   const tier =
     override !== undefined
       ? undefined
@@ -492,18 +522,14 @@ export function priceUsageRecord(
           : speedTier === "ultrafast" && base?.ultrafast === undefined
             ? undefined
             : speedTier));
-  const priced =
-    override === undefined
-      ? priceUsage(
-          table,
-          model,
-          record.totals,
-          record.reportedCostUsd,
-          tier,
-          undefined,
-          record.cacheCreation1hTokens,
-        )
-      : priceUsage(new Map([[normalizeModelName(model), override]]), model, record.totals, null);
+  const priced = priceAtRate(
+    base,
+    record.totals,
+    // Tracked list-price models use the same rates on every provider surface.
+    override === undefined && publicRate === undefined ? record.reportedCostUsd : null,
+    tier,
+    record.cacheCreation1hTokens,
+  );
   const rate = base === null ? null : rateForTotals(base, record.totals, tier);
   const cacheSavingsUsd =
     rate === null || rate.cacheReadCostPerToken === null
