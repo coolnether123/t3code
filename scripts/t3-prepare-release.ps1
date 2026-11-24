@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory)][string]$ReleaseRoot,
     [Parameter(Mandatory)][string]$ArtifactRoot,
     [string]$Repository,
+    [string]$PnpmBin,
     [switch]$DryRun
 )
 
@@ -56,7 +57,14 @@ $dependencyNeedsInstall = $true
 $deployCommitBefore = $sha
 $pruneArtifactRoot = $ArtifactRoot
 $commandLogPath = Join-Path $ArtifactRoot "prepare-$sha.log"
+$previousPath = $env:Path
 try {
+    if ($PnpmBin) {
+        if (-not (Test-Path -LiteralPath (Join-Path $PnpmBin 'pnpm.cmd') -PathType Leaf)) {
+            throw 'The requested pnpm shim is missing.'
+        }
+        $env:Path = "$PnpmBin;$previousPath"
+    }
     [void](Invoke-GitText $Repository @('-c', 'core.longpaths=true', 'worktree', 'add', '--detach', $sourceRoot, $sha))
     [void](Sync-TrackedSourceFiles $sourceRoot $deployRoot)
     Invoke-T3PreparedBuild
@@ -79,6 +87,7 @@ try {
     [IO.Directory]::Move($deployRoot, $targetRoot)
     Write-Host "Prepared $sha. Receipt: $targetRoot\release.json"
 } finally {
+    $env:Path = $previousPath
     if (Test-Path -LiteralPath $sourceRoot) {
         [void](Invoke-GitText $Repository @('-c', 'core.longpaths=true', 'worktree', 'remove', $sourceRoot))
     }

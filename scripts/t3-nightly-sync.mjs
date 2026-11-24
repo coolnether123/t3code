@@ -61,6 +61,9 @@ export async function runNightly(configFile, io = {}) {
     .join(NodePath.delimiter);
   const readJson = (file) => JSON.parse(NodeFS.readFileSync(file, "utf8"));
   const dryRun = io.dryRun ?? process.argv.includes("--dry-run");
+  const deployOnlyIndex = process.argv.indexOf("--deploy-only");
+  const deployOnly =
+    io.deployOnly ?? (deployOnlyIndex < 0 ? null : (process.argv[deployOnlyIndex + 1] ?? ""));
   const night = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Chicago",
     year: "numeric",
@@ -125,7 +128,7 @@ export async function runNightly(configFile, io = {}) {
         args,
         cwd,
         outputs: [artifact],
-        ...(pc ? { environment: { PATH: toolPath } } : {}),
+        ...(pc && deployOnly === null ? { environment: { PATH: toolPath } } : {}),
         lane: "heavy",
         class: command === config.node ? "test-suite" : "build",
       }),
@@ -220,6 +223,52 @@ export async function runNightly(configFile, io = {}) {
       throw new Error("Otis returned an unexpected tracker receipt");
     return receipt.recordId;
   };
+  const prepareRelease = (sha, tree) => {
+    const release = NodePath.join(config.releaseRoot, sha);
+    if (!NodeFS.existsSync(NodePath.join(release, "release.json"))) {
+      if (
+        queue(
+          "Nightly production release build before publication",
+          tree,
+          [
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+            NodePath.join(import.meta.dirname, "t3-prepare-release.ps1"),
+            "-Commit",
+            sha,
+            "-Repository",
+            tree,
+            "-ReleaseRoot",
+            config.releaseRoot,
+            "-ArtifactRoot",
+            artifact,
+            ...(deployOnly === null ? [] : ["-PnpmBin", config.pnpmBin]),
+          ],
+          NodePath.join(
+            process.env.SystemRoot ?? "C:/Windows",
+            "System32/WindowsPowerShell/v1.0/powershell.exe",
+          ),
+        ) !== 0
+      )
+        throw new Error("Production build failed before publication");
+    }
+    const receipt = JSON.parse(NodeFS.readFileSync(NodePath.join(release, "release.json"), "utf8"));
+    if (receipt.commit !== sha || !receipt.artifacts?.length)
+      throw new Error("Production build receipt identity is invalid");
+    for (const item of receipt.artifacts) {
+      const file = NodePath.join(release, item.path);
+      const hash = NodeCrypto.createHash("sha256").update(NodeFS.readFileSync(file)).digest("hex");
+      if (hash.toLowerCase() !== item.sha256.toLowerCase())
+        throw new Error("Production build artifact hash mismatch");
+    }
+    ledger.buildReceipt = NodePath.join(release, "release.json");
+  };
   const deployPc = (sha) => {
     if (!NodeFS.existsSync(NodePath.join(config.releaseRoot, "auto-deploy-enabled")))
       return skip("deploy-disabled", "Windows release auto-deploy marker is missing");
@@ -255,6 +304,11 @@ export async function runNightly(configFile, io = {}) {
   };
   try {
     if (configFailure) throw configFailure;
+    if (deployOnly !== null) {
+      if (!pc || !/^[a-f0-9]{40}$/.test(deployOnly) || process.argv.includes("--observe"))
+        throw new Error("--deploy-only requires a full commit SHA and the Jared PC nightly config");
+      ledger.mode = "deploy-only";
+    }
     lock.listen(config.lockName ?? "\\\\.\\pipe\\otis-t3-nightly-sync");
     await NodeEvents.once(lock, "listening");
     if (
@@ -286,12 +340,12 @@ export async function runNightly(configFile, io = {}) {
     refreshFork();
     let upstreamCommit;
     let tag;
-    if (config.upstreamBranch === "main") {
+    if (deployOnly === null && config.upstreamBranch === "main") {
       git("fetch", ...fetchOptions, "upstream", "+refs/heads/main:refs/remotes/upstream/main");
       upstreamCommit = git("rev-parse", "refs/remotes/upstream/main");
       tag = `upstream/main@${upstreamCommit.slice(0, 10)}`;
       ledger.sourceRef = "refs/heads/main";
-    } else {
+    } else if (deployOnly === null) {
       const advertisedTags = git("ls-remote", "--tags", "--refs", "upstream", "v*-nightly.*")
         .split(/\r?\n/)
         .map((line) => {
@@ -311,7 +365,7 @@ export async function runNightly(configFile, io = {}) {
     ledger.tag = tag;
     ledger.upstreamCommit = upstreamCommit;
     const published = git("rev-parse", forkRef);
-    if (pc) {
+    if (pc && deployOnly === null) {
       // Receive-pack authenticates even when the remote already points to this commit.
       ledger.publishReady =
         run(
@@ -378,6 +432,24 @@ export async function runNightly(configFile, io = {}) {
       )
         throw new Error("Live Windows release changed during nightly preparation");
       ledger.ownerModes = owners.map((owner) => owner.mode);
+    }
+    if (deployOnly !== null) {
+      const localFork = `refs/heads/${forkBranch}`;
+      if (deployOnly !== published || git("rev-parse", localFork) !== deployOnly)
+        throw new Error("Deploy-only requires the same exact local and published PC fork tip");
+      if (base !== published) throw new Error("Deploy-only cannot move the live PC fork backward");
+      ledger.commit = deployOnly;
+      if (deployOnly === ledger.liveBefore)
+        return skip("already-synced", "The requested PC fork tip is already live");
+      if (dryRun) {
+        ledger.result = "dry-run-passed";
+        return ledger;
+      }
+      prepareRelease(deployOnly, config.repository);
+      refreshFork();
+      if (git("rev-parse", forkRef) !== deployOnly || git("rev-parse", localFork) !== deployOnly)
+        return skip("skipped-fork-advanced", "The PC fork advanced during release preparation");
+      return deployPc(deployOnly);
     }
     if (process.argv.includes("--observe")) {
       ledger.sourceIntegrated =
@@ -630,49 +702,7 @@ export async function runNightly(configFile, io = {}) {
       );
     const sha = run("git", ["rev-parse", "HEAD"], tree).text;
     ledger.commit = sha;
-    const release = NodePath.join(config.releaseRoot, sha);
-    if (!NodeFS.existsSync(NodePath.join(release, "release.json"))) {
-      if (
-        queue(
-          "Nightly production release build before publication",
-          tree,
-          [
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-File",
-            NodePath.join(import.meta.dirname, "t3-prepare-release.ps1"),
-            "-Commit",
-            sha,
-            "-Repository",
-            tree,
-            "-ReleaseRoot",
-            config.releaseRoot,
-            "-ArtifactRoot",
-            artifact,
-          ],
-          NodePath.join(
-            process.env.SystemRoot ?? "C:/Windows",
-            "System32/WindowsPowerShell/v1.0/powershell.exe",
-          ),
-        ) !== 0
-      )
-        throw new Error("Production build failed before publication");
-    }
-    const receipt = JSON.parse(NodeFS.readFileSync(NodePath.join(release, "release.json"), "utf8"));
-    if (receipt.commit !== sha || !receipt.artifacts?.length)
-      throw new Error("Production build receipt identity is invalid");
-    for (const item of receipt.artifacts) {
-      const file = NodePath.join(release, item.path);
-      const hash = NodeCrypto.createHash("sha256").update(NodeFS.readFileSync(file)).digest("hex");
-      if (hash.toLowerCase() !== item.sha256.toLowerCase())
-        throw new Error("Production build artifact hash mismatch");
-    }
-    ledger.buildReceipt = NodePath.join(release, "release.json");
+    prepareRelease(sha, tree);
     run(
       config.node,
       [
