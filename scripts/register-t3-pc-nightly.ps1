@@ -19,8 +19,7 @@ $deployConfig = Join-Path $releaseRoot 'deploy-config.json'
 $node = 'A:\Dev\Tooling\t3-node-v24.19.0\node.exe'
 $vp = Join-Path $env:APPDATA 'npm\node_modules\vite-plus\bin\vp'
 $corepack = Join-Path (Split-Path $node) 'node_modules\corepack\dist\corepack.js'
-$otisCall = 'A:\Dev\Projects\Otis\tools\otis-call\otis-call.mjs'
-foreach ($file in @($node, $vp, $corepack, $deployConfig, $otisCall)) {
+foreach ($file in @($node, $vp, $corepack, $deployConfig)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing $file" }
 }
 if ((Get-TimeZone).Id -ne 'Central Standard Time') { throw 'Windows must be set to Chicago time.' }
@@ -52,7 +51,6 @@ $settings = [ordered]@{
     artifactRoot = $ArtifactRoot
     releaseRoot = $releaseRoot
     deployConfig = $deployConfig
-    otisCall = $otisCall
     taskLinkCheck = 'A:\Dev\Projects\Otis\tools\change-tracking\check-task-links.mjs'
     taskId = 'agenda-task:ba95c24abc5647adbde4397a6856e74c'
 }

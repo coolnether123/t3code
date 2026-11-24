@@ -42,12 +42,9 @@ export async function runNightly(configFile, io = {}) {
   let configFailure;
   try {
     const parsed = JSON.parse(NodeFS.readFileSync(configFile, "utf8"));
-    if (
-      !parsed ||
-      ["repository", "artifactRoot", "node", "otisCall", "taskId", "releaseRoot"].some(
-        (key) => typeof parsed[key] !== "string" || !parsed[key],
-      )
-    )
+    const required = ["repository", "artifactRoot", "node", "taskId", "releaseRoot"];
+    if (!parsed?.pcUnattended) required.push("otisCall");
+    if (!parsed || required.some((key) => typeof parsed[key] !== "string" || !parsed[key]))
       throw new Error("Nightly config is missing required paths or task identity");
     config = parsed;
   } catch (error) {
@@ -198,27 +195,30 @@ export async function runNightly(configFile, io = {}) {
     if (!ledger.alertDelivered)
       ledger.alertFailure = "tell_jared failed; retained alert.json and NEEDS-PARENT.json";
   };
-  const otisReceipt = () => {
-    const request = NodePath.join(artifact, "otis-receipt-request.json");
-    NodeFS.writeFileSync(
-      request,
-      JSON.stringify({
-        requestId: NodeCrypto.randomUUID(),
-        taskId: config.taskId,
-        kind: "artifact",
-        locator: NodePath.join(artifact, "result.json"),
-        summary: "PC T3 nightly " + night + " " + ledger.result,
-        repo: null,
-        producedBy: { model: null, effort: null, runName: null },
-      }),
-    );
-    const result = run(
-      config.node,
-      [config.otisCall, "call", "tracker_register_output", "@" + request],
-      config.repository,
-      true,
-    );
-    if (result.code !== 0) throw new Error("Otis output registration failed");
+  const otisReceipt = async () => {
+    const request = {
+      requestId: NodeCrypto.randomUUID(),
+      taskId: config.taskId,
+      kind: "artifact",
+      locator: NodePath.join(artifact, "result.json"),
+      summary: "PC T3 nightly " + night + " " + ledger.result,
+      repo: null,
+      producedBy: { model: null, effort: null, runName: null },
+    };
+    const body = JSON.stringify(request);
+    NodeFS.writeFileSync(NodePath.join(artifact, "otis-receipt-request.json"), body);
+    // A Windows scheduled task has no chat origin. The loopback tracker accepts local jobs.
+    const response = await fetch("http://127.0.0.1:5197/api/v1/tracker/outputs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Otis-Actor": "user:local" },
+      body,
+      redirect: "error",
+    });
+    if (!response.ok) throw new Error("Otis tracker HTTP " + response.status);
+    const receipt = await response.json();
+    if (receipt.taskId !== config.taskId || !receipt.recordId?.startsWith("output:"))
+      throw new Error("Otis returned an unexpected tracker receipt");
+    return receipt.recordId;
   };
   const deployPc = (sha) => {
     if (!NodeFS.existsSync(NodePath.join(config.releaseRoot, "auto-deploy-enabled")))
@@ -280,12 +280,14 @@ export async function runNightly(configFile, io = {}) {
     } else if (!["main", "feat/t3-workers-prototype"].includes(forkBranch))
       throw new Error("Unsupported fork branch");
     const forkRef = `refs/remotes/origin/${forkBranch}`;
-    const refreshFork = () => git("fetch", "origin", `+refs/heads/${forkBranch}:${forkRef}`);
+    const fetchOptions = pc ? ["--no-tags", "--no-write-fetch-head"] : [];
+    const refreshFork = () =>
+      git("fetch", ...fetchOptions, "origin", `+refs/heads/${forkBranch}:${forkRef}`);
     refreshFork();
     let upstreamCommit;
     let tag;
     if (config.upstreamBranch === "main") {
-      git("fetch", "upstream", "+refs/heads/main:refs/remotes/upstream/main");
+      git("fetch", ...fetchOptions, "upstream", "+refs/heads/main:refs/remotes/upstream/main");
       upstreamCommit = git("rev-parse", "refs/remotes/upstream/main");
       tag = `upstream/main@${upstreamCommit.slice(0, 10)}`;
       ledger.sourceRef = "refs/heads/main";
@@ -810,10 +812,11 @@ export async function runNightly(configFile, io = {}) {
     NodeFS.writeFileSync(NodePath.join(artifact, "result.json"), JSON.stringify(ledger, null, 2));
     if (pc) {
       try {
-        otisReceipt();
+        ledger.otisOutputId = await otisReceipt();
         ledger.otisReceiptRegistered = true;
-      } catch {
+      } catch (error) {
         ledger.otisReceiptRegistered = false;
+        ledger.otisReceiptFailure = error.message;
         ledger.exitCode = 1;
       }
       NodeFS.writeFileSync(NodePath.join(artifact, "result.json"), JSON.stringify(ledger, null, 2));
