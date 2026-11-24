@@ -34,12 +34,14 @@ export const OtisNode = S.Struct({
   tokens: S.NullOr(tokens),
   tokensReason: S.NullOr(S.Literals(["still-running", "provider-does-not-report"])),
   costUsd: S.NullOr(S.Finite),
-  costSource: S.Literals(["provider", "priced", "unpriced"]),
+  costSource: S.Literals(["provider", "priced", "unpriced", "api-equivalent-t3"]),
   sub: S.Struct({
     nodes: count,
     running: count,
     waiting: count,
     failedUnseen: count,
+    done: S.optionalKey(count),
+    queued: S.optionalKey(count),
     tokens: count,
   }),
   budget: S.NullOr(
@@ -150,6 +152,12 @@ const requestId = id;
 const nodeId = id;
 export const OtisAction = S.Union([
   S.Struct({
+    type: S.Literal("parent.bind"),
+    requestId,
+    threadId: id,
+    title: id.check(S.isMaxLength(120)),
+  }),
+  S.Struct({
     type: S.Literal("child.start"),
     requestId,
     parent: id,
@@ -165,7 +173,7 @@ export const OtisAction = S.Union([
   S.Struct({ type: S.Literal("model.set"), requestId, nodeId, model: id, effort: textOrNull }),
   S.Struct({ type: S.Literal("budget.set"), requestId, nodeId, tokens: S.NullOr(count) }),
   S.Struct({ type: S.Literal("budget.set"), requestId, laneId: id, tokens: S.NullOr(count) }),
-  S.Struct({ type: S.Literals(["resume", "seen"]), requestId, nodeId }),
+  S.Struct({ type: S.Literals(["resume", "seen", "retry"]), requestId, nodeId }),
 ]);
 export type OtisAction = typeof OtisAction.Type;
 export const OtisTailInput = S.Struct({

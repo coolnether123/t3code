@@ -44,7 +44,7 @@ const lane: OtisNode = {
   tailSeq: 0,
 };
 describe("fleet rows", () => {
-  it("keeps all 499 children behind their fold, then preserves order as attention and usage change", () => {
+  it("keeps all 499 children behind their fold, then promotes the child needing attention without scrambling its peers", () => {
     const children = Array.from({ length: 499 }, (_, index): OtisNode => ({
       ...lane,
       id: `run-${index}`,
@@ -65,9 +65,11 @@ describe("fleet rows", () => {
       tokens: { in: 84, out: 16, cached: 4, total: 100 },
     };
     const after = applyTreeBatch(nodes, { seq: 2, nodes: [changed] });
-    expect(flattenFleet(after, expanded).map((row) => row.node.id)).toEqual(
-      before.map((row) => row.node.id),
-    );
+    expect(flattenFleet(after, expanded).map((row) => row.node.id)).toEqual([
+      lane.id,
+      changed.id,
+      ...before.map((row) => row.node.id).filter((id) => id !== lane.id && id !== changed.id),
+    ]);
     expect(after.get(children[0]!.id)).toBe(nodes.get(children[0]!.id));
     expect(
       fleetNeedsYou(after, [

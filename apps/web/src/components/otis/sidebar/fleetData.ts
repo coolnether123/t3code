@@ -1,7 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { settledChildren } from "@t3tools/client-runtime/rpc/otis-history";
 import { runStreamInEnvironment } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, OtisNode } from "@t3tools/contracts";
+import type { EnvironmentId, OtisAction, OtisNode } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
@@ -12,7 +12,7 @@ import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
 import { createOtisTreeAtoms } from "@t3tools/client-runtime/state/otis-tree";
 import { offlineFleet } from "@t3tools/client-runtime/otis/tree";
 
-const { tree } = createOtisTreeAtoms(connectionAtomRuntime);
+const { tree, act } = createOtisTreeAtoms(connectionAtomRuntime);
 const fleet = Atom.make((get) => {
   const environmentId = get(primaryEnvironmentIdAtom);
   if (!environmentId) return offlineFleet;
@@ -22,6 +22,10 @@ const fleet = Atom.make((get) => {
 
 export function useFleet() {
   return useAtomValue(fleet);
+}
+
+export function runFleetAction(environmentId: EnvironmentId, input: OtisAction) {
+  return Effect.runPromise(act.run(appAtomRegistry, { environmentId, input }));
 }
 
 export interface DonePage {

@@ -51,6 +51,13 @@ export function applyFleetEvent(state: FleetState, event: OtisFleetEvent): Fleet
   }
 }
 
+function priority(node: OtisNode) {
+  if (node.waiting + node.sub.waiting) return 0;
+  if (node.sub.running || node.sub.queued || ["running", "queued", "starting"].includes(node.state))
+    return 1;
+  return node.state === "failed" ? 2 : 3;
+}
+
 export function flattenFleet(nodes: ReadonlyMap<string, OtisNode>, expanded: ReadonlySet<string>) {
   const children = new Map<string | null, OtisNode[]>();
   for (const node of nodes.values()) {
@@ -65,6 +72,7 @@ export function flattenFleet(nodes: ReadonlyMap<string, OtisNode>, expanded: Rea
     if (!group) return;
     group.sort(
       (a, b) =>
+        priority(a) - priority(b) ||
         (parent === null
           ? (a.order ?? 0) - (b.order ?? 0)
           : Date.parse(a.startedAt) - Date.parse(b.startedAt)) ||
@@ -127,7 +135,10 @@ export function fleetRowLabels(
     running: "Running",
     idle: "",
     done: "Done",
-    failed: node.stateReason ?? "Failed",
+    failed:
+      !node.stateReason || /\[redact|native[ _-]exit[ _-]nonzero/i.test(node.stateReason)
+        ? "Worker exited before finishing"
+        : node.stateReason,
     stopped:
       node.stateBy === "jared"
         ? "Stopped by you"
@@ -138,7 +149,14 @@ export function fleetRowLabels(
   const descendants = node.kind !== "lane" && collapsed ? node.sub.tokens : 0;
   return {
     title: node.title,
-    model: node.model,
+    model: /opus[- .](\d+)[- .](\d+)/i.test(node.model)
+      ? node.model.replace(/^.*opus[- .](\d+)[- .](\d+).*$/i, "Opus $1.$2")
+      : (["Fable", "Sol", "Astra", "Neon"].find((name) =>
+          node.model
+            .toLowerCase()
+            .split(/[^a-z0-9]+/)
+            .includes(name.toLowerCase()),
+        ) ?? node.model),
     state: node.lastKnown
       ? [state, `last seen ${chicagoTime.format(Date.parse(node.observedAt))}`]
           .filter(Boolean)

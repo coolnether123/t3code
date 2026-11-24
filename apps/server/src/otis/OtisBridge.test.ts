@@ -273,3 +273,38 @@ it.effect("keeps the bearer on loopback and separates read from operate grants",
     );
   }),
 );
+
+it.effect(
+  "opens a native lane through the active provider thread and keeps its hook identity when binding",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO orchestration_v2_projection_threads
+        (thread_id, project_id, title, default_provider, runtime_mode, interaction_mode, active_provider_thread_id, created_at, updated_at, payload_json)
+        VALUES ('thread','project','Fixture','claudeAgent','default','default','current','2026-01-01','2026-01-01','{"modelSelection":{"model":"opus"}}')`;
+      yield* sql`INSERT INTO orchestration_v2_projection_provider_threads
+        (provider_thread_id, thread_id, provider, driver, status, updated_at, payload_json)
+        VALUES ('current','thread','claudeAgent','claudeAgent','active','2026-01-01','{"nativeThreadRef":{"nativeId":"native"}}')`;
+      const { resolveChats, parentBinding } = OtisBridge.nativeChats(sql, "pc");
+      const { batches } = yield* producerFixture;
+      const lane = {
+        ...batches[0]!.nodes[0]!,
+        provider: "claude-app",
+        chat: { host: "otis" as const, threadId: "native" },
+      };
+      expect((yield* resolveChats([lane]))[0]?.chat).toEqual({
+        host: "t3",
+        environmentId: "pc",
+        threadId: "thread",
+      });
+      expect(yield* parentBinding("thread", "RimWorld Mods")).toMatchObject({
+        host: "claude-app",
+        hostThreadId: "native",
+        title: "RimWorld Mods",
+        assignedLaneId: "rimworld-mods",
+        takeover: false,
+      });
+      yield* sql`UPDATE orchestration_v2_projection_threads SET archived_at='archived'`;
+      expect((yield* resolveChats([lane]))[0]).toBe(lane);
+    }).pipe(Effect.provide(Sqlite.layerMemory)),
+);

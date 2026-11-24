@@ -1,9 +1,14 @@
 import { FleetTitle } from "./FleetTitle";
 import { useGT } from "gt-react";
+import { randomUUID } from "~/lib/utils";
 import type { OtisNode } from "@t3tools/contracts";
 import { ChevronDown, ChevronRight, Check, X, Square } from "lucide-react";
 import type { fleetRowLabels } from "@t3tools/client-runtime/otis/tree";
-import { memo } from "react";
+import { useRelativeTimeState } from "~/hooks/useRelativeTimeState";
+import { formatRelativeElapsed } from "~/timestampFormat";
+import { runFleetAction } from "./fleetData";
+import { usePrimaryEnvironmentId } from "~/state/environments";
+import { memo, useRef, useState } from "react";
 
 interface Props extends ReturnType<typeof fleetRowLabels> {
   node: OtisNode;
@@ -64,76 +69,137 @@ export const OtisTreeRow = memo(function OtisTreeRow({
   const lane = node.kind === "lane";
   const branch = !node.settled && (node.sub.nodes > 0 || childCount > 0);
   const needs = node.sub.waiting + node.waiting;
-  const summary = [
-    narrow ? null : labels.model,
-    expanded ? null : node.sub.running ? gt("{count} running", { count: node.sub.running }) : null,
-    expanded || !needs ? null : gt("{count} needs you", { count: needs }),
-    !expanded && !needs && !node.sub.running ? labels.state || gt("Idle") : null,
-    node.tokens && expanded ? gt("{tokens} today", { tokens: labels.tokens }) : labels.tokens,
+  const environmentId = usePrimaryEnvironmentId();
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState("");
+  const attempt = useRef<{ type: "seen" | "retry"; id: string } | null>(null);
+  const counts = [
+    node.sub.running && gt("{count} running", { count: node.sub.running }),
+    node.sub.queued && gt("{count} queued", { count: node.sub.queued }),
+    node.sub.failedUnseen && gt("{count} failed", { count: node.sub.failedUnseen }),
+    node.sub.done && gt("{count} done", { count: node.sub.done }),
   ]
     .filter(Boolean)
     .join(" · ");
-  const childDetail =
-    question ||
-    (node.lastKnown || ["failed", "stopped"].includes(node.state)
-      ? labels.state
-      : node.waiting
-        ? node.waiting === 1
-          ? gt("Needs you")
-          : gt("{count} need you", { count: node.waiting })
-        : node.state === "running"
-          ? labels.model + " · " + labels.tokens
-          : null);
-  const detail = lane ? summary : childDetail;
-  const drill = narrow && (branch || (lane && node.chat !== null));
-  const action = drill ? () => onExpand(node.id) : node.chat ? () => onOpen(node) : undefined;
+  const age = useRelativeTimeState(!lane && !node.endedAt ? node.startedAt : null);
+  const elapsed = node.endedAt
+    ? formatRelativeElapsed(Math.max(0, Date.parse(node.endedAt) - Date.parse(node.startedAt)))
+        .value
+    : age.status === "relative"
+      ? age.value
+      : null;
+  const detail = [
+    labels.model,
+    lane ? counts || labels.state || gt("Idle") : node.waiting ? gt("Needs you") : labels.state,
+    lane ? null : elapsed,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const cost =
+    node.costSource !== "api-equivalent-t3" || node.costUsd == null
+      ? // oxlint-disable-next-line t3code/no-em-dash-copy -- Specified missing-value glyph in the cost column.
+        "—"
+      : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(node.costUsd);
+  const metrics = [
+    cost,
+    node.tokens && (lane ? gt("{tokens} today", { tokens: labels.tokens }) : labels.tokens),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const title = question || labels.title;
+  async function runAction(type: "retry" | "seen") {
+    if (!environmentId || sending) return;
+    setSending(true);
+    setError("");
+    if (attempt.current?.type !== type) attempt.current = { type, id: randomUUID() };
+    try {
+      await runFleetAction(environmentId, { type, nodeId: node.id, requestId: attempt.current.id });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : gt("Otis could not confirm the action."));
+    } finally {
+      setSending(false);
+    }
+  }
+  const action = node.chat ? () => onOpen(node) : branch ? () => onExpand(node.id) : undefined;
   const name = (
     <>
       <span className="flex min-w-0 items-center gap-1.5">
         {!lane && <StateMark node={node} label={labels.state} />}
-        {depth > 4 && !narrow && <small>{depth}</small>}
-        <FleetTitle title={node.title} detail={detail} />
+        <FleetTitle title={title} detail={detail} />
+        {lane && needs > 0 && (
+          <span className="ml-auto shrink-0 rounded-full bg-warning px-2 text-xs font-semibold text-warning-foreground">
+            {gt("{count} needs you", { count: needs })}
+          </span>
+        )}
       </span>
-      {detail && <span className="block truncate text-xs text-muted-foreground">{detail}</span>}
+      <span className="flex items-baseline justify-between gap-1 text-xs text-muted-foreground">
+        <span className="min-w-0 flex-1">{detail}</span>
+        <span
+          className="shrink-0 whitespace-nowrap text-right tabular-nums"
+          aria-label={gt("API-equivalent cost and tokens: {metrics}", { metrics })}
+        >
+          {metrics}
+        </span>
+      </span>
     </>
   );
   const Chevron = expanded ? ChevronDown : ChevronRight;
   return (
-    <div
-      data-fleet-row=""
-      className={`flex min-w-0 items-center gap-1 rounded-md px-2 ${detail || narrow ? "h-11" : "h-7"}`}
-      style={{ paddingInlineStart: 8 + (narrow ? 0 : Math.min(depth, 4) * 12) }}
-    >
-      {branch && !narrow && (
-        <button
-          data-fleet-action=""
-          className="shrink-0"
-          aria-label={
-            expanded
-              ? gt("Collapse {title}", { title: node.title })
-              : gt("Expand {title}", { title: node.title })
-          }
-          aria-expanded={expanded}
-          onClick={() => onExpand(node.id)}
-        >
-          <Chevron size={14} />
-        </button>
+    <>
+      <div
+        data-fleet-row=""
+        className={`flex min-w-0 items-center gap-1 rounded-md px-2 min-h-11`}
+        style={{ paddingInlineStart: 8 + (narrow ? 0 : Math.min(depth, 4) * 12) }}
+      >
+        {branch ? (
+          <button
+            data-fleet-action=""
+            className="grid w-6 shrink-0 place-items-center self-stretch"
+            aria-label={
+              expanded
+                ? gt("Collapse {title}", { title: node.title })
+                : gt("Expand {title}", { title: node.title })
+            }
+            aria-expanded={expanded}
+            onClick={() => onExpand(node.id)}
+          >
+            <Chevron size={14} />
+          </button>
+        ) : (
+          <span className="w-6 shrink-0" aria-hidden="true" />
+        )}
+        {action ? (
+          <button
+            data-fleet-action=""
+            className="flex min-w-0 flex-1 self-stretch items-center gap-1 text-left"
+            onClick={action}
+          >
+            <span className="min-w-0 flex-1">{name}</span>
+          </button>
+        ) : (
+          <div className="min-w-0 flex-1">{name}</div>
+        )}
+        {branch && !expanded && !lane && childCount > 0 && (
+          <span className="text-xs text-muted-foreground">{childCount}</span>
+        )}
+      </div>
+      {node.state === "failed" && !node.seenAt && (
+        <div className="flex justify-end gap-3 px-2 text-xs">
+          {node.kind === "run" && (
+            <button data-fleet-action="" disabled={sending} onClick={() => void runAction("retry")}>
+              {gt("Retry")}
+            </button>
+          )}
+          <button data-fleet-action="" disabled={sending} onClick={() => void runAction("seen")}>
+            {gt("Dismiss")}
+          </button>
+        </div>
       )}
-      {action ? (
-        <button
-          data-fleet-action=""
-          className="flex min-w-0 flex-1 items-center gap-1 text-left"
-          onClick={action}
-        >
-          <span className="min-w-0 flex-1">{name}</span>
-          {drill && <ChevronRight size={14} aria-hidden="true" />}
-        </button>
-      ) : (
-        <div className="min-w-0 flex-1">{name}</div>
+      {error && (
+        <p role="alert" className="px-2 text-xs text-destructive">
+          {error}
+        </p>
       )}
-      {branch && !expanded && !lane && childCount > 0 && (
-        <span className="text-xs text-muted-foreground">{childCount}</span>
-      )}
-    </div>
+    </>
   );
 });

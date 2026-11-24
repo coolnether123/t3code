@@ -25,6 +25,7 @@ import { OtisButton } from "../OtisButton";
 import { OtisDoneFold } from "./OtisDoneFold";
 import { OtisTreeRow } from "./OtisTreeRow";
 import { useFleet } from "./fleetData";
+import { useConnectingParents } from "./MakeParent";
 import "./fleet.css";
 
 const ids = Schema.Array(Schema.String);
@@ -53,6 +54,7 @@ function FleetList({
   const { isMobile, setOpenMobile } = useSidebar();
   const navigate = useNavigate();
   const threadRefs = useThreadRefs();
+  const connecting = useConnectingParents(fleet.nodes);
   const nodes = fleet.nodes;
   const path = phonePath.filter((id) => nodes.has(id));
   const parent = isMobile ? nodes.get(path.at(-1) ?? "") : undefined;
@@ -191,6 +193,21 @@ function FleetList({
         </header>
       )}
       <div className="min-h-0 flex-1 overflow-y-auto px-1 py-2">
+        {connecting
+          .filter(
+            (row) =>
+              row.environmentId === environmentId &&
+              !bound.has(scopedThreadKey(scopeThreadRef(environmentId, row.threadId))),
+          )
+          .map((row) => (
+            <button
+              key={row.threadId}
+              data-fleet-link=""
+              onClick={() => void openRef(scopeThreadRef(environmentId, row.threadId))}
+            >
+              {row.title} · {gt("Connecting")}
+            </button>
+          ))}
         {items}
         {!items.length && !parent && (
           <p className="px-2 text-muted-foreground">{gt("No fleet nodes yet.")}</p>

@@ -25,6 +25,7 @@ import { Badge } from "../ui/badge";
 import { MiddleTruncate } from "../ui/middle-truncate";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
+import { MakeParent } from "../otis/sidebar/MakeParent";
 import { useThreadActionMenu } from "~/hooks/useThreadActionMenu";
 import { readLocalApi } from "~/localApi";
 import { threadEnvironment } from "../../state/threads";
@@ -425,15 +426,17 @@ export const ChatHeader = memo(function ChatHeader({
           ) : null}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
-      <Button
-        variant="ghost"
-        size="icon"
-        aria-label="Copy chat"
-        title="Copy chat"
-        onClick={copyChat}
-      >
+      <Button variant="ghost" size="icon" aria-label={gt("Copy chat")} onClick={copyChat}>
         <CopyIcon />
       </Button>
+      {isServerThread &&
+        readEnvironmentScope(activeThreadEnvironmentId, AuthOrchestrationOperateScope) && (
+          <MakeParent
+            key={activeThreadId}
+            environmentId={activeThreadEnvironmentId}
+            threadId={activeThreadId}
+          />
+        )}
       {isServerThread ? <GuestShareIndicator threadRef={activeThreadRef} /> : null}
     </div>
   );

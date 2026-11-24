@@ -1,3 +1,7 @@
+import { Link } from "@tanstack/react-router";
+import { EnvironmentId as EnvId, ThreadId } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { buildThreadRouteParams } from "~/threadRoutes";
 import { useGT } from "gt-react";
 import type { EnvironmentId, OtisTailInput, OtisTailPage } from "@t3tools/contracts";
 import { createOtisTreeAtoms } from "@t3tools/client-runtime/state/otis-tree";
@@ -8,7 +12,9 @@ import { isElectron } from "~/env";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { usePrimaryEnvironmentId } from "~/state/environments";
 import { Button } from "../ui/button";
-import { SidebarInset } from "../ui/sidebar";
+import * as Schema from "effect/Schema";
+import { writeLocalStorageValue } from "~/hooks/useLocalStorage";
+import { SidebarInset, useSidebar } from "../ui/sidebar";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { useFleet } from "./sidebar/fleetData";
 
@@ -25,16 +31,28 @@ export function OtisTranscriptView({ nodeId }: { nodeId: string }) {
   const gt = useGT();
   const environmentId = usePrimaryEnvironmentId();
   const { nodes, sidebar } = useFleet();
+  const { setOpen, setOpenMobile, isMobile } = useSidebar();
   const node = nodes.get(nodeId);
   const [lastNode, setLastNode] = useState(node);
   if (node && node !== lastNode) setLastNode(node);
-  const shownNode = node ?? lastNode;
+  const shownNode = node ?? (lastNode?.id === nodeId ? lastNode : undefined);
+  const chat = shownNode?.chat;
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden">
       <WorkspacePageHeader electron={isElectron} className="border-b">
         <h1 className="min-w-0 truncate text-sm font-medium">
           {shownNode?.title ?? gt("Chat transcript")}
         </h1>
+        {chat?.host === "t3" && (
+          <Link
+            to="/$environmentId/$threadId"
+            params={buildThreadRouteParams(
+              scopeThreadRef(EnvId.make(chat.environmentId), ThreadId.make(chat.threadId)),
+            )}
+          >
+            {gt("Open chat")}
+          </Link>
+        )}
         <span className="ml-auto shrink-0 text-xs text-muted-foreground">{gt("Read only")}</span>
       </WorkspacePageHeader>
       {environmentId && (
@@ -42,6 +60,15 @@ export function OtisTranscriptView({ nodeId }: { nodeId: string }) {
           key={JSON.stringify([environmentId, nodeId, shownNode?.chat?.threadId ?? null])}
           environmentId={environmentId}
           nodeId={nodeId}
+          chooseChat={
+            chat?.host === "t3"
+              ? undefined
+              : () => {
+                  writeLocalStorageValue("otis.fleet.otherChats", true, false, Schema.Boolean);
+                  if (isMobile) setOpenMobile(true);
+                  else setOpen(true);
+                }
+          }
           tailSeq={shownNode?.tailSeq ?? 0}
           settled={sidebar === "otis" && node === undefined && lastNode !== undefined}
         />
@@ -54,17 +81,19 @@ function Transcript({
   environmentId,
   nodeId,
   tailSeq,
+  chooseChat,
   settled,
 }: {
   environmentId: EnvironmentId;
   nodeId: string;
+  chooseChat: (() => void) | undefined;
   tailSeq: number;
   settled: boolean;
 }) {
   const gt = useGT();
   const [items, setItems] = useState<OtisTailPage["items"] | null>(null);
   const [prev, setPrev] = useState<number | null>(null);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const newest = useRef<number | null>(null);
@@ -77,7 +106,7 @@ function Transcript({
     const { signal } = controller;
     async function follow() {
       try {
-        if (retry > 0 && !signal.aborted) setError(false);
+        if (retry > 0 && !signal.aborted) setError(null);
         if (newest.current === null) {
           const page = await readPage(environmentId, { nodeId }, signal);
           if (signal.aborted) return;
@@ -102,14 +131,17 @@ function Transcript({
           setItems((current) => [...(current ?? []), ...page.items]);
           more = !page.end && (settled || tailSeq > newest.current);
         }
-        if (!signal.aborted) setError(false);
-      } catch {
-        if (!signal.aborted) setError(true);
+        if (!signal.aborted) setError(null);
+      } catch (cause) {
+        if (!signal.aborted)
+          setError(
+            cause instanceof Error ? cause.message : gt("Otis did not return a transcript."),
+          );
       }
     }
     void follow();
     return () => controller.abort();
-  }, [environmentId, nodeId, tailSeq, settled, retry]);
+  }, [environmentId, nodeId, tailSeq, settled, retry, gt]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Preserve the DOM scroll anchor when a page changes the transcript height.
   useLayoutEffect(() => {
@@ -129,9 +161,11 @@ function Transcript({
       if (el) position.current = { fromBottom: el.scrollHeight - el.clientHeight - el.scrollTop };
       setItems((current) => [...page.items, ...(current ?? [])]);
       setPrev(page.prev);
-      setError(false);
-    } catch {
-      setError(true);
+      setError(null);
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : gt("Otis did not return the earlier messages."),
+      );
     } finally {
       setLoadingOlder(false);
     }
@@ -185,10 +219,17 @@ function Transcript({
         )}
         {error && (
           <div className="flex items-center gap-2">
-            <p role="status">{gt("Could not load the transcript.")}</p>
+            <p role="status">
+              {gt("Could not load the transcript.")} {error}
+            </p>
             <Button variant="outline" size="sm" onClick={() => setRetry((value) => value + 1)}>
               {gt("Retry")}
             </Button>
+            {chooseChat && (
+              <Button variant="outline" size="sm" onClick={chooseChat}>
+                {gt("Open chat")}
+              </Button>
+            )}
           </div>
         )}
       </div>

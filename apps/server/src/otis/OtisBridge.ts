@@ -24,6 +24,9 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as ServerConfig from "../config.ts";
 
+import * as SqlClient from "effect/sql/SqlClient";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+
 interface Bridge {
   readonly subscribe: Stream.Stream<OtisFleetEvent>;
   readonly read: (query: OtisTreeRead) => Effect.Effect<OtisTreeReadResult, OtisRpcError>;
@@ -68,11 +71,17 @@ const unreachable = () => new OtisRpcError({ reason: "unavailable" });
 export const make = Effect.fn("OtisBridge.make")(function* (options: {
   readonly origin?: string | undefined;
   readonly token?: string | undefined;
+  readonly parentBinding?: (
+    threadId: string,
+    title: string,
+  ) => Effect.Effect<unknown, OtisRpcError>;
+  readonly resolveChats?: (nodes: readonly OtisNode[]) => Effect.Effect<readonly OtisNode[]>;
   readonly localReadOrigin?: string | undefined;
   readonly fetch?: typeof fetch;
   readonly reconnect: Effect.Effect<void>;
 }) {
-  const localRead = options.origin === undefined && options.localReadOrigin !== undefined;
+  const localRead =
+    options.origin === undefined && options.localReadOrigin !== undefined && !options.token;
   const origin = configuredOrigin(options.origin ?? options.localReadOrigin);
   if (!origin || (!localRead && !options.token)) return yield* OtisBridge;
   const fetchImpl = options.fetch ?? (yield* FetchHttpClient.Fetch);
@@ -155,6 +164,13 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
   const readTree = Effect.suspend(() =>
     lines(seq === undefined ? "tree-stream" : `tree-stream?after=${seq}`).pipe(
       Stream.mapEffect((line) => treeLine(line)),
+      Stream.mapEffect((line) =>
+        "nodes" in line && options.resolveChats
+          ? options
+              .resolveChats(line.nodes)
+              .pipe(Effect.map((resolved) => ({ ...line, nodes: resolved })))
+          : Effect.succeed(line),
+      ),
       Stream.runForEach((line) =>
         Effect.sync(() => {
           if ("load" in line) {
@@ -223,6 +239,12 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
   });
   const act = Effect.fn("OtisBridge.act")(function* (input: OtisAction) {
     if (localRead) return yield* unconfigured;
+    if (input.type === "parent.bind") {
+      if (!options.parentBinding) return yield* unconfigured;
+      return yield* decodeAction(
+        yield* post("parents", yield* options.parentBinding(input.threadId, input.title)),
+      ).pipe(Effect.mapError(invalidResponse));
+    }
     const path = input.type === "child.start" ? "children" : "nodes/act";
     return yield* decodeAction(yield* post(path, input)).pipe(Effect.mapError(invalidResponse));
   });
@@ -234,10 +256,83 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
   });
   const read = Effect.fn("OtisBridge.read")(function* (query: OtisTreeRead) {
     const raw = yield* post("tree-read", query);
-    return yield* decodeTreeRead(raw).pipe(Effect.mapError(invalidResponse));
+    const result = yield* decodeTreeRead(raw).pipe(Effect.mapError(invalidResponse));
+    return options.resolveChats
+      ? { ...result, nodes: yield* options.resolveChats(result.nodes) }
+      : result;
   });
   return { act, tail, subscribe, read } satisfies Bridge;
 });
+
+export function nativeChats(sql: SqlClient.SqlClient, environmentId: string) {
+  return {
+    parentBinding: Effect.fn("OtisBridge.parentBinding")(function* (
+      threadId: string,
+      title: string,
+    ) {
+      const [thread] = yield* sql<{
+        model: string;
+        driver: string | null;
+        nativeId: string | null;
+      }>`
+          SELECT t.payload_json->>'$.modelSelection.model' AS model, p.driver,
+            p.payload_json->>'$.nativeThreadRef.nativeId' AS nativeId
+          FROM orchestration_v2_projection_threads t LEFT JOIN orchestration_v2_projection_provider_threads p
+            ON t.active_provider_thread_id=p.provider_thread_id
+          WHERE t.thread_id=${threadId} AND t.archived_at IS NULL AND t.deleted_at IS NULL
+        `.pipe(Effect.mapError(unreachable));
+      if (!thread?.model) return yield* new OtisRpcError({ reason: "refused", status: 404 });
+      const lane =
+        title
+          .normalize("NFKD")
+          .toLowerCase()
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-|-$/g, "") || threadId;
+      const nativeHost =
+        thread.driver === "claudeAgent" ? "claude-app" : thread.driver === "codex" ? "codex" : null;
+      const host = nativeHost && thread.nativeId ? nativeHost : "t3";
+      return {
+        title,
+        assignedLaneId: lane,
+        laneId: lane,
+        environmentId,
+        model: thread.model,
+        host,
+        hostThreadId: host === "t3" ? threadId : thread.nativeId,
+        takeover: false,
+      };
+    }),
+    resolveChats: Effect.fn("OtisBridge.resolveChats")(function* (nodes: readonly OtisNode[]) {
+      const ids = nodes.flatMap((node) =>
+        node.chat?.host === "otis" && node.chat.threadId ? [node.chat.threadId] : [],
+      );
+      if (!ids.length) return nodes;
+      const matches = yield* sql<{ nativeId: string; threadId: string; driver: string }>`
+          SELECT p.payload_json->>'$.nativeThreadRef.nativeId' AS nativeId, t.thread_id AS threadId, p.driver
+          FROM orchestration_v2_projection_provider_threads p
+          JOIN orchestration_v2_projection_threads t ON t.active_provider_thread_id=p.provider_thread_id
+          WHERE t.deleted_at IS NULL AND t.archived_at IS NULL
+            AND p.payload_json->>'$.nativeThreadRef.nativeId' IN ${sql.in(ids)}
+        `.pipe(Effect.orElseSucceed(() => []));
+      return nodes.map((node) => {
+        if (node.chat?.host !== "otis" || !node.chat.threadId) return node;
+        const driver =
+          node.provider === "claude-app" || node.provider === "claude-code"
+            ? "claudeAgent"
+            : node.provider === "codex-cli"
+              ? "codex"
+              : node.provider;
+        const hits = matches.filter(
+          (row) => row.nativeId === node.chat?.threadId && row.driver === driver,
+        );
+        return hits.length === 1
+          ? { ...node, chat: { host: "t3" as const, environmentId, threadId: hits[0]!.threadId } }
+          : node;
+      });
+    }),
+  };
+}
 
 export const layer = Layer.effect(
   OtisBridge,
@@ -251,7 +346,11 @@ export const layer = Layer.effect(
         Effect.map((value) => value.trim()),
         Effect.orElseSucceed(() => undefined),
       );
+    const sql = yield* SqlClient.SqlClient;
+    const identity = yield* ServerEnvironment.ServerEnvironmentIdentity;
+    const environmentId = yield* identity.getEnvironmentId;
     return yield* make({
+      ...nativeChats(sql, environmentId),
       origin: yield* Config.option(Config.String("T3_OTIS_ORIGIN")).pipe(
         Effect.map(Option.getOrUndefined),
         Effect.orElseSucceed(() => undefined),

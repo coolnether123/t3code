@@ -62,6 +62,8 @@ function exampleTree() {
     id: "b",
     title: "Check the November release queue",
     model: "Sol 6.2",
+    costSource: "api-equivalent-t3",
+    costUsd: 3.1,
     tokens: tokens(96000),
     chat: { host: "otis" },
   };
@@ -162,7 +164,9 @@ it("opens the native parent chat, expands its children, and follows it on deskto
   });
   await expect.element(page.getByText("New parent turn.")).toBeVisible();
   expect(tail).toHaveBeenLastCalledWith({ nodeId: "lane:otis-1", after: 10 });
-  await expect.element(lane.getByText("Sol 6.2 · 100k")).toBeVisible();
+  await expect
+    .element(lane.getByRole("button", { name: new RegExp(b.title) }).getByText(/\$3\.10/))
+    .toBeVisible();
   expect(order()).toEqual(original);
   await page.getByRole("button", { name: /Other chats/ }).click();
   await expect.element(search).toBeVisible();
@@ -176,7 +180,7 @@ it("opens the native parent chat, expands its children, and follows it on deskto
     .first()
     .click();
   await expect.element(lane.getByText(a.title)).not.toBeInTheDocument();
-  await lane.getByRole("button", { name: /Otis #1/ }).click();
+  await lane.getByRole("button", { name: "Expand Otis #1" }).click();
   await expect.element(lane.getByText(a.title)).toBeVisible();
   await expect.element(lane.getByText("Facilities")).not.toBeInTheDocument();
   await expect.element(lane.getByRole("button", { name: "Done · 1" })).toBeVisible();
@@ -189,7 +193,7 @@ it("opens the native parent chat, expands its children, and follows it on deskto
     .first()
     .click();
   await lane.getByRole("button", { name: "Back from Otis #1" }).click();
-  await lane.getByRole("button", { name: /Otis #1/ }).click();
+  await lane.getByRole("button", { name: "Expand Otis #1" }).click();
   await lane.getByRole("button", { name: new RegExp(a.title) }).click();
   await expect
     .poll(() => router.state.location.pathname)
