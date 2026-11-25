@@ -1,3 +1,5 @@
+import { codingChromeHidden } from "~/hooks/useAgentInterface";
+import { getClientSettings } from "~/hooks/useSettings";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
@@ -139,6 +141,7 @@ export function useThreadActionMenu(input: {
       const isRegeneratingTitle = thread.titleRegeneration != null;
       const snoozePresets = resolveSnoozePresets(now, timestampFormat, threadRef.environmentId);
       const items = buildThreadActionMenuItems({
+        hideCoding: codingChromeHidden(getClientSettings()),
         canOperate: readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
         canFind: onFind !== undefined,
         branch: thread.branch ?? null,

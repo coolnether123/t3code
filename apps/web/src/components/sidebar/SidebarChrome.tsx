@@ -1,3 +1,4 @@
+import { useAgentInterface } from "~/hooks/useAgentInterface";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -241,6 +242,7 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
     select: (location) => isSidebarUtilityPage(location.pathname),
   });
   const pullRequestsSupported = usePullRequestsSupported();
+  const hideCoding = useAgentInterface();
   const issuesSupported = useIssuesSupported();
   const closeMobileSidebar = () => {
     if (isMobile) {
@@ -302,14 +304,14 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
             label={gt("Settings")}
             onClick={handleSettingsClick}
           />
-          {pullRequestsSupported ? (
+          {!hideCoding && pullRequestsSupported ? (
             <SidebarUtilityItem
               icon={<PullRequestGlyph.pullRequest />}
               label={gt("Pull requests")}
               onClick={handlePullRequestsClick}
             />
           ) : null}
-          {issuesSupported ? (
+          {!hideCoding && issuesSupported ? (
             <SidebarUtilityItem
               icon={<IssueGlyph.issue />}
               label={gt("Issues", { $context: "sidebar link to the list of issues" })}

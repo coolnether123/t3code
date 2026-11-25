@@ -181,6 +181,23 @@ describe("history-only usage requests", () => {
         Effect.provideService(FileSystem.FileSystem, { ...fs, readFileString }),
         Effect.provideService(HttpClient.HttpClient, HttpClient.make(request)),
       );
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const weekly = {
+        label: "Gemini weekly",
+        kind: "weekly",
+        samples: [[Date.parse("2026-08-29"), 37.6, Date.parse("2026-08-31")]],
+      };
+      yield* fs.writeFileString(
+        path.join(config.stateDir, "usage-antigravity-quota-history.json"),
+        JSON.stringify({
+          version: 1,
+          windows: {
+            "antigravity/gemini-weekly": weekly,
+            "antigravity/model:gemini:quota": weekly,
+          },
+        }),
+      );
       readFileString.mockClear();
       const result = yield* service.readSummary({
         sinceDay: UsageDay.make("2026-07-01"),
@@ -191,14 +208,23 @@ describe("history-only usage requests", () => {
       expect(result.quotaHistory?.status).toBe("ready");
       expect(result.sources).toEqual([]);
       expect(result.buckets).toEqual([]);
-      // Only the small saved Claude limit history may be read.
+      // Only the small saved provider histories may be read.
       expect(
         readFileString.mock.calls.map(([filePath]) => String(filePath).split(/[\\/]/).at(-1)),
-      ).toEqual(["usage-claude-quota-history.json"]);
+      ).toEqual(["usage-claude-quota-history.json", "usage-antigravity-quota-history.json"]);
       expect(result.providerQuotaHistories?.[0]).toMatchObject({
         provider: "claude",
         status: "missing",
       });
+      expect(
+        result.providerQuotaHistories?.filter((history) => history.provider === "antigravity"),
+      ).toMatchObject([
+        {
+          status: "ready",
+          windowId: "antigravity/gemini-weekly",
+          samples: [{ remainingPercent: 37.6 }],
+        },
+      ]);
       expect(request).not.toHaveBeenCalled();
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );

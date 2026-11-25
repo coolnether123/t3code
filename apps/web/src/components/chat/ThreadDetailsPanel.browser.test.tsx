@@ -5,6 +5,8 @@ import {
   type ScopedThreadRef,
   type ThreadPullRequestLink,
 } from "@t3tools/contracts";
+import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts";
+import { __setClientSettingsForTests } from "~/hooks/useSettings";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
@@ -111,6 +113,7 @@ function setup(input: {
   pullRequests?: ThreadPullRequestLink[];
   configLoaded?: boolean;
 }) {
+  __setClientSettingsForTests({ ...DEFAULT_CLIENT_SETTINGS, agentInterface: false });
   state.configLoaded = input.configLoaded ?? true;
   state.workspaceRoot = input.workspaceRoot;
   state.folder = input.folder;

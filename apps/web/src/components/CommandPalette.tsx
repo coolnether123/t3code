@@ -1,3 +1,4 @@
+import { useAgentInterface } from "~/hooks/useAgentInterface";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { decodeMsg, msg, T, useGT, useMessages, Var } from "gt-react";
 import { m, type MessageResolver } from "../i18n/messages";
@@ -1347,6 +1348,7 @@ function OpenCommandPaletteDialog(props: {
     if (firstOption) startNewProject(firstOption.environmentId, null);
   };
 
+  const hideCoding = useAgentInterface();
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
 
   if (projects.length > 0) {
@@ -1518,6 +1520,7 @@ function OpenCommandPaletteDialog(props: {
   }
 
   if (
+    !hideCoding &&
     activeThread !== null &&
     threadPullRequestLinkMode(activeThreadServerConfig?.environment.capabilities) !== "unsupported"
   ) {
@@ -1689,7 +1692,7 @@ function OpenCommandPaletteDialog(props: {
 
   actionItems.push(themeEditorItem);
 
-  if (environments.some((environment) => environment.serverConfig !== null)) {
+  if (!hideCoding && environments.some((environment) => environment.serverConfig !== null)) {
     actionItems.push({
       kind: "action",
       value: "action:pull-requests",
@@ -1718,6 +1721,7 @@ function OpenCommandPaletteDialog(props: {
   }
 
   if (
+    !hideCoding &&
     environments.some(
       (environment) => environment.serverConfig?.environment.capabilities.issues === true,
     )
@@ -1762,7 +1766,7 @@ function OpenCommandPaletteDialog(props: {
     },
   });
 
-  if (workflowsReachable) {
+  if (!hideCoding && workflowsReachable) {
     actionItems.push({
       kind: "action",
       value: "action:workflows",
@@ -1784,6 +1788,17 @@ function OpenCommandPaletteDialog(props: {
     shortcutCommand: "usage.open",
     run: async () => {
       await navigate({ to: "/usage" });
+    },
+  });
+
+  actionItems.push({
+    kind: "action",
+    value: "action:plans",
+    searchTerms: [gt("plans"), gt("limits"), gt("what’s left"), "what's left"],
+    title: gt("Plans"),
+    icon: <ChartNoAxesColumnIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/usage-resets", hash: "plans" });
     },
   });
 

@@ -42,6 +42,8 @@ vi.mock("../AppRouteModal", () => ({
 }));
 vi.mock("../WorkspacePageContainer", () => ({ WorkspacePageContainer: "main" }));
 
+vi.mock("./PlanOutlook", () => ({ PlanOutlook: () => null }));
+
 import { UsageResetPage } from "./UsageResetPage";
 
 const LIMITS_VIEW_KEY = "t3code:usage-limits-view:v1";

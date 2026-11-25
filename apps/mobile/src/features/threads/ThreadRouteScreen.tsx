@@ -1,3 +1,7 @@
+import {
+  deriveLatestContextWindowSnapshot,
+  latestProviderTurnTokenUsage,
+} from "@t3tools/client-runtime/state/context-window";
 import * as Dialog from "../../components/ui/Dialog";
 import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
 import { useRememberThreadProject } from "./useRememberThreadProject";
@@ -391,6 +395,20 @@ function ThreadRouteContent(
   );
   const selectedThreadDetailState = props.selectedThreadDetailState;
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
+  const contextProviderThread = selectedThreadDetail?.providerThreads.find(
+    (provider) => provider.id === selectedThreadDetail.thread.activeProviderThreadId,
+  );
+  const contextWindow = selectedThreadDetail
+    ? deriveLatestContextWindowSnapshot(
+        selectedThreadDetail.visibleTurnItems,
+        latestProviderTurnTokenUsage(
+          selectedThreadDetail.providerTurns,
+          selectedThreadDetail,
+          contextProviderThread,
+        ),
+        contextProviderThread ?? null,
+      )
+    : null;
   const { selectedThreadCwd } = useSelectedThreadWorktree();
   const startSideChat = useStartSideChat();
   const composer = useThreadComposerState({ startSideChat });
@@ -1042,6 +1060,7 @@ function ThreadRouteContent(
             props.inspectorPresentation ? null : (
               <ThreadHeader
                 title={selectedThread.title}
+                contextWindow={contextWindow}
                 subtitle={threadStatusLabel ?? headerSubtitle}
                 gitControls={threadGitControlProps}
                 hasThreadCwd={selectedThreadCwd !== null}

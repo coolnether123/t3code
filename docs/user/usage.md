@@ -570,6 +570,17 @@ and value estimate until current costs are ready. Within the same cycle, the las
 remains visible through its recorded date while the scan warms, using that saved percentage
 denominator until a newer complete reading replaces it.
 
+### Plans
+
+Open **Plans** in the Otis sidebar or command palette. The cards show saved
+weekly quota for Claude, Codex and Gemini. The forecast uses the last 24 hours
+of readings, or the available part of a newer cycle. When readings go stale or
+there is too little usage to estimate a pace, T3 pauses the forecast.
+
+Parent shares use each parent's API-equivalent cost since midnight yesterday
+in America/Chicago. The forecast uses measured plan quota and the parent
+shares estimate how much of the plan's activity went to those chats.
+
 The monitor defaults to the quota-source computer. Use the settings button in the header to choose
 the computer whose readings are charted and to opt in to other computers for cost comparison. The
 line under the chart names the computers whose transcripts are priced. Selecting an unavailable computer withholds the combined

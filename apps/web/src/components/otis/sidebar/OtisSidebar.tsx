@@ -22,6 +22,7 @@ import { buildThreadRouteParams } from "~/threadRoutes";
 import { SidebarChromeHeader } from "../../sidebar/SidebarChrome";
 import { useSidebar, useSidebarVisibility } from "../../ui/sidebar";
 import { OtisButton } from "../OtisButton";
+import { OtisPlanStrip } from "./OtisPlanStrip";
 import { OtisDoneFold } from "./OtisDoneFold";
 import { OtisTreeRow, NeedsYouPill, OtisRowMeta } from "./OtisTreeRow";
 import { useOtisRowMenu } from "./useOtisRowMenu";
@@ -196,6 +197,15 @@ function FleetList({
         </header>
       )}
       <div className="min-h-0 flex-1 overflow-y-auto px-1 py-2">
+        {!parent && (
+          <OtisPlanStrip
+            environmentId={environmentId}
+            onOpen={() => {
+              setOpenMobile(false);
+              void navigate({ to: "/usage-resets", hash: "plans" });
+            }}
+          />
+        )}
         {connecting
           .filter(
             (row) =>

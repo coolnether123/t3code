@@ -12,7 +12,8 @@ import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
 import { createOtisTreeAtoms } from "@t3tools/client-runtime/state/otis-tree";
 import { offlineFleet } from "@t3tools/client-runtime/otis/tree";
 
-const { tree, act } = createOtisTreeAtoms(connectionAtomRuntime);
+const { tree, act, usage: otisLaneUsage } = createOtisTreeAtoms(connectionAtomRuntime);
+export { otisLaneUsage };
 const fleet = Atom.make((get) => {
   const environmentId = get(primaryEnvironmentIdAtom);
   if (!environmentId) return offlineFleet;

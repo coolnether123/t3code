@@ -24,6 +24,7 @@ export const otisRpcHandlers = Effect.gen(function* () {
         : Stream.fromEffect(
             bridge.read(read).pipe(Effect.map((result) => ({ type: "read" as const, result }))),
           ),
+    "otis.usage": bridge.usage,
     "otis.act": bridge.act,
     "otis.nodeTail": bridge.tail,
   };

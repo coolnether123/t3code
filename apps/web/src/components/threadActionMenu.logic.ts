@@ -43,16 +43,18 @@ export function buildDraftActionMenuItems(
   options: {
     readonly hasPath: boolean;
     readonly hasBranch: boolean;
+    readonly hideCoding?: boolean;
     readonly hasProject: boolean;
   },
   resolve: MessageResolver = m,
 ): ReadonlyArray<ContextMenuItem<DraftActionMenuId>> {
+  const hasBranch = options.hasBranch && !options.hideCoding;
   return [
     {
       id: "copy",
       label: resolve(msg("Copy", { $context: "submenu of things to copy" })),
       icon: "copy",
-      disabled: !options.hasPath && !options.hasBranch,
+      disabled: !options.hasPath && !hasBranch,
       children: [
         ...(options.hasPath
           ? [
@@ -63,7 +65,7 @@ export function buildDraftActionMenuItems(
               },
             ]
           : []),
-        ...(options.hasBranch
+        ...(hasBranch
           ? [
               {
                 id: "copy-branch" as const,
@@ -99,6 +101,7 @@ export interface ThreadActionMenuState {
   /** False where no inline title editor is rendered, such as sidebar search results. */
   readonly canRename?: boolean;
   readonly branch: string | null;
+  readonly hideCoding?: boolean;
   readonly projectFilter: {
     readonly label: string;
     readonly isActive: boolean;
@@ -145,15 +148,16 @@ export function buildThreadActionMenuItems(
   state: ThreadActionMenuState,
   resolve: MessageResolver = m,
 ): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
+  const branch = state.hideCoding ? null : state.branch;
   const items: ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> = [
     ...(state.canFind
       ? [{ id: "find" as const, label: resolve(msg("Find in thread")), icon: "text-search" }]
       : []),
-    ...(state.branch
+    ...(branch
       ? [
           {
             id: "new-thread-on-branch" as const,
-            label: resolve(msg("New thread on {branch}", { branch: state.branch })),
+            label: resolve(msg("New thread on {branch}", { branch })),
             icon: "message-square-plus",
           },
         ]
@@ -276,7 +280,7 @@ export function buildThreadActionMenuItems(
           label: resolve(msg("Path", { $context: "copy the file path" })),
           icon: "folder",
         },
-        ...(state.branch
+        ...(branch
           ? [
               {
                 id: "copy-branch" as const,

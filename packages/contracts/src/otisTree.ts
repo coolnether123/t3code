@@ -218,7 +218,28 @@ export class OtisRpcError extends S.TaggedError<OtisRpcError>()("OtisRpcError", 
       : `Otis: ${this.reason}.`;
   }
 }
+const usageDay = S.String.check(S.isPattern(/^\d{4}-\d{2}-\d{2}$/));
+export const OtisLaneUsageInput = S.Struct({ since: usageDay, until: usageDay });
+export type OtisLaneUsageInput = typeof OtisLaneUsageInput.Type;
+export const OtisLaneUsage = S.Struct({
+  ...OtisLaneUsageInput.fields,
+  rows: S.Array(
+    S.Struct({
+      period: usageDay,
+      lane: id,
+      provider: id,
+      usage: S.Struct({ costUsd: S.NullOr(S.Finite), complete: S.Boolean, records: count }),
+    }),
+  ),
+});
+export type OtisLaneUsage = typeof OtisLaneUsage.Type;
+
 export const otisRpcs = [
+  Rpc.make("otis.usage", {
+    payload: OtisLaneUsageInput,
+    success: OtisLaneUsage,
+    error: S.Union([OtisRpcError, EnvironmentAuthorizationError]),
+  }),
   Rpc.make("otis.subscribe", {
     payload: { read: S.optionalKey(OtisTreeRead) },
     success: S.Union([

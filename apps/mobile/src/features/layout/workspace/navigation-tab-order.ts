@@ -58,8 +58,13 @@ export function moveNavigationTab(
   return order;
 }
 
-export function resolveHiddenNavigationTabs(saved?: readonly unknown[]): readonly NavigationTab[] {
-  return [...new Set(saved?.filter(isNavigationTab) ?? [])];
+export function resolveHiddenNavigationTabs(
+  saved?: readonly unknown[],
+  hideCoding = false,
+): readonly NavigationTab[] {
+  const hidden = saved?.filter(isNavigationTab) ?? [];
+  if (hideCoding) hidden.push("pullRequests", "issues");
+  return [...new Set(hidden)];
 }
 
 export function toggleNavigationTabVisibility(

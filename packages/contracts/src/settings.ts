@@ -412,6 +412,7 @@ export const VoiceTranscriptionDestination = Schema.Union([
 export type VoiceTranscriptionDestination = typeof VoiceTranscriptionDestination.Type;
 
 export const ClientSettingsSchema = Schema.Struct({
+  agentInterface: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   notificationMode: NotificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
   ),
@@ -2159,6 +2160,7 @@ export function requiredScopesForProjectMutation(
 }
 
 export const ClientSettingsPatch = Schema.Struct({
+  agentInterface: Schema.optionalKey(Schema.Boolean),
   notificationMode: Schema.optionalKey(NotificationMode),
   inAppNotificationsEnabled: Schema.optionalKey(Schema.Boolean),
   diffColorScheme: Schema.optionalKey(DiffColorScheme),

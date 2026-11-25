@@ -1,3 +1,5 @@
+import { codingChromeHidden } from "~/hooks/useAgentInterface";
+import { getClientSettings } from "~/hooks/useSettings";
 import {
   buildRemoteOpenUrl,
   type EditorId,
@@ -29,7 +31,7 @@ export function registerOpenFavoriteEditorCommand(): () => void {
   return registerCommands(
     {
       "editor.openFavorite": (event) => {
-        if (event.repeat) return false;
+        if (event.repeat || codingChromeHidden(getClientSettings())) return false;
         const button = [
           ...document.querySelectorAll<HTMLButtonElement>(`[${OPEN_FAVORITE_EDITOR_ATTRIBUTE}]`),
         ].at(-1);
@@ -68,6 +70,7 @@ export function useOpenFavoriteEditorShortcut({
     if (!enabled || remote.mode === "remote-unavailable") return;
     const handler = (event: globalThis.KeyboardEvent) => {
       if (
+        codingChromeHidden(getClientSettings()) ||
         event.repeat ||
         event.defaultPrevented ||
         !isOpenFavoriteEditorShortcut(event, keybindings)

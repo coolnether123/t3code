@@ -135,6 +135,7 @@ const isThreadProject = Schema.is(ThreadProject);
 
 export interface Preferences {
   readonly navigationTabOrder?: readonly string[];
+  readonly agentInterface?: boolean;
   readonly hiddenNavigationTabs?: readonly string[];
   /** Whether pull requests or issues last held the tab bar slot they share. */
   readonly sharedSlotTab?: "pullRequests" | "issues";
@@ -230,6 +231,7 @@ const isPullRequestMergeMethod = Schema.is(PullRequestMergeMethod);
 function sanitizePreferences(parsed: Preferences): Preferences {
   const preferences: {
     navigationTabOrder?: readonly string[];
+    agentInterface?: boolean;
     hiddenNavigationTabs?: readonly string[];
     sharedSlotTab?: "pullRequests" | "issues";
     pullRequestHideTestFiles?: boolean;
@@ -272,6 +274,8 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     issueSavedViews?: ReadonlyArray<IssueSavedView>;
   } = {};
 
+  if (typeof parsed.agentInterface === "boolean")
+    preferences.agentInterface = parsed.agentInterface;
   if (Array.isArray(parsed.hiddenNavigationTabs)) {
     preferences.hiddenNavigationTabs = parsed.hiddenNavigationTabs.filter(
       (tab): tab is string => typeof tab === "string",

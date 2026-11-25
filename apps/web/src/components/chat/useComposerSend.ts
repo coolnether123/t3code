@@ -1,3 +1,5 @@
+import { codingChromeHidden } from "~/hooks/useAgentInterface";
+import { getClientSettings } from "~/hooks/useSettings";
 import { msg } from "gt-react";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m } from "~/i18n/messages";
@@ -1636,7 +1638,7 @@ export function useComposerSend(input: ComposerSendInput) {
         ) {
           handleNewThreadInActiveProject();
         }
-        void recordPromptSent(environmentId);
+        if (!codingChromeHidden(getClientSettings())) void recordPromptSent(environmentId);
       }
     }
 

@@ -142,6 +142,8 @@ describe("storage cleanup settings", () => {
 describe("ClientSettings terminal close confirmation", () => {
   it("keeps confirmation enabled for settings without a saved preference", () => {
     expect(decodeClientSettings({}).confirmTerminalClose).toBe(true);
+    expect(decodeClientSettings({}).agentInterface).toBe(true);
+    expect(decodeClientSettings({ agentInterface: false }).agentInterface).toBe(false);
   });
 });
 

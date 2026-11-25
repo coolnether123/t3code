@@ -47,9 +47,10 @@ function resolveWorkspaceTabsSelection(
   const saved = AsyncResult.isSuccess(preferences) ? preferences.value : undefined;
   const order = resolveWorkspaceTabOrder(saved?.navigationTabOrder);
   const hidden = [
-    ...(navigationCustomizationAvailable()
-      ? resolveHiddenNavigationTabs(saved?.hiddenNavigationTabs)
-      : []),
+    ...resolveHiddenNavigationTabs(
+      navigationCustomizationAvailable() ? saved?.hiddenNavigationTabs : undefined,
+      saved?.agentInterface !== false,
+    ),
     sharedSlotAbsentee(state.selectedTab, saved?.sharedSlotTab),
   ];
   const selected = resolveSelectedNavigationTab(order, hidden, state.selectedTab);

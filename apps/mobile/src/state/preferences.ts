@@ -1,3 +1,4 @@
+import { useAtomValue } from "@effect/atom-react";
 import { createRuntimeCommand } from "@t3tools/client-runtime/state/runtime";
 import * as Effect from "effect/Effect";
 import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
@@ -123,3 +124,8 @@ const mobilePreferencesState = createMobilePreferencesState(mobilePreferencesRun
 
 export const mobilePreferencesAtom = mobilePreferencesState.preferencesAtom;
 export const saveMobilePreferences = mobilePreferencesState.savePreferences;
+
+export function useMobileAgentInterface(): boolean {
+  const preferences = useAtomValue(mobilePreferencesAtom);
+  return !AsyncResult.isSuccess(preferences) || preferences.value.agentInterface !== false;
+}

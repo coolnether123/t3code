@@ -30,6 +30,15 @@ export const THREAD_DETAILS_ITEMS = [
 ] as const;
 
 export type ThreadDetailsItemId = (typeof THREAD_DETAILS_ITEMS)[number]["id"];
+export const CODING_ITEM_IDS: readonly ThreadDetailsItemId[] = [
+  "environment",
+  "openIn",
+  "scripts",
+  "branch",
+  "gitActions",
+  "changes",
+];
+
 export type ThreadDetailsVisibility = Readonly<Record<ThreadDetailsItemId, boolean>>;
 
 type ThreadDetailsItem = (typeof THREAD_DETAILS_ITEMS)[number];
@@ -47,11 +56,13 @@ function defaultVisible(item: ThreadDetailsItem, settings: ThreadDetailsItemSett
 
 export function resolveThreadDetailsVisibility(
   settings: ThreadDetailsItemSettings,
+  hideCodingChrome = false,
 ): ThreadDetailsVisibility {
   return Object.fromEntries(
     THREAD_DETAILS_ITEMS.map((item) => [
       item.id,
-      settings.threadDetailsItems[item.id] ?? defaultVisible(item, settings),
+      !(hideCodingChrome && CODING_ITEM_IDS.includes(item.id)) &&
+        (settings.threadDetailsItems[item.id] ?? defaultVisible(item, settings)),
     ]),
   ) as Record<ThreadDetailsItemId, boolean>;
 }

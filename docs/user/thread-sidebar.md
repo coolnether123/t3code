@@ -317,6 +317,17 @@ To choose what the thread details card shows, right-click the card or open
 shortcuts, such as Open in editor and project scripts. **Reset to default** brings
 back the standard rows.
 
+## Agent interface
+
+Agent interface hides branches, worktrees, Git actions, pull requests, issues,
+repositories, project scripts, and Open in editor. Terminal, Files, Browser, and
+Changed files in the timeline stay available. Turn **Agent interface** off under
+**Settings → Appearance → Interface** to restore your previous controls and
+shortcuts.
+
+The chat header shows used context and the model's limit when the provider
+reports them. Select the meter on web or desktop to open Thread details.
+
 ## Open a thread beside the one you are in
 
 On web and desktop, a subagent, a side chat, and a

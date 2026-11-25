@@ -1,3 +1,5 @@
+import { codingChromeHidden } from "~/hooks/useAgentInterface";
+import { getClientSettings } from "~/hooks/useSettings";
 import {
   parsePullRequestAnchor,
   pullRequestLinkCommit,
@@ -622,7 +624,7 @@ export function PullRequestDetailPanel({
     const command = resolveShortcutCommand(event, keybindings, {
       context: getShortcutContext(),
     });
-    if (command !== "pullRequest.copyNumber") return;
+    if (command !== "pullRequest.copyNumber" || codingChromeHidden(getClientSettings())) return;
     event.preventDefault();
     event.stopPropagation();
     if (!event.repeat)

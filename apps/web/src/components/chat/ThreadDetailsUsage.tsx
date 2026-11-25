@@ -1,3 +1,4 @@
+import { CONTEXT_WARNING_RATIO, CONTEXT_ERROR_RATIO } from "./contextMeter.logic";
 import type {
   ProviderInstanceId,
   ServerProvider,
@@ -42,7 +43,7 @@ export interface ThreadDetailsUsageInput {
   readonly contextWindow: ContextWindowSnapshot | null;
 }
 
-type UsageTone = "error" | "warning" | null;
+export type UsageTone = "error" | "warning" | null;
 
 function limitTone(left: number): UsageTone {
   if (left <= 10) return "error";
@@ -131,7 +132,15 @@ export function ThreadDetailsContext({ usage }: { readonly usage: ContextWindowS
         <UsageRow
           label={gt("Context", { $context: "context window row label" })}
           fill={used}
-          tone={used === null ? null : used >= 90 ? "error" : used >= 80 ? "warning" : null}
+          tone={
+            used === null
+              ? null
+              : used / 100 >= CONTEXT_ERROR_RATIO
+                ? "error"
+                : used / 100 >= CONTEXT_WARNING_RATIO
+                  ? "warning"
+                  : null
+          }
           tick={tick}
           muted
           value={
@@ -317,38 +326,17 @@ function UsageRow({
     <Tooltip>
       <TooltipTrigger
         render={
-          opensUsage ? <Link to="/usage" {...rowProps} /> : <div tabIndex={0} {...rowProps} />
+          opensUsage ? (
+            <Link to="/usage-resets" hash="plans" {...rowProps} />
+          ) : (
+            <div tabIndex={0} {...rowProps} />
+          )
         }
       >
         <span className="max-w-28 truncate text-muted-foreground group-hover:text-foreground">
           {label}
         </span>
-        {fill !== null ? (
-          <span className="relative h-[3px] rounded-full bg-muted-foreground/30 dark:bg-muted-foreground/20">
-            {fill > 0 ? (
-              <span
-                className={cn(
-                  "absolute inset-y-0 left-0 rounded-full",
-                  tone === "error"
-                    ? "bg-error"
-                    : tone === "warning"
-                      ? "bg-warning"
-                      : muted
-                        ? "bg-muted-foreground"
-                        : "bg-foreground/80",
-                )}
-                style={{ width: `max(${fill}%, 6px)` }}
-              />
-            ) : null}
-            {tick !== null ? (
-              <span
-                aria-hidden
-                className="absolute -top-[3px] h-[9px] w-px -translate-x-1/2 bg-foreground/75"
-                style={{ left: `clamp(0.5px, ${tick}%, calc(100% - 0.5px))` }}
-              />
-            ) : null}
-          </span>
-        ) : null}
+        {fill !== null ? <UsageBar fill={fill} tone={tone} tick={tick} muted={muted} /> : null}
         <span
           className={cn(
             // Text-only rows span the bar column so they never widen the shared value column.
@@ -370,9 +358,69 @@ function UsageRow({
       <TooltipPopup side="left" sideOffset={16}>
         <div className="flex flex-col gap-0.5">
           {tooltip}
-          {opensUsage ? <span className="text-muted-foreground">{gt("Open usage")}</span> : null}
+          {opensUsage ? <span className="text-muted-foreground">{gt("Open plans")}</span> : null}
         </div>
       </TooltipPopup>
     </Tooltip>
+  );
+}
+
+export function UsageBar({
+  fill,
+  tone,
+  tick = null,
+  muted = false,
+  className,
+  predicted,
+}: {
+  readonly fill: number;
+  readonly tone: UsageTone;
+  readonly tick?: number | null;
+  readonly muted?: boolean;
+  readonly className?: string;
+  readonly predicted?: number;
+}) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "relative h-[3px] rounded-full bg-muted-foreground/30 dark:bg-muted-foreground/20",
+        className,
+      )}
+    >
+      {predicted !== undefined && predicted > 0 ? (
+        <span
+          className={cn(
+            "absolute inset-y-0 rounded-full",
+            tone === "warning" ? "bg-warning" : "bg-foreground/30",
+          )}
+          style={{ left: `${fill}%`, width: `${predicted}%` }}
+        />
+      ) : null}
+      {fill > 0 ? (
+        <span
+          className={cn(
+            "absolute inset-y-0 left-0 rounded-full",
+            predicted !== undefined
+              ? "bg-foreground/80"
+              : tone === "error"
+                ? "bg-error"
+                : tone === "warning"
+                  ? "bg-warning"
+                  : muted
+                    ? "bg-muted-foreground"
+                    : "bg-foreground/80",
+          )}
+          style={{ width: `min(100%, max(${fill}%, 6px))` }}
+        />
+      ) : null}
+      {tick !== null ? (
+        <span
+          aria-hidden
+          className="absolute -top-[3px] h-[9px] w-px -translate-x-1/2 bg-foreground/75"
+          style={{ left: `clamp(0.5px, ${tick}%, calc(100% - 0.5px))` }}
+        />
+      ) : null}
+    </span>
   );
 }

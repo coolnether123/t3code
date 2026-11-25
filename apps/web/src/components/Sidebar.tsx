@@ -1,3 +1,5 @@
+import { codingChromeHidden } from "~/hooks/useAgentInterface";
+import { getClientSettings } from "~/hooks/useSettings";
 import { OTIS_THREAD_ID } from "@t3tools/contracts";
 import { OtisButton } from "./otis/OtisButton";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
@@ -2676,6 +2678,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             buildDraftActionMenuItems({
+              hideCoding: codingChromeHidden(getClientSettings()),
               hasPath: Boolean(workspacePath),
               hasBranch: Boolean(session.branch),
               hasProject: projectGroup != null,
@@ -2764,6 +2767,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             buildThreadActionMenuItems({
+              hideCoding: codingChromeHidden(getClientSettings()),
               canOperate: readEnvironmentScope(
                 threadRef.environmentId,
                 AuthOrchestrationOperateScope,

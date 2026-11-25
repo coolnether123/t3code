@@ -40,6 +40,8 @@ export type ContextWindowSnapshot = NullableContextWindowUsage & {
   readonly usedPercentage: number | null;
   readonly remainingPercentage: number | null;
   readonly updatedAt: string;
+  readonly source: "compaction" | "turn" | "thread";
+  readonly compactedAt: string | null;
 };
 
 /**
@@ -94,6 +96,7 @@ function compactionSnapshot(
   item: CompactionItem,
   maxTokens: number | null,
   updatedAt: string,
+  autoCompactThreshold: number | null = null,
 ): ContextWindowSnapshot | null {
   const usedTokens = asFiniteNumber(item.afterTokenCount);
   if (usedTokens === null || usedTokens < 0) return null;
@@ -118,9 +121,11 @@ function compactionSnapshot(
     toolUses: null,
     durationMs: null,
     compactsAutomatically: true,
-    autoCompactThreshold: null,
+    autoCompactThreshold,
     cost: null,
     updatedAt,
+    source: "compaction",
+    compactedAt: item.status === "completed" ? updatedAt : null,
   };
 }
 
@@ -151,6 +156,9 @@ export function deriveLatestContextWindowSnapshot(
         latestCompletedCompaction,
         liveUsage?.maxTokens ?? asFiniteNumber(providerThread?.contextUsage?.maxTokens),
         compactedAt,
+        liveUsage?.autoCompactThreshold ??
+          providerThread?.contextUsage?.autoCompactThreshold ??
+          null,
       );
     }
   }
@@ -185,6 +193,8 @@ export function deriveLatestContextWindowSnapshot(
       autoCompactThreshold: liveUsage.autoCompactThreshold ?? null,
       cost: null,
       updatedAt: liveUsage.updatedAt,
+      source: "turn",
+      compactedAt: null,
     };
   }
   const providerUsage = providerThread?.contextUsage;
@@ -220,6 +230,8 @@ export function deriveLatestContextWindowSnapshot(
       cost: providerUsage.cost ?? null,
       autoCompactThreshold: providerUsage.autoCompactThreshold ?? null,
       updatedAt: DateTime.formatIso(providerUsageUpdatedAt),
+      source: "thread",
+      compactedAt: null,
     };
   }
   for (let index = entries.length - 1; index >= 0; index -= 1) {

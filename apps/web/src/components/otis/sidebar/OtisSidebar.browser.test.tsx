@@ -202,6 +202,7 @@ it("opens the native parent chat, expands its children, and follows it on deskto
 });
 
 it("opens the same Otis row menu by right click, keyboard, and touch hold", async () => {
+  window.localStorage.removeItem("otis.fleet.expanded." + ENVIRONMENT_ID);
   await page.viewport(1280, 844);
   const { nodes, a } = exampleTree();
   using _rpc = answerRpc("otis.subscribe", () =>

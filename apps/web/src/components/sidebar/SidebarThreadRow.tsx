@@ -1,3 +1,4 @@
+import { useAgentInterface } from "~/hooks/useAgentInterface";
 import { useAtomMount } from "@effect/atom-react";
 import { asLaunchingThread } from "@t3tools/client-runtime/state/thread-inbox";
 import { ThreadHoverCard, ThreadHoverCardPopup } from "../ThreadHoverCard";
@@ -740,6 +741,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   };
 
   const gitCwd = thread.worktreePath ?? props.project?.workspaceRoot ?? null;
+  const hideCoding = useAgentInterface();
   const linkedPullRequestStatus = useLinkedThreadPullRequest(
     thread.environmentId,
     thread.linkedPullRequest,
@@ -1123,7 +1125,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     if (!props.isRouteThread) onThreadActivate(threadRef);
   };
   const prBadge =
-    prBadgeShape?.kind === "stack" || pr || currentLinkedPr ? (
+    !hideCoding && (prBadgeShape?.kind === "stack" || pr || currentLinkedPr) ? (
       <ThreadPullRequestBadgeControl
         render={<InlineButton />}
         badge={prBadgeShape}

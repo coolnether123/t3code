@@ -62,6 +62,8 @@ import { UsagePaceChart } from "./UsagePaceChart";
 import { UsagePublicResets } from "./UsagePublicResets";
 import { monitoredPeriodModels, UsageResetHistory } from "./UsageResetHistory";
 
+import { PlanOutlook } from "./PlanOutlook";
+
 const emptySettingsAtom = Atom.make(null);
 
 const dateTime = (value: string) =>
@@ -184,7 +186,11 @@ export function UsageResetPage() {
         history.environments.find((environment) => environment.summary !== null)?.summary,
     ))();
   const visibleWindows = (() =>
-    allWindows.filter((limit) => view.provider === "both" || limit.provider === view.provider))();
+    allWindows.filter(
+      (limit): limit is LimitWindow & { provider: "codex" | "claude" } =>
+        limit.provider !== "antigravity" &&
+        (view.provider === "both" || limit.provider === view.provider),
+    ))();
   const selectedWindow = (() =>
     visibleWindows.find((limit) => limit.key === view.windowKey) ??
     visibleWindows.find(hasReadings) ??
@@ -684,12 +690,26 @@ export function UsageResetPage() {
               No saved limit readings yet. They appear once a connected computer records them.
             </p>
           ) : null}
+          <PlanOutlook
+            summary={
+              source?.summary ??
+              history.environments.find((environment) => environment.summary !== null)?.summary ??
+              null
+            }
+            environmentId={
+              source?.environmentId ??
+              history.environments.find((environment) => environment.summary !== null)
+                ?.environmentId
+            }
+          />
           {historyAnswered && visibleWindows.length > 0 ? (
             <UsageLimitCards
               windows={visibleWindows}
               selectedKey={windowKey}
               onSelect={(key) => updateView({ windowKey: key })}
-              onShowOnly={(provider) => updateView({ provider })}
+              onShowOnly={(provider) => {
+                if (provider !== "antigravity") updateView({ provider });
+              }}
             />
           ) : null}
           {view.provider !== "claude" ? (

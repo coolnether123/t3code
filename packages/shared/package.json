@@ -3,6 +3,8 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./usagePlanOutlook": "./src/usagePlanOutlook.ts",
+    "./contextWindowTokens": "./src/contextWindowTokens.ts",
     "./usageQuotaCredits": {
       "types": "./src/usageQuotaCredits.ts",
       "import": "./src/usageQuotaCredits.ts"

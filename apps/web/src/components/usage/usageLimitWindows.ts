@@ -1,12 +1,13 @@
 import type { UsageQuotaSample, UsageSummary } from "@t3tools/contracts";
 import { QUOTA_STALE_MS, QUOTA_WEEK_MS, quotaForecast } from "@t3tools/shared/usageQuotaForecast";
 
-export type LimitProvider = "codex" | "claude";
+export type LimitProvider = "codex" | "claude" | "antigravity";
 export type LimitProviderFilter = LimitProvider | "both";
 
 export const LIMIT_PROVIDER_NAMES: Readonly<Record<LimitProvider, string>> = {
   codex: "Codex",
   claude: "Claude",
+  antigravity: "Gemini",
 };
 
 /** One subscription limit the monitor can chart: Codex's weekly limit or a Claude window. */

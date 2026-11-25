@@ -1,3 +1,5 @@
+import { codingChromeHidden } from "~/hooks/useAgentInterface";
+import { getClientSettings } from "~/hooks/useSettings";
 import { msg } from "gt-react";
 import { errorDisplayMessage, thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m } from "~/i18n/messages";
@@ -341,7 +343,10 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
       if (!activeRightPanelSurface) return false;
       if (!event.repeat) closeRightPanelSurface(activeRightPanelSurface);
     },
-    "diff.toggle": () => onToggleDiff(),
+    "diff.toggle": () => {
+      if (codingChromeHidden(getClientSettings())) return false;
+      onToggleDiff();
+    },
   } satisfies ChatShortcutCommands;
 
   return {

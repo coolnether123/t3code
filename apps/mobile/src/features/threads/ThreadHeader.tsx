@@ -1,3 +1,6 @@
+import type { ContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
+import { formatContextWindowTokens } from "@t3tools/shared/contextWindowTokens";
+import { useMobileAgentInterface } from "../../state/preferences";
 import { useGT, useMessages } from "gt-react-native";
 
 import { AppBar } from "../../components/ui/AppBar";
@@ -16,6 +19,7 @@ import {
 
 export function ThreadHeader(props: {
   readonly title: string;
+  readonly contextWindow?: ContextWindowSnapshot | null;
   readonly subtitle: string;
   readonly gitControls: ThreadGitControlsProps;
   readonly onReturnToThread?: () => void;
@@ -44,12 +48,22 @@ export function ThreadHeader(props: {
         },
       ]
     : [];
-  const menus = [gitMenu, terminalMenu].filter((menu): menu is AppBarMenu => menu !== null);
+  const hideCoding = useMobileAgentInterface();
+  const menus = [hideCoding ? null : gitMenu, terminalMenu].filter(
+    (menu): menu is AppBarMenu => menu !== null,
+  );
 
+  const usage = props.contextWindow;
+  const context = usage
+    ? [usage.usedTokens, usage.maxTokens]
+        .filter((value) => value !== undefined)
+        .map(formatContextWindowTokens)
+        .join(" / ")
+    : null;
   return (
     <AppBar
       title={props.title}
-      subtitle={props.subtitle}
+      subtitle={[props.subtitle, context].filter(Boolean).join(" · ")}
       onBackToList={goBack}
       onCompose={props.draft ? undefined : startNewTask}
       backInSplitView={

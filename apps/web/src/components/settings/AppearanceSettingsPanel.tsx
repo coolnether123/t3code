@@ -1,3 +1,4 @@
+import { useAgentInterface } from "~/hooks/useAgentInterface";
 import { BirthdaySettings } from "./BirthdaySettings";
 import type { CSSProperties } from "react";
 import { useState } from "react";
@@ -148,8 +149,31 @@ export function AppearanceSettingsPanel() {
     "--settings-slider-fill-offset": `${0.5 - panelAnimationDurationRatio}rem`,
   } as CSSProperties;
 
+  const hideCoding = useAgentInterface();
   return (
     <SettingsPageContainer>
+      <SettingsSection id="agent-interface-section" title={gt("Interface")}>
+        <SettingsRow
+          {...searchableSetting("agent-interface")}
+          description={gt(
+            "Hide coding tools you don't use: branches, Git, pull requests, issues, repositories, project scripts and Open in editor. Turn this off to bring them back.",
+          )}
+          resetAction={
+            !hideCoding ? (
+              <SettingResetButton
+                ariaLabel={gt("Reset Agent interface to default")}
+                onClick={() => updateSettings({ agentInterface: true })}
+              />
+            ) : undefined
+          }
+        >
+          <Switch
+            checked={hideCoding}
+            aria-label={gt("Agent interface")}
+            onCheckedChange={(checked) => updateSettings({ agentInterface: checked })}
+          />
+        </SettingsRow>
+      </SettingsSection>
       <SettingsSection id="appearance" title={gt("Colors & themes")} variant="plain" hideTitle>
         <div id={searchableSetting("theme").id}>
           <ThemeLibrary

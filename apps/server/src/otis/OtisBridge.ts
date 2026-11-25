@@ -1,5 +1,7 @@
 import {
   OtisActionResult,
+  OtisLaneUsage,
+  type OtisLaneUsageInput,
   OtisRpcError,
   OtisTailPage,
   OtisTreeLine,
@@ -28,6 +30,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 
 interface Bridge {
+  readonly usage: (input: OtisLaneUsageInput) => Effect.Effect<OtisLaneUsage, OtisRpcError>;
   readonly subscribe: Stream.Stream<OtisFleetEvent>;
   readonly read: (query: OtisTreeRead) => Effect.Effect<OtisTreeReadResult, OtisRpcError>;
   readonly act: (input: OtisAction) => Effect.Effect<OtisActionResult, OtisRpcError>;
@@ -39,6 +42,7 @@ const unconfigured = Effect.fail(new OtisRpcError({ reason: "unconfigured" }));
 // Environments without an Otis installation can still serve the stock client.
 export class OtisBridge extends Context.Reference<Bridge>("t3/otis/OtisBridge", {
   defaultValue: () => ({
+    usage: () => unconfigured,
     subscribe: Stream.make(unavailable),
     act: () => unconfigured,
     read: () => unconfigured,
@@ -63,6 +67,7 @@ function configuredOrigin(raw: string | undefined) {
 const treeLine = Schema.decodeUnknownEffect(Schema.fromJsonString(OtisTreeLine));
 const waitingLine = Schema.decodeUnknownEffect(Schema.fromJsonString(OtisWaiting));
 const decodeAction = Schema.decodeUnknownEffect(OtisActionResult);
+const decodeUsage = Schema.decodeUnknownEffect(OtisLaneUsage);
 const decodeTail = Schema.decodeUnknownEffect(OtisTailPage);
 const decodeTreeRead = Schema.decodeUnknownEffect(OtisTreeReadResult);
 const invalidResponse = () => new OtisRpcError({ reason: "invalid-response" });
@@ -230,7 +235,7 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
     Effect.forkScoped,
   );
 
-  const post = Effect.fn("OtisBridge.post")(function* (path: string, body: unknown) {
+  const requestJson = Effect.fn("OtisBridge.requestJson")(function* (path: string, body?: unknown) {
     const response = yield* request(path, body);
     return yield* Effect.tryPromise({
       try: () => response.json() as Promise<unknown>,
@@ -242,26 +247,33 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
     if (input.type === "parent.bind") {
       if (!options.parentBinding) return yield* unconfigured;
       return yield* decodeAction(
-        yield* post("parents", yield* options.parentBinding(input.threadId, input.title)),
+        yield* requestJson("parents", yield* options.parentBinding(input.threadId, input.title)),
       ).pipe(Effect.mapError(invalidResponse));
     }
     const path = input.type === "child.start" ? "children" : "nodes/act";
-    return yield* decodeAction(yield* post(path, input)).pipe(Effect.mapError(invalidResponse));
+    return yield* decodeAction(yield* requestJson(path, input)).pipe(
+      Effect.mapError(invalidResponse),
+    );
   });
   const tail = Effect.fn("OtisBridge.tail")(function* ({ nodeId, ...page }: OtisTailInput) {
-    const raw = yield* post(`nodes/${encodeURIComponent(nodeId)}/tail`, page);
+    const raw = yield* requestJson(`nodes/${encodeURIComponent(nodeId)}/tail`, page);
     const result = yield* decodeTail(raw).pipe(Effect.mapError(invalidResponse));
     if (result.nodeId !== nodeId) return yield* invalidResponse();
     return result;
   });
   const read = Effect.fn("OtisBridge.read")(function* (query: OtisTreeRead) {
-    const raw = yield* post("tree-read", query);
+    const raw = yield* requestJson("tree-read", query);
     const result = yield* decodeTreeRead(raw).pipe(Effect.mapError(invalidResponse));
     return options.resolveChats
       ? { ...result, nodes: yield* options.resolveChats(result.nodes) }
       : result;
   });
-  return { act, tail, subscribe, read } satisfies Bridge;
+  const usage = Effect.fn("OtisBridge.usage")(function* ({ since, until }: OtisLaneUsageInput) {
+    const query = new URLSearchParams({ since, until, groupBy: "day" });
+    const raw = yield* requestJson(`usage?${query}`);
+    return yield* decodeUsage(raw).pipe(Effect.mapError(invalidResponse));
+  });
+  return { act, tail, subscribe, read, usage } satisfies Bridge;
 });
 
 export function nativeChats(sql: SqlClient.SqlClient, environmentId: string) {

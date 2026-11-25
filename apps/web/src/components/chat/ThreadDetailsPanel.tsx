@@ -1,3 +1,4 @@
+import { useAgentInterface } from "~/hooks/useAgentInterface";
 import type {
   EditorId,
   EnvironmentId,
@@ -96,7 +97,10 @@ interface ThreadDetailsPanelProps extends Pick<
 }
 
 export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
-  const visible = useClientSettings(resolveThreadDetailsVisibility);
+  const hideCoding = useAgentInterface();
+  const visible = useClientSettings((settings) =>
+    resolveThreadDetailsVisibility(settings, hideCoding),
+  );
   const gt = useGT();
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
   const fileScripts = useT3ProjectFileScripts(

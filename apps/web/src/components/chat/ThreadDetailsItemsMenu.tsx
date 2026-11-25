@@ -1,3 +1,4 @@
+import { useAgentInterface } from "~/hooks/useAgentInterface";
 import { T, useMessages } from "gt-react";
 import {
   getClientSettings,
@@ -6,6 +7,7 @@ import {
 } from "../../hooks/useSettings";
 import { MenuCheckboxItem, MenuGroup, MenuGroupLabel, MenuItem, MenuSeparator } from "../ui/menu";
 import {
+  CODING_ITEM_IDS,
   isDefaultThreadDetailsVisibility,
   resolveThreadDetailsVisibility,
   RESET_THREAD_DETAILS_ITEMS,
@@ -17,13 +19,16 @@ import {
 export function ThreadDetailsItemsMenuItems() {
   const visibility = useClientSettings(resolveThreadDetailsVisibility);
   const m = useMessages();
+  const hideCoding = useAgentInterface();
   return (
     <>
       <MenuGroup>
         <MenuGroupLabel>
           <T>Show in thread details</T>
         </MenuGroupLabel>
-        {THREAD_DETAILS_ITEMS.map((item) => (
+        {THREAD_DETAILS_ITEMS.filter(
+          (item) => !hideCoding || !CODING_ITEM_IDS.includes(item.id),
+        ).map((item) => (
           <MenuCheckboxItem
             key={item.id}
             checked={visibility[item.id]}
@@ -44,6 +49,11 @@ export function ThreadDetailsItemsMenuItems() {
       >
         <T>Reset to default</T>
       </MenuItem>
+      {hideCoding && (
+        <MenuItem disabled>
+          <T>Coding items are hidden by Agent interface.</T>
+        </MenuItem>
+      )}
     </>
   );
 }

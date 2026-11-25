@@ -47,9 +47,10 @@ export function useHiddenNavigationTabs() {
   const selected = useWorkspaceTabs()?.state.selectedTab ?? "threads";
   const saved = AsyncResult.isSuccess(preferences) ? preferences.value : undefined;
   return [
-    ...(navigationCustomizationAvailable()
-      ? resolveHiddenNavigationTabs(saved?.hiddenNavigationTabs)
-      : []),
+    ...resolveHiddenNavigationTabs(
+      navigationCustomizationAvailable() ? saved?.hiddenNavigationTabs : undefined,
+      saved?.agentInterface !== false,
+    ),
     sharedSlotAbsentee(selected, saved?.sharedSlotTab),
   ];
 }

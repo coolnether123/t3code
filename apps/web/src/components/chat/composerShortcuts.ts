@@ -1,3 +1,5 @@
+import { codingChromeHidden } from "~/hooks/useAgentInterface";
+import { getClientSettings } from "~/hooks/useSettings";
 import type { ComposerHandleRef } from "../../composerHandleContext";
 import type { BranchToolbarHandle } from "../BranchToolbar";
 import type { ChatComposerHandle } from "./ChatComposer";
@@ -29,7 +31,8 @@ export function composerShortcutCommands(
     "composer.mode": openControl(composerRef, "composer.mode"),
     "composer.workspace": openControl(composerRef, "composer.workspace"),
     "composer.branch": ({ event }) => {
-      if (!event.repeat) branchToolbarRef.current?.openBranchPicker();
+      if (!event.repeat && !codingChromeHidden(getClientSettings()))
+        branchToolbarRef.current?.openBranchPicker();
     },
     "composer.previousWorktree": ({ event }) => {
       if (!event.repeat) branchToolbarRef.current?.usePreviousWorktree();

@@ -1,3 +1,7 @@
+import { saveMobilePreferences, useMobileAgentInterface } from "../../state/preferences";
+import { useAtomCommand } from "../../state/use-atom-command";
+import { SettingsSection } from "./components/SettingsSection";
+import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { useGT } from "gt-react-native";
 import { Platform } from "react-native";
 import { AndroidNavigationAppearanceSection } from "./appearance/sections/AndroidNavigationAppearanceSection";
@@ -13,6 +17,8 @@ import { ToolCallsAppearanceSection } from "./appearance/sections/ToolCallsAppea
 
 export function SettingsAppearanceRouteScreen() {
   const gt = useGT();
+  const hideCoding = useMobileAgentInterface();
+  const save = useAtomCommand(saveMobilePreferences);
   const insets = useSafeAreaInsets();
 
   return (
@@ -26,6 +32,16 @@ export function SettingsAppearanceRouteScreen() {
           paddingBottom: Math.max(insets.bottom, 18) + 18,
         }}
       >
+        <SettingsSection title={gt("Interface")}>
+          <SettingsSwitchRow
+            label={gt("Agent interface")}
+            subtitle={gt(
+              "Hide coding tools you don't use: branches, Git, pull requests, issues, repositories, project scripts and Open in editor. Turn this off to bring them back.",
+            )}
+            value={hideCoding}
+            onValueChange={(agentInterface) => void save({ agentInterface })}
+          />
+        </SettingsSection>
         <ThemeAppearanceSection />
         {Platform.OS === "android" ? <AndroidNavigationAppearanceSection /> : null}
         <TextAppearanceSection />

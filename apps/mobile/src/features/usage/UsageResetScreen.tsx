@@ -29,6 +29,7 @@ import { AppText as Text } from "../../components/ui/AppText";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useUsage } from "../../state/usage";
 
+import { NativePlanOutlook } from "./NativePlanOutlook";
 import { UsagePaceChart } from "./UsagePaceChart";
 import { ResetCheckPanel } from "./ResetCheckPanel";
 import { CommunityCheckPanel } from "./CommunityCheckPanel";
@@ -74,7 +75,9 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
   const refreshHistory = useEffectEvent(() => history.refresh());
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Refresh server history on a timer and when the app becomes active.
   useEffect(() => {
-    const timer = setInterval(refreshHistory, 60_000);
+    const timer = setInterval(() => {
+      if (AppState.currentState === "active") refreshHistory();
+    }, 60_000);
     const subscription = AppState.addEventListener("change", (state) => {
       if (state === "active") refreshHistory();
     });
@@ -214,6 +217,13 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
         contentContainerClassName="gap-5 px-5 pt-4"
         contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
       >
+        <NativePlanOutlook
+          summary={
+            tracker?.summary ??
+            history.environments.find((entry) => entry.summary !== null)?.summary ??
+            null
+          }
+        />
         <View className="flex-row justify-between gap-2">
           <Pressable
             className="min-h-11 justify-center"

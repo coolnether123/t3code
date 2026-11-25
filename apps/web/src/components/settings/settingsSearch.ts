@@ -254,6 +254,21 @@ const SOURCE_CONTROL_HOST_TERMS = sourceControlClients.definitions
 
 export const SETTINGS_SEARCH_ITEMS = [
   {
+    id: "agent-interface",
+    title: msg("Agent interface"),
+    to: "/settings/appearance",
+    searchTerms: [
+      msg("coding tools"),
+      msg("git"),
+      msg("GitHub"),
+      msg("pull requests"),
+      msg("branch"),
+      msg("repository"),
+      msg("project scripts"),
+      msg("simple"),
+    ],
+  },
+  {
     id: "storage-worktree-keep-when",
     targetId: "storage-worktrees",
     title: msg("Keep worktrees with local changes"),

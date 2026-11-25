@@ -50,6 +50,10 @@ describe("V2 context window presentation", () => {
     const snapshot = deriveLatestContextWindowSnapshot([compactionEntry(null)]);
     expect(snapshot?.usedTokens).toBe(2_000);
     expect(snapshot?.totalProcessedTokens).toBe(10_000);
+    expect(snapshot).toMatchObject({
+      source: "compaction",
+      compactedAt: "2026-06-20T00:00:00.000Z",
+    });
   });
 
   it("ignores a retired provider thread's compaction after a provider switch", () => {

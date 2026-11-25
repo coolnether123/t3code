@@ -1,3 +1,4 @@
+import { useMobileAgentInterface } from "../../state/preferences";
 import { T, useGT, useMessages, Var } from "gt-react-native";
 import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
 import { DraftEnvironmentControl } from "./DraftEnvironmentControl";
@@ -164,6 +165,7 @@ export function NewTaskDraftScreen(props: {
   readonly incomingShareId?: string;
 }) {
   const gt = useGT();
+  const hideCoding = useMobileAgentInterface();
   const m = useMessages();
   const [creationMetadata] = useState(makeTurnCommandMetadata);
   const projects = useProjects();
@@ -914,7 +916,7 @@ export function NewTaskDraftScreen(props: {
   const startsNewWorktree = flow.workspaceMode === "worktree";
   const offersRepositoryChoice =
     startsNewWorktree && (flow.worktreeRepositoryChoices?.length ?? 0) > 0;
-  const workspaceControls = (
+  const workspaceControls = hideCoding ? null : (
     <View className="flex-row flex-wrap items-center gap-x-1 px-2">
       <ComposerInlineControl
         accessibilityHint={

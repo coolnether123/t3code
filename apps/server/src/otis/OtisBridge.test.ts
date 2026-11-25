@@ -52,6 +52,38 @@ const connect = Effect.fn("test.connect")(function* (
   return { next: Queue.take(events), fiber };
 });
 
+it.effect("reads authenticated daily Otis lane usage", () =>
+  Effect.gen(function* () {
+    const since = "2026-11-24";
+    const until = "2026-11-25";
+    const row = {
+      period: since,
+      lane: "lane:example",
+      provider: "claude-code",
+      usage: { costUsd: 4.25, complete: true, records: 2, pricedRecords: 2 },
+    };
+    const bridge = yield* OtisBridge.make({
+      origin: "http://localhost:5197",
+      token: "fixture",
+      reconnect: Effect.never,
+      fetch: async (url, init) => {
+        const path = new URL(String(url));
+        expect(path.pathname).toBe("/api/v1/lanes/usage");
+        expect(Object.fromEntries(path.searchParams)).toEqual({ since, until, groupBy: "day" });
+        expect(init?.method).toBe("GET");
+        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer fixture");
+        return Response.json({ since, until, rows: [row] });
+      },
+    });
+    const rpc = yield* otisRpcHandlers.pipe(Effect.provideService(OtisBridge.OtisBridge, bridge));
+    expect(yield* rpc["otis.usage"]({ since, until })).toMatchObject({
+      since,
+      until,
+      rows: [{ ...row, usage: { costUsd: 4.25, complete: true, records: 2 } }],
+    });
+  }).pipe(Effect.scoped),
+);
+
 it.effect(
   "replays the producer fixture to ten clients, snapshots reconnects, and leaves T3 SQLite unchanged",
   () =>

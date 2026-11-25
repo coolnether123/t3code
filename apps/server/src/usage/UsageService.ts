@@ -657,18 +657,18 @@ export const make = Effect.gen(function* () {
   const legacyScanCachePath = path.join(config.stateDir, "usage-scan-cache.json");
   const claudeQuotaHistoryPath = path.join(config.stateDir, CLAUDE_QUOTA_HISTORY_FILE);
   const antigravityQuotaHistoryPath = path.join(config.stateDir, ANTIGRAVITY_QUOTA_HISTORY_FILE);
-  const readAntigravityQuota = fileSystem.readFileString(antigravityQuotaHistoryPath).pipe(
-    Effect.flatMap((text) => decodeScanCacheFile(text)),
-    Effect.map(decodeClaudeQuotaHistory),
-    Effect.orElseSucceed(() => emptyClaudeQuotaHistory),
-    Effect.map((history) => claudeQuotaHistories(history, "antigravity")),
-    Effect.map((histories) =>
-      histories.map((history) => ({
-        ...history,
-        samples: history.samples.slice(-1),
-      })),
-    ),
-  );
+  const readAntigravityQuota = (latestOnly: boolean) =>
+    fileSystem.readFileString(antigravityQuotaHistoryPath).pipe(
+      Effect.flatMap((text) => decodeScanCacheFile(text)),
+      Effect.map(decodeClaudeQuotaHistory),
+      Effect.orElseSucceed(() => emptyClaudeQuotaHistory),
+      Effect.map((history) => claudeQuotaHistories(history, "antigravity")),
+      Effect.map((histories) =>
+        latestOnly
+          ? histories.map((history) => ({ ...history, samples: history.samples.slice(-1) }))
+          : histories.filter((history) => !history.windowId.startsWith("antigravity/model:")),
+      ),
+    );
   // Parsed transcript records live in SQLite; only a small per-file index is
   // resident. See usageScanStore for why the whole-document cache was retired.
   const scanStore = UsageScanStore.open(path.join(config.stateDir, "usage-scan-cache.sqlite"));
@@ -1393,13 +1393,15 @@ export const make = Effect.gen(function* () {
     // Claude windows come from the sampler's saved readings, beside Codex's.
     const providerQuotaHistories =
       input.includeQuotaHistory || input.quotaHistoryOnly || input.quotaIntervals !== undefined
-        ? (progress?.providerQuotaHistories ??
-          (yield* fileSystem.readFileString(claudeQuotaHistoryPath).pipe(
-            Effect.flatMap((text) => decodeScanCacheFile(text)),
-            Effect.map(decodeClaudeQuotaHistory),
-            Effect.orElseSucceed(() => emptyClaudeQuotaHistory),
-            Effect.map((document) => claudeQuotaHistories(document)),
-          )))
+        ? (progress?.providerQuotaHistories ?? [
+            ...(yield* fileSystem.readFileString(claudeQuotaHistoryPath).pipe(
+              Effect.flatMap((text) => decodeScanCacheFile(text)),
+              Effect.map(decodeClaudeQuotaHistory),
+              Effect.orElseSucceed(() => emptyClaudeQuotaHistory),
+              Effect.map((document) => claudeQuotaHistories(document)),
+            )),
+            ...(yield* readAntigravityQuota(false)),
+          ])
         : undefined;
     if (progress !== undefined) {
       progress.quotaHistory = quotaHistory;
@@ -2965,7 +2967,7 @@ export const make = Effect.gen(function* () {
   ) {
     const summary = yield* readSummary(scanInput, rememberReport);
     return includeAntigravityQuota
-      ? { ...summary, antigravityQuota: yield* readAntigravityQuota }
+      ? { ...summary, antigravityQuota: yield* readAntigravityQuota(true) }
       : summary;
   });
 

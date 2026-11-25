@@ -1,3 +1,5 @@
+import type { ContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
+import { ContextMeter } from "./ContextMeter";
 import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
@@ -50,6 +52,9 @@ import { Button } from "../ui/button";
 import { GuestShareIndicator } from "./GuestShareControls";
 
 interface ChatHeaderProps {
+  contextWindow?: ContextWindowSnapshot | null;
+  contextProviderIsClaude?: boolean;
+  onToggleThreadPanel?: () => void;
   activeThreadEnvironmentId: EnvironmentId;
   activeThreadId: ThreadId;
   activeThreadTitle: string;
@@ -75,6 +80,9 @@ function resolveRenameCommit(input: {
 }
 
 export const ChatHeader = memo(function ChatHeader({
+  contextWindow,
+  contextProviderIsClaude = false,
+  onToggleThreadPanel,
   activeThreadEnvironmentId,
   activeThreadId,
   activeThreadTitle,
@@ -267,7 +275,7 @@ export const ChatHeader = memo(function ChatHeader({
     <div
       ref={breadcrumbContainerRef}
       className={cn(
-        "flex min-w-0 flex-1 items-center gap-2 sm:gap-3",
+        "@container/chat-header flex min-w-0 flex-1 items-center gap-2 sm:gap-3",
         rightPanelOpen ? "pr-10" : "pr-24",
       )}
       onContextMenu={handleHeaderContextMenu}
@@ -438,6 +446,13 @@ export const ChatHeader = memo(function ChatHeader({
           />
         )}
       {isServerThread ? <GuestShareIndicator threadRef={activeThreadRef} /> : null}
+      {contextWindow && onToggleThreadPanel && (
+        <ContextMeter
+          usage={contextWindow}
+          claude={contextProviderIsClaude}
+          onOpen={onToggleThreadPanel}
+        />
+      )}
     </div>
   );
 });

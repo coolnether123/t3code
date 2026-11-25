@@ -1,3 +1,4 @@
+import { useAgentInterface } from "~/hooks/useAgentInterface";
 import { OTIS_THREAD_ID } from "@t3tools/contracts";
 import { OtisChromeHost } from "./otis/OtisChromeHost";
 import "./otis/otis.css";
@@ -614,6 +615,7 @@ export default function ChatView(props: ChatViewProps) {
     return ids;
   })();
   const settings = useEnvironmentSettings(environmentId);
+  const hideCoding = useAgentInterface();
   const clientSettingsHydrated = useClientSettingsHydrated();
   const timestampFormat = settings.timestampFormat;
   const navigate = useNavigate();
@@ -1783,13 +1785,15 @@ export default function ChatView(props: ChatViewProps) {
     useAtomValue(serverEnvironment.configValueAtom(openInEnvironmentId))?.availableEditors ?? [];
   const hostEnvironmentId = useAtomValue(hostEnvironmentIdAtom);
   const remoteOpenState = useRemoteOpenState(openInEnvironmentId);
-  const showOpenInPicker = shouldShowOpenInPicker({
-    activeProjectName: activeProject?.title,
-    activeThreadEnvironmentId: openInEnvironmentId,
-    primaryEnvironmentId: primaryEnvironment?.environmentId ?? null,
-    hostEnvironmentId,
-    remoteOpenMode: remoteOpenState.mode,
-  });
+  const showOpenInPicker =
+    !hideCoding &&
+    shouldShowOpenInPicker({
+      activeProjectName: activeProject?.title,
+      activeThreadEnvironmentId: openInEnvironmentId,
+      primaryEnvironmentId: primaryEnvironment?.environmentId ?? null,
+      hostEnvironmentId,
+      remoteOpenMode: remoteOpenState.mode,
+    });
   useOpenFavoriteEditorShortcut({
     enabled: showOpenInPicker && !backgroundThread,
     environmentId: openInEnvironmentId,
@@ -1893,6 +1897,7 @@ export default function ChatView(props: ChatViewProps) {
   const showComposerContextStrip =
     !embedded &&
     shouldShowComposerContextStrip({
+      hideCoding,
       isDraftHeroState,
       persistInActiveThreads: settings.persistComposerContextStrip,
       hasActiveProject: activeProject !== null && !showProviderSubagentBar,
@@ -3577,6 +3582,9 @@ export default function ChatView(props: ChatViewProps) {
             {!rightPanelControlsAtRoot && !rightPanelControlsInPanel ? panelLayoutControls : null}
             {inlineRightPanelOwnsTitleBar ? threadPanelHeaderControl : null}
             <ChatHeader
+              contextWindow={activeContextWindow}
+              contextProviderIsClaude={selectedProvider === "claudeAgent"}
+              onToggleThreadPanel={toggleThreadPanelStable}
               activeThreadEnvironmentId={activeThread.environmentId}
               activeThreadId={activeThread.id}
               isServerThread={isServerThread}
@@ -4269,10 +4277,10 @@ export default function ChatView(props: ChatViewProps) {
           onAddSideChat={sideChatsOffered ? openSideChatStable : undefined}
           browserAvailable={canOperatePreview && browserAvailable}
           terminalAvailable={activeProject !== null && canOperateTerminal}
-          diffAvailable={isServerThread && diffAvailable}
+          diffAvailable={!hideCoding && isServerThread && diffAvailable}
           filesAvailable={activeProject !== null}
-          pullRequestAvailable={pullRequestSurfaceAvailable}
-          pullRequestsAvailable={linkedItemsSurfaceAvailable}
+          pullRequestAvailable={!hideCoding && pullRequestSurfaceAvailable}
+          pullRequestsAvailable={!hideCoding && linkedItemsSurfaceAvailable}
           deviceAvailable={activeThreadRef !== null}
           sideChatAvailable={sideChat.available}
           sideChatDisabledReason={sideChatDisabledReason}

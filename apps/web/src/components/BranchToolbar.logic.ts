@@ -82,6 +82,7 @@ export function shouldShowEnvironmentIndicator(input: {
 }
 
 export function shouldShowComposerContextStrip(input: {
+  hideCoding?: boolean;
   isDraftHeroState: boolean;
   persistInActiveThreads: boolean;
   hasActiveProject: boolean;
@@ -90,6 +91,7 @@ export function shouldShowComposerContextStrip(input: {
 }): boolean {
   // A new thread always shows the strip, since it names the permissions the first send uses.
   return (
+    !input.hideCoding &&
     input.hasActiveProject &&
     (input.isDraftHeroState ||
       (input.persistInActiveThreads && (input.isGitRepo || input.showEnvironmentIndicator)))

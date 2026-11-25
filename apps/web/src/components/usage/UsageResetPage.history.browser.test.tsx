@@ -1,6 +1,8 @@
 import { expect, it, vi } from "vite-plus/test";
 import { render } from "../../../test/render";
 import { page } from "vite-plus/test/browser";
+vi.mock("./PlanOutlook", () => ({ PlanOutlook: () => null }));
+
 import { UsageResetPage } from "./UsageResetPage";
 import type { UsageSummaryInput } from "@t3tools/contracts";
 import "~/index.css";
