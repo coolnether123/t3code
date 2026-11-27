@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
-import { ProviderInstanceId, type CallOptions, type SpeechResponse } from "@t3tools/contracts";
+import {
+  OTIS_THREAD_ID,
+  OtisFront,
+  ProviderInstanceId,
+  type CallOptions,
+  type SpeechResponse,
+} from "@t3tools/contracts";
+import { frontSpeechMessage } from "~/components/otis/front/front.logic";
+import frontFixture from "../../../../apps/server/src/otis/fixtures/front-events.ndjson?raw";
 import { ThreadVoiceSession, type VoiceDependencies } from "./session";
 import type { SavedCall } from "@t3tools/client-runtime/voice-call";
 
@@ -107,6 +115,43 @@ afterEach(async () => {
 });
 
 describe("durable thread voice session", () => {
+  it("speaks a Front Door frame and acknowledges it after playback", async () => {
+    const f = fixture();
+    const started = deferred<void>();
+    const finished = deferred<void>();
+    const heard = deferred<void>();
+    const event = frontFixture
+      .trim()
+      .split(/\r?\n/)
+      .map(OtisFront.decodeFrontStreamLine)
+      .find(
+        (frame): frame is typeof OtisFront.SpeakEvent.Type =>
+          OtisFront.isKnownFrontEvent(frame) && frame.type === "speak" && frame.priority === "now",
+      )!;
+    const message = frontSpeechMessage({ event, turnId: "turn_002" }, 0);
+    f.audio.play.mockImplementation(async () => {
+      started.resolve();
+      await finished.promise;
+    });
+    const onPlayed = vi.fn(() => heard.resolve());
+    await f.session.start({ ...options, threadId: OTIS_THREAD_ID }, []);
+    f.session.observe([{ ...message, onPlayed }], false, "turn_002");
+    await started.promise;
+    expect(f.request).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "call.speak", text: event.text }),
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+    expect(onPlayed).not.toHaveBeenCalled();
+    finished.resolve();
+    await heard.promise;
+    expect(f.request).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "call.played" }),
+      expect.any(AbortSignal),
+      undefined,
+    );
+  });
+
   it("discards microphone input captured while muted and resumes on unmute", async () => {
     const f = fixture();
     await f.session.start(options, []);

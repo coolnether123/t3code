@@ -1,6 +1,3 @@
-import { OtisChrome } from "../otis/OtisChrome";
-import { SidebarProvider } from "../ui/sidebar";
-import "../otis/otis.css";
 import { injectHtmlRenderBootstrap } from "@t3tools/shared/htmlRender";
 import { HtmlRenderDocument } from "../files/BrowserDocumentFrame";
 import { flushSync } from "react-dom";
@@ -19,7 +16,6 @@ import {
   TurnItemId,
   ScheduledTaskId,
   ThreadId,
-  type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2Subagent,
 } from "@t3tools/contracts";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
@@ -2264,115 +2260,6 @@ it("renders automatic compaction as one live divider that finishes with its reas
     .toBeVisible();
   expect(container.querySelectorAll('[role="separator"]')).toHaveLength(1);
   expect(container.textContent).not.toContain("Compacting before");
-});
-
-it("shows Otis call status as navy pills in timeline order", async () => {
-  setup();
-  const fixture = makeStreamingTimelineFixture();
-  const source = fixture.visibleTurnItems.find(({ item }) => item.type === "user_message")!;
-  const sourceItem = source.item;
-  if (sourceItem.type !== "user_message") throw new Error("Expected user message fixture");
-  const at = DateTime.makeUnsafe("2026-10-25T15:23:00.000Z");
-  const call: OrchestrationV2ProjectedTurnItem = {
-    ...source,
-    sourceItemId: TurnItemId.make("call-ended"),
-    item: {
-      ...sourceItem,
-      id: TurnItemId.make("call-ended"),
-      threadId: ThreadId.make("otis-main"),
-      runId: null,
-      type: "system_notice",
-      message: "Call ended",
-      activity: { kind: "call.ended" },
-      startedAt: at,
-      updatedAt: at,
-    },
-  };
-  const entries = deriveTimelineEntriesFromVisibleTurnItems({
-    visibleTurnItems: [call, source],
-    optimisticMessages: [],
-  });
-  await using screen = await renderTimeline(entries, {
-    routeThreadKey: "environment-local:otis-main",
-  });
-  const label = `${new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(DateTime.formatIso(at)))} · Call ended`;
-  await expect.element(screen.getByText(label)).toBeVisible();
-  const chip = screen.container.querySelector("[data-otis-call-status]")!;
-  expect(chip.classList.contains("bg-otis-chip")).toBe(true);
-  expect(chip.classList.contains("text-otis-chip-text")).toBe(true);
-  expect(chip.classList.contains("ml-auto")).toBe(true);
-  expect(getComputedStyle(chip).backgroundColor).toBe("rgb(29, 42, 66)");
-  expect(chip.querySelector("[data-otis-hang-up]")).not.toBeNull();
-  expect(chip.closest("details")).toBeNull();
-  expect(
-    screen.container.querySelector("[data-message-role]")!.compareDocumentPosition(chip) &
-      Node.DOCUMENT_POSITION_FOLLOWING,
-  ).toBeTruthy();
-});
-
-it("shows the Otis transcript with folding at phone and desktop sizes", async () => {
-  setup();
-  const entries = [
-    message(
-      "The launcher fingerprints each brief, assigns a run ID, and submits it to the queue so every worker can be traced back to the chat that started it.",
-      { role: "assistant" },
-      "otis-1",
-    ),
-    message(
-      "This chunk changes the plan because you want installable phone apps. Here is what it actually does.\n\n" +
-        "Checks existing projects and tools, and keeps the work in its own branch. ".repeat(12),
-      { role: "assistant" },
-      "otis-2",
-    ),
-  ];
-  await page.viewport(390, 844);
-  const container = document.createElement("div");
-  container.style.cssText = "width:100%;height:100dvh;background:black;color:#ececec";
-  await using screen = await render(
-    <SidebarProvider>
-      <div
-        data-otis-screen="true"
-        style={{
-          width: "100%",
-          maxWidth: 760,
-          margin: "auto",
-          height: "100dvh",
-          position: "relative",
-          display: "flex",
-          flexDirection: "column",
-          paddingTop: 150,
-        }}
-      >
-        <MessagesTimeline
-          {...baseProps()}
-          routeThreadKey="environment-local:otis-main"
-          timelineEntries={entries}
-          liveFollowEnabled={false}
-        />
-        <OtisChrome
-          active={false}
-          ready
-          status="Ready"
-          start={() => {}}
-          end={() => {}}
-          mute={() => {}}
-          speaker={() => {}}
-        />
-      </div>
-    </SidebarProvider>,
-    { container },
-  );
-  await expect
-    .element(screen.getByRole("button", { name: "Show more", exact: true }))
-    .toBeVisible();
-  expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(390);
-  await page.screenshot({ path: "__screenshots__/otis-chat-390.png" });
-  await screen.getByRole("button", { name: "Show more", exact: true }).click();
-  await expect
-    .element(screen.getByRole("button", { name: "Show less", exact: true }))
-    .toBeVisible();
-  await page.viewport(1280, 900);
-  await page.screenshot({ path: "__screenshots__/otis-chat-desktop.png" });
 });
 
 function TimelineChangedFilesCard() {

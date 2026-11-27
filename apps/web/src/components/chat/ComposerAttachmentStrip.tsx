@@ -7,7 +7,7 @@ import type {
 } from "@t3tools/contracts";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import { T, useGT, useMessages } from "gt-react";
-import { CircleAlertIcon, ImageIcon, PaperclipIcon, PlusIcon, PlayIcon, XIcon } from "lucide-react";
+import { CircleAlertIcon, ImageIcon, PaperclipIcon, PlayIcon, XIcon } from "lucide-react";
 import { type ComponentProps, type Ref, useLayoutEffect, useRef } from "react";
 
 import {
@@ -762,13 +762,7 @@ export function ComposerAttachInput({
   );
 }
 
-export function ComposerAttachButton({
-  onOpenPicker,
-  otis = false,
-}: {
-  readonly onOpenPicker: () => void;
-  readonly otis?: boolean;
-}) {
+export function ComposerAttachButton({ onOpenPicker }: { readonly onOpenPicker: () => void }) {
   const gt = useGT();
   return (
     <Tooltip>
@@ -785,7 +779,7 @@ export function ComposerAttachButton({
         }
       >
         {/* The clip's weight sits in its upper loop; 1px down reads as centered on the row. */}
-        {otis ? <PlusIcon /> : <PaperclipIcon className="translate-y-px" />}
+        <PaperclipIcon className="translate-y-px" />
       </TooltipTrigger>
       <TooltipPopup>
         <T>Attach files</T>

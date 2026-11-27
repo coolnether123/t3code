@@ -6,8 +6,10 @@ import {
   useRouterState,
 } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
+import { OTIS_THREAD_ID } from "@t3tools/contracts";
 
 import { ThreadRouteView } from "../components/ThreadRouteView";
+import { OtisFrontView } from "../components/otis/front/OtisFrontView";
 import { GlobalVoiceInputIndicator } from "../components/chat/GlobalVoiceInputIndicator";
 import { isAppModalPage } from "../components/sidebar/mainAppLocation";
 import { SidebarInset } from "../components/ui/sidebar";
@@ -143,13 +145,23 @@ import { useShownThreadRouteTarget } from "../hooks/useShownThreadRouteTarget";
 function ChatRouteLayout() {
   // Render both routes here so draft promotion keeps the same ChatView mounted.
   const { shownTarget, modalOpen } = useShownThreadRouteTarget();
+  const otis =
+    shownTarget?.kind === "server" && shownTarget.threadRef.threadId === OTIS_THREAD_ID
+      ? shownTarget.threadRef
+      : null;
   return (
     <>
       <EnvironmentChatLocationTracker />
-      {shownTarget?.kind === "server" && !modalOpen ? (
+      {shownTarget?.kind === "server" && !otis && !modalOpen ? (
         <ThreadLinkPrompt threadRef={shownTarget.threadRef} />
       ) : null}
-      {shownTarget ? (
+      {otis ? (
+        <OtisFrontView
+          key={otis.environmentId}
+          environmentId={otis.environmentId}
+          background={modalOpen}
+        />
+      ) : shownTarget ? (
         <ThreadRouteView target={shownTarget} background={modalOpen} />
       ) : modalOpen ? (
         <SidebarInset className="h-dvh" />

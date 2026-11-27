@@ -1,6 +1,4 @@
 import { DISCONNECTED_COMPOSER_PLACEHOLDER } from "../../composerPlaceholder";
-import { OTIS_THREAD_ID } from "@t3tools/contracts";
-import { OtisDictation } from "../otis/OtisDictation";
 import { copySnapshot } from "./copySnapshot";
 import { VoiceInputSetup } from "./VoiceInputSetup";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
@@ -1122,7 +1120,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // so collapsing would leave the surface empty and squashed beneath it. An open
   // call keeps its controls mounted in the expanded footer too.
   const isComposerCollapsedMobile =
-    activeThread?.id !== OTIS_THREAD_ID &&
     isMobileViewport &&
     !forceExpandedOnMobile &&
     !isComposerFocused &&
@@ -1134,7 +1131,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerEditorRef = useRef<ComposerPromptEditorHandle>(null);
   const pasteAsTextShortcutUntilRef = useRef(0);
   const voiceRef = useRef<ThreadVoiceHandle>(null);
-  const [isOtisDictating, setIsOtisDictating] = useState(false);
   const composerFormRef = useRef<HTMLFormElement>(null);
   const composerAttachInputRef = useRef<HTMLInputElement>(null);
   const composerSurfaceRef = useRef<HTMLDivElement>(null);
@@ -3664,15 +3660,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onRemoveFile={removeComposerFileFromDraft}
       />
     ) : null;
-  const otisCompact =
-    activeThread?.id === OTIS_THREAD_ID &&
-    pendingUserInputs.length === 0 &&
-    !isComposerApprovalState;
   const composerAttachButton = showComposerAttachAction ? (
-    <ComposerAttachButton
-      otis={activeThread?.id === OTIS_THREAD_ID}
-      onOpenPicker={() => composerAttachInputRef.current?.click()}
-    />
+    <ComposerAttachButton onOpenPicker={() => composerAttachInputRef.current?.click()} />
   ) : null;
   return (
     <form
@@ -3789,7 +3778,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           <div
             ref={composerSurfaceRef}
             data-chat-composer-surface="true"
-            data-otis-compact={otisCompact ? "true" : undefined}
             data-chat-composer-mobile-collapsed={isComposerCollapsedMobile ? "true" : "false"}
             className={cn(
               "rounded-2xl transition-[background-color] duration-200",
@@ -3799,7 +3787,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               composerProviderState.composerSurfaceClassName,
             )}
           >
-            {otisCompact ? <div className="ml-4">{composerAttachButton}</div> : null}
             {showCollapsedMobilePromptRow ? (
               <div className="flex items-center justify-between gap-2 px-3 py-2">
                 <button
@@ -4018,31 +4005,27 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onCitationDraftSave={saveCitationDraftToPromptStable}
                     onPaste={onComposerPasteStable}
                     placeholder={
-                      activeThread?.id === OTIS_THREAD_ID &&
-                      !isComposerApprovalState &&
-                      !activePendingProgress
-                        ? gt("Message")
-                        : isVoiceActive
-                          ? gt("Type to Otis while you wait")
-                          : isComposerApprovalState
-                            ? activePendingApproval?.supportsFeedback
-                              ? gt("Send feedback to decline this request")
-                              : gt("Send a message to decline and redirect the agent")
-                            : activePendingProgress
-                              ? isChoiceOnlyPendingQuestion
-                                ? gt("Choose an option above")
-                                : activePendingProgress.activeQuestion?.options.length === 0
-                                  ? gt("Type your answer")
-                                  : gt(
-                                      "Type your own answer, or leave this blank to use the selected option",
-                                    )
-                              : projectSelectionRequired
-                                ? gt("Choose a project above to start a thread")
-                                : showProviderUnavailable
-                                  ? gt("Enable a provider in Settings to send a message")
-                                  : phase === "disconnected"
-                                    ? DISCONNECTED_COMPOSER_PLACEHOLDER
-                                    : (offeredPromptSuggestion ?? m(DEFAULT_COMPOSER_PLACEHOLDER))
+                      isVoiceActive
+                        ? gt("Type to Otis while you wait")
+                        : isComposerApprovalState
+                          ? activePendingApproval?.supportsFeedback
+                            ? gt("Send feedback to decline this request")
+                            : gt("Send a message to decline and redirect the agent")
+                          : activePendingProgress
+                            ? isChoiceOnlyPendingQuestion
+                              ? gt("Choose an option above")
+                              : activePendingProgress.activeQuestion?.options.length === 0
+                                ? gt("Type your answer")
+                                : gt(
+                                    "Type your own answer, or leave this blank to use the selected option",
+                                  )
+                            : projectSelectionRequired
+                              ? gt("Choose a project above to start a thread")
+                              : showProviderUnavailable
+                                ? gt("Enable a provider in Settings to send a message")
+                                : phase === "disconnected"
+                                  ? DISCONNECTED_COMPOSER_PLACEHOLDER
+                                  : (offeredPromptSuggestion ?? m(DEFAULT_COMPOSER_PLACEHOLDER))
                     }
                     placeholderSuffix={
                       offeredPromptSuggestion !== null ? (
@@ -4130,7 +4113,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     "hidden sm:flex",
                 )}
               >
-                {!otisCompact && composerAttachButton && !dictationTakesFooter ? (
+                {composerAttachButton && !dictationTakesFooter ? (
                   <div className="me-2">{composerAttachButton}</div>
                 ) : null}
                 <div
@@ -4155,17 +4138,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   >
                     {composerControls}
                   </div>
-                  {activeThread?.id === OTIS_THREAD_ID ? (
-                    <OtisDictation
-                      key={environmentId}
-                      environmentId={environmentId}
-                      disabled={isVoiceActive}
-                      onActiveChange={setIsOtisDictating}
-                      onText={(text) =>
-                        setPrompt(`${promptRef.current}${promptRef.current ? " " : ""}${text}`)
-                      }
-                    />
-                  ) : null}
                   <div className={cn("min-w-0", isVoiceActive && "order-first w-full")}>
                     {activeThread ? (
                       <ThreadVoiceControls
@@ -4188,7 +4160,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                           activeThread.latestRun?.status === "running"
                         }
                         enabled={
-                          !isOtisDictating &&
                           phase !== "connecting" &&
                           !noProviderAvailable &&
                           !projectSelectionRequired &&

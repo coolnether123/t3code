@@ -1,7 +1,4 @@
 import { useAgentInterface } from "~/hooks/useAgentInterface";
-import { OTIS_THREAD_ID } from "@t3tools/contracts";
-import { OtisChromeHost } from "./otis/OtisChromeHost";
-import "./otis/otis.css";
 import { m } from "../i18n/messages";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { useGT, useMessages } from "gt-react";
@@ -462,7 +459,6 @@ const DismissedFallbackWindowSchema = Schema.NullOr(Schema.String);
 const ignoreComposerFocus = () => {};
 
 export default function ChatView(props: ChatViewProps) {
-  const [otisHost, setOtisHost] = useState<HTMLDivElement | null>(null);
   const gt = useGT();
   const messages = useMessages();
   const {
@@ -3534,10 +3530,8 @@ export default function ChatView(props: ChatViewProps) {
   const content = (
     <div
       ref={setWorkspaceLayoutElement}
-      data-otis-screen={activeThread.id === OTIS_THREAD_ID ? "true" : undefined}
       className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background"
     >
-      {activeThread.id === OTIS_THREAD_ID ? <div ref={setOtisHost} id="otis-chrome" /> : null}
       {embedded ? null : (
         <DeviceSetupDialogHost
           threadKey={activeThreadKey}
@@ -4309,7 +4303,7 @@ export default function ChatView(props: ChatViewProps) {
       checkpoints={serverProjection?.checkpoints}
       checkpointScopes={serverProjection?.checkpointScopes}
     >
-      <OtisChromeHost value={otisHost}>{content}</OtisChromeHost>
+      {content}
     </FileMetadataThreadProvider>
   );
 }
