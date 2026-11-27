@@ -645,6 +645,9 @@ export async function runNightly(configFile, io = {}) {
               NodePath.join(import.meta.dirname, "t3-nightly-check.mjs"),
               "utf8",
             ),
+            testRunners: ["nightly-related-tests.mjs", "nightly-node-tests.mjs"].map((file) =>
+              NodeFS.readFileSync(NodePath.join(import.meta.dirname, "lib", file), "utf8"),
+            ),
           }),
         )
         .digest("hex");

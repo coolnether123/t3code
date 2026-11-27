@@ -8,6 +8,7 @@ import { act, fakeTimers, render as renderUi } from "../../../test/render";
 import type { RemoteOpenState } from "../../remoteOpen";
 
 const state = vi.hoisted(() => ({
+  agentInterface: false,
   allowed: new Set<string>(),
   remote: { mode: "local-exec" } as RemoteOpenState,
   clientEditors: ["vscode"] as readonly EditorId[],
@@ -17,6 +18,17 @@ const state = vi.hoisted(() => ({
   markHintSeen: vi.fn(),
   listeners: new Set<() => void>(),
 }));
+
+vi.mock(import("../../hooks/useSettings"), async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    getClientSettings: () => ({
+      ...actual.getClientSettings(),
+      agentInterface: state.agentInterface,
+    }),
+  };
+});
 
 vi.mock(import("../../state/session"), async (importOriginal) => {
   const { useSyncExternalStore } = await import("react");
@@ -66,6 +78,7 @@ vi.mock(import("../../remoteOpen"), async (importOriginal) => ({
 }));
 
 import { OpenInPicker } from "./OpenInPicker";
+import type { FileManagerAction } from "./OpenInPicker.logic";
 import {
   registerOpenFavoriteEditorCommand,
   useOpenFavoriteEditorShortcut,
@@ -76,6 +89,7 @@ const selected = EnvironmentId.make("selected");
 const editors: readonly EditorId[] = ["vscode"];
 
 async function setup() {
+  state.agentInterface = false;
   state.allowed.clear();
   state.remote = { mode: "local-exec" };
   state.clientEditors = editors;
@@ -98,7 +112,7 @@ async function setup() {
   async function renderPicker(
     availableEditors: readonly EditorId[] = editors,
     panel = false,
-    { openInCwd = "/work/project", revealFileManager = false } = {},
+    { openInCwd = "/work/project", fileManagerAction = "open" as FileManagerAction } = {},
   ) {
     await act(async () => {
       for (const listener of state.listeners) listener();
@@ -108,7 +122,7 @@ async function setup() {
           keybindings={DEFAULT_RESOLVED_KEYBINDINGS}
           availableEditors={availableEditors}
           openInCwd={openInCwd}
-          revealFileManager={revealFileManager}
+          fileManagerAction={fileManagerAction}
           displayMode={panel ? "panel" : "toolbar"}
           compact={!panel}
         />
@@ -168,6 +182,18 @@ async function setup() {
 }
 
 describe("host editor access", () => {
+  it("leaves the favorite editor shortcut unclaimed in Agent mode", async () => {
+    await using fixture = await setup();
+    state.allowed.add(selected);
+    state.agentInterface = true;
+    await fixture.renderPicker();
+    expect((await fixture.pressOpenFavorite()).defaultPrevented).toBe(false);
+    const { FavoriteEditorFallback } = fixture;
+    await act(async () => fixture.screen.rerender(<FavoriteEditorFallback />));
+    expect((await fixture.pressOpenFavorite()).defaultPrevented).toBe(false);
+    expect(state.run).not.toHaveBeenCalled();
+  });
+
   it("uses the selected grant for both the button and a retained shortcut", async () => {
     await using fixture = await setup();
     const { renderPicker, byLabel, primaryButton, click, pressOpenFavorite } = fixture;
@@ -186,6 +212,34 @@ describe("host editor access", () => {
     expect(primaryButton().disabled).toBe(true);
     expect(byLabel("Choose editor").disabled).toBe(true);
     expect((await pressOpenFavorite()).defaultPrevented).toBe(false);
+  });
+});
+
+describe("file manager", () => {
+  it("waits for the path's type, then shows a file in its folder", async () => {
+    await using fixture = await setup();
+    const { renderPicker, primaryButton, click, pressOpenFavorite } = fixture;
+    state.allowed.add(selected);
+    const openInCwd = "/work/project/notes.md";
+    await renderPicker(["file-manager"], false, { openInCwd, fileManagerAction: "unavailable" });
+
+    expect(primaryButton().disabled).toBe(true);
+    await click(primaryButton());
+    expect((await pressOpenFavorite()).defaultPrevented).toBe(false);
+    expect(state.run).not.toHaveBeenCalled();
+
+    // A failed open is not announced, so no timer outlives the test.
+    state.run.mockResolvedValueOnce(AsyncResult.failure(Cause.fail(new Error("No file manager"))));
+    await renderPicker(["file-manager"], false, { openInCwd, fileManagerAction: "reveal" });
+    await click(primaryButton());
+    expect(state.run.mock.calls).toEqual([
+      [
+        {
+          environmentId: selected,
+          input: { cwd: openInCwd, editor: "file-manager", reveal: true },
+        },
+      ],
+    ]);
   });
 });
 

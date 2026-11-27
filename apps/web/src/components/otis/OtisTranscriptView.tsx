@@ -113,6 +113,7 @@ function WorkerReply({ environmentId, nodeId }: { environmentId: EnvironmentId; 
     if (attempt.current?.text !== text) attempt.current = { text, id: randomUUID() };
     setSending(true);
     setResult("");
+    let accepted: boolean;
     try {
       const receipt = await runFleetAction(environmentId, {
         type: "message",
@@ -120,15 +121,18 @@ function WorkerReply({ environmentId, nodeId }: { environmentId: EnvironmentId; 
         text,
         requestId: attempt.current.id,
       });
-      if (!("accepted" in receipt) || !receipt.accepted) throw new Error();
-      attempt.current = null;
-      setDraft("");
-      setResult(gt("Message accepted."));
+      accepted = "accepted" in receipt && receipt.accepted;
     } catch {
-      setResult(gt("Otis could not confirm delivery. You can retry this message."));
-    } finally {
-      setSending(false);
+      accepted = false;
     }
+    setSending(false);
+    if (!accepted) {
+      setResult(gt("Otis could not confirm delivery. You can retry this message."));
+      return;
+    }
+    attempt.current = null;
+    setDraft("");
+    setResult(gt("Message accepted."));
   }
 
   return (
@@ -247,9 +251,8 @@ function Transcript({
       setError(
         cause instanceof Error ? cause.message : gt("Otis did not return the earlier messages."),
       );
-    } finally {
-      setLoadingOlder(false);
     }
+    setLoadingOlder(false);
   }
 
   return (

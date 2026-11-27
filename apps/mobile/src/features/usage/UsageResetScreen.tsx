@@ -8,6 +8,7 @@ import {
   watchPublicResetHistory,
   type PublicResetHistory,
 } from "@t3tools/client-runtime/publicResetHistory";
+import { useGT } from "gt-react-native";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { refreshCodexMonitor } from "@t3tools/client-runtime/usageRefresh";
 import { AppState, Linking, Pressable, ScrollView, Switch, View } from "react-native";
@@ -35,6 +36,7 @@ import { ResetCheckPanel } from "./ResetCheckPanel";
 import { CommunityCheckPanel } from "./CommunityCheckPanel";
 
 export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
+  const gt = useGT();
   const insets = useSafeAreaInsets();
   const [historyInput] = useState(() => ({ ...makeWindow(1), quotaHistoryOnly: true }));
   const [news, setNews] = useState<ResetNews>({
@@ -176,7 +178,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
     if (refreshActive.current) return;
     refreshActive.current = true;
     setRefreshing(true);
-    setRefreshMessage("Refreshing readings, API costs and public resets…");
+    setRefreshMessage(gt("Refreshing readings, API costs and public resets…"));
     await refreshCodexMonitor({
       trackerId: tracker?.environmentId,
       refreshHistory: history.refresh,
@@ -198,7 +200,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
     })
       .then(setRefreshMessage)
       .catch(() => {
-        setRefreshMessage("Refresh did not finish. Check your connection and try again.");
+        setRefreshMessage(gt("Refresh did not finish. Check your connection and try again."));
       })
       .finally(() => {
         refreshActive.current = false;
@@ -209,7 +211,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
   const current = values.at(-1);
   return (
     <View className="flex-1 bg-sheet">
-      <NativeStackScreenOptions options={{ title: "Codex monitor" }} />
+      <NativeStackScreenOptions options={{ title: gt("Codex monitor") }} />
       <ScrollView
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={() => void refreshMonitor()} />
@@ -230,26 +232,26 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
             accessibilityRole="button"
             onPress={onBack}
           >
-            <Text className="text-sm text-foreground">Back to usage</Text>
+            <Text className="text-sm text-foreground">{gt("Back to usage")}</Text>
           </Pressable>
           <Pressable
             className="min-h-11 justify-center"
             accessibilityRole="button"
-            accessibilityLabel="Refresh Codex usage"
+            accessibilityLabel={gt("Refresh Codex usage")}
             accessibilityState={{ busy: refreshing, disabled: refreshing }}
             disabled={refreshing}
             onPress={() => void refreshMonitor()}
           >
             <Text className="text-sm text-foreground">
-              {refreshing ? "Refreshing…" : "Refresh"}
+              {refreshing ? gt("Refreshing…") : gt("Refresh", { $context: "button action" })}
             </Text>
           </Pressable>
         </View>
         <Text accessibilityLiveRegion="polite" className="text-xs text-foreground-muted">
-          {refreshMessage || "Refresh checks saved readings, API costs and reset news."}
+          {refreshMessage || gt("Refresh checks saved readings, API costs and reset news.")}
         </Text>
         {history.isPending && !last ? (
-          <Text className="text-sm text-foreground-muted">Reading Codex usage…</Text>
+          <Text className="text-sm text-foreground-muted">{gt("Reading Codex usage…")}</Text>
         ) : null}
         {history.environments.map((entry) => {
           const saved = entry.summary?.quotaHistory;
@@ -257,17 +259,19 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
             entry.error ??
             saved?.message ??
             (entry.summary && saved === undefined
-              ? "Update this server to read quota history."
+              ? gt("Update this server to read quota history.")
               : null);
           return message ? (
             <Text key={entry.environmentId} className="text-sm text-foreground-muted">
-              {entry.label}: {message}
+              {gt("{computer}: {message}", { computer: entry.label, message })}
             </Text>
           ) : null;
         })}
         {!history.isPending && !last ? (
           <Text className="text-sm text-foreground-muted">
-            No saved quota observations yet. Start the background collector on a connected computer.
+            {gt(
+              "No saved quota observations yet. Start the background collector on a connected computer.",
+            )}
           </Text>
         ) : null}
         {tracker && current && last ? (
@@ -291,46 +295,62 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
               }
             />
             <View className="gap-3 border-t border-subtle pt-5">
-              <Text className="text-base font-t3-medium text-foreground">API-equivalent value</Text>
+              <Text className="text-base font-t3-medium text-foreground">
+                {gt("API-equivalent value")}
+              </Text>
               <View className="flex-row gap-5">
                 <View className="flex-1 gap-1">
-                  <Text className="text-xs text-foreground-muted">Used while monitored</Text>
+                  <Text className="text-xs text-foreground-muted">
+                    {gt("Used while monitored")}
+                  </Text>
                   <Text className="text-2xl text-foreground">
-                    {current.value.costUsd === null ? "Pending" : formatUsd(current.value.costUsd)}
+                    {current.value.costUsd === null
+                      ? gt("Pending", { $context: "cost estimate status" })
+                      : formatUsd(current.value.costUsd)}
                   </Text>
                 </View>
                 <View className="flex-1 gap-1">
                   <Text className="text-xs text-foreground-muted">
-                    Remaining quota at API prices
+                    {gt("Remaining quota at API prices")}
                   </Text>
                   <Text className="text-2xl text-foreground">
                     {current.value.remainingValueUsd === null
-                      ? "Learning"
+                      ? gt("Learning", { $context: "cost calibration status" })
                       : `≈ ${formatUsd(current.value.remainingValueUsd)}`}
                   </Text>
                 </View>
               </View>
               {current.value.costObservedUntil ? (
                 <Text className="text-xs text-foreground-muted">
-                  Observed cost is complete through{" "}
-                  {new Date(current.value.costObservedUntil).toLocaleString()}; newer transcript
-                  usage is still being read.
+                  {gt(
+                    "Observed cost is complete through {time}; newer transcript usage is still being read.",
+                    {
+                      time: new Date(current.value.costObservedUntil).toLocaleString(),
+                    },
+                  )}
                 </Text>
               ) : null}
               {current.value.historicalCalibration ? (
                 <Text className="text-xs text-foreground-muted">
-                  Remaining value is provisional, calibrated from{" "}
-                  {new Date(current.value.historicalCalibration.since).toLocaleString()} to{" "}
-                  {new Date(current.value.historicalCalibration.until).toLocaleString()}.
-                  Current-cycle calibration replaces it after enough measured usage.
+                  {gt(
+                    "Remaining value is provisional, calibrated from {start} to {end}. Current-cycle calibration replaces it after enough measured usage.",
+                    {
+                      start: new Date(current.value.historicalCalibration.since).toLocaleString(),
+                      end: new Date(current.value.historicalCalibration.until).toLocaleString(),
+                    },
+                  )}
                 </Text>
               ) : null}
               {current.period.usedPercentagePoints < 5 &&
               current.value.remainingValueUsd === null ? (
                 <Text className="text-xs text-foreground-muted">
-                  {current.period.usedPercentagePoints} of 5 percentage points observed. The{" "}
-                  {100 - last.remainingPercent}% cycle total includes usage before monitoring and
-                  cannot price this shorter interval.
+                  {gt(
+                    "{observed} of 5 percentage points observed. The {used}% cycle total includes usage before monitoring and cannot price this shorter interval.",
+                    {
+                      observed: current.period.usedPercentagePoints,
+                      used: 100 - last.remainingPercent,
+                    },
+                  )}
                 </Text>
               ) : null}
               {current.value.costUsd === null || current.period.usedPercentagePoints >= 5 ? (
@@ -338,21 +358,27 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
               ) : null}
               {current.value.cachedAt ? (
                 <Text className="text-xs text-foreground-muted">
-                  Last complete calculation: {new Date(current.value.cachedAt).toLocaleString()}.
+                  {gt("Last complete calculation: {time}.", {
+                    time: new Date(current.value.cachedAt).toLocaleString(),
+                  })}
                 </Text>
               ) : null}
               <Text className="text-xs text-foreground-muted">
-                Token-price estimate, not a bill or cash balance. Codex only.
+                {gt("Token-price estimate, not a bill or cash balance. Codex only.")}
               </Text>
             </View>
             <View className="gap-3 border-t border-subtle pt-5">
               <Text className="text-base font-t3-medium text-foreground">
-                Resets while monitored
+                {gt("Resets while monitored")}
               </Text>
               {historicalPeriods.length < 2 ? (
                 <Text className="text-sm text-foreground-muted">
-                  No reset observed since {new Date(samples[0]!.observedAt).toLocaleString()}. New
-                  resets will appear here with the usage left beforehand.
+                  {gt(
+                    "No reset observed since {time}. New resets will appear here with the usage left beforehand.",
+                    {
+                      time: new Date(samples[0]!.observedAt).toLocaleString(),
+                    },
+                  )}
                 </Text>
               ) : (
                 historicalPeriods
@@ -364,25 +390,33 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
                       <View key={period.id} className="gap-1">
                         <Text className="text-sm text-foreground">
                           {period.resetKind === "ambiguous"
-                            ? "Usage window changed"
-                            : "Usage returned"}{" "}
-                          · {period.last.remainingPercent}% left beforehand
+                            ? gt("Usage window changed · {percent}% left beforehand", {
+                                percent: period.last.remainingPercent,
+                              })
+                            : gt("Usage returned · {percent}% left beforehand", {
+                                percent: period.last.remainingPercent,
+                              })}
                         </Text>
                         <Text className="text-xs text-foreground-muted">
-                          {new Date(period.last.observedAt).toLocaleString()} to{" "}
-                          {new Date(period.next!.observedAt).toLocaleString()}
+                          {gt("{start} to {end}", {
+                            start: new Date(period.last.observedAt).toLocaleString(),
+                            end: new Date(period.next!.observedAt).toLocaleString(),
+                          })}
                         </Text>
                         <Text className="text-xs text-foreground-muted">
                           {value?.costUsd !== null && value !== undefined
-                            ? `${formatUsd(value.costUsd)} observed cost${
-                                value.costObservedUntil
-                                  ? ` through ${new Date(value.costObservedUntil).toLocaleString()}`
-                                  : ""
-                              } · `
+                            ? value.costObservedUntil
+                              ? gt("{amount} observed cost through {time} · ", {
+                                  amount: formatUsd(value.costUsd),
+                                  time: new Date(value.costObservedUntil).toLocaleString(),
+                                })
+                              : gt("{amount} observed cost · ", {
+                                  amount: formatUsd(value.costUsd),
+                                })
                             : ""}
                           {value?.unusedValueUsd === null || value === undefined
-                            ? "Dollar estimate not established"
-                            : `≈ ${formatUsd(value.unusedValueUsd)} unused`}
+                            ? gt("Dollar estimate not established")
+                            : gt("≈ {amount} unused", { amount: formatUsd(value.unusedValueUsd) })}
                         </Text>
                       </View>
                     );
@@ -396,22 +430,26 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
               onPress={() => setShowTracking(!showTracking)}
             >
               <Text className="text-sm text-foreground">
-                Tracking and computers {showTracking ? "−" : "+"}
+                {gt("Tracking and computers {indicator}", { indicator: showTracking ? "−" : "+" })}
               </Text>
             </Pressable>
             {showTracking ? (
               <View className="gap-3">
                 <Text className="text-xs text-foreground-muted">
-                  Monitoring since {new Date(samples[0]!.observedAt).toLocaleString()}.{" "}
-                  {samples.length} readings. Older history stays saved but is excluded after a
-                  day-long monitoring gap.
+                  {gt(
+                    "Monitoring since {time}. {count, plural, one {{count} reading} other {{count} readings}}. Older history stays saved but is excluded after a day-long monitoring gap.",
+                    {
+                      time: new Date(samples[0]!.observedAt).toLocaleString(),
+                      count: samples.length,
+                    },
+                  )}
                 </Text>
                 <Text className="text-xs text-foreground-muted">
-                  The collector records every five minutes while the computer is awake and signed
-                  in. Public reset news is checked every five minutes while this page is open,
-                  without sending account or usage data.
+                  {gt(
+                    "The collector records every five minutes while the computer is awake and signed in. Public reset news is checked every five minutes while this page is open, without sending account or usage data.",
+                  )}
                 </Text>
-                <Text className="text-sm text-foreground">Quota source</Text>
+                <Text className="text-sm text-foreground">{gt("Quota source")}</Text>
                 {trackers.map((entry) => (
                   <Pressable
                     key={entry.environmentId}
@@ -421,12 +459,15 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
                     onPress={() => setTrackerId(entry.environmentId)}
                   >
                     <Text className="text-sm text-foreground">
-                      {entry === tracker ? "Selected: " : ""}
-                      {entry.label}
+                      {entry === tracker
+                        ? gt("Selected: {computer}", { computer: entry.label })
+                        : entry.label}
                     </Text>
                   </Pressable>
                 ))}
-                <Text className="text-sm text-foreground">Computers in dollar estimates</Text>
+                <Text className="text-sm text-foreground">
+                  {gt("Computers in dollar estimates")}
+                </Text>
                 {costs.environments.map((entry) => (
                   <View
                     key={entry.environmentId}
@@ -434,7 +475,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
                   >
                     <Text className="flex-1 text-sm text-foreground">{entry.label}</Text>
                     <Switch
-                      accessibilityLabel={`Include ${entry.label}`}
+                      accessibilityLabel={gt("Include {computer}", { computer: entry.label })}
                       value={selectedIds === null || selectedIds.includes(entry.environmentId)}
                       onValueChange={(checked) => {
                         const ids = selectedIds ?? costs.environments.map((e) => e.environmentId);
@@ -448,8 +489,9 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
                   </View>
                 ))}
                 <Text className="text-xs text-foreground-muted">
-                  Choose computers using the same Codex account. Percentages are never added across
-                  machines. Account identity and copied chats cannot be verified here.
+                  {gt(
+                    "Choose computers using the same Codex account. Percentages are never added across machines. Account identity and copied chats cannot be verified here.",
+                  )}
                 </Text>
               </View>
             ) : null}
@@ -458,27 +500,29 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
         <View className="gap-3 border-t border-subtle pt-5">
           <View className="flex-row items-center justify-between gap-3">
             <Text className="flex-1 text-base font-t3-medium text-foreground">
-              Estimated use between public resets
+              {gt("Estimated use between public resets")}
             </Text>
             <Pressable
               accessibilityRole="link"
               className="min-h-11 justify-center"
               onPress={() => void Linking.openURL("https://codex-resets.com/")}
             >
-              <Text className="text-xs text-foreground-muted">Codex Resets</Text>
+              <Text className="text-xs text-foreground-muted">{gt("Codex Resets")}</Text>
             </Pressable>
           </View>
           <Text className="text-xs leading-relaxed text-foreground-muted">
-            T3 backdates regular public reset announcements, then totals recorded Codex transcript
-            usage between them at current API rates. No account or transcript data is sent to the
-            source. Announcement and propagation times may differ, so these are API-equivalent
-            estimates.
+            {gt(
+              "T3 backdates regular public reset announcements, then totals recorded Codex transcript usage between them at current API rates. No account or transcript data is sent to the source. Announcement and propagation times may differ, so these are API-equivalent estimates.",
+            )}
           </Text>
           {bankedAnnouncements.length > 0 ? (
             <Text className="text-xs text-foreground-muted">
-              {bankedAnnouncements.length} banked reset grant
-              {bankedAnnouncements.length === 1 ? " is" : "s are"} excluded from period boundaries
-              because redemption is account-specific.
+              {gt(
+                "{count, plural, one {{count} banked reset grant is excluded from period boundaries because redemption is account-specific.} other {{count} banked reset grants are excluded from period boundaries because redemption is account-specific.}}",
+                {
+                  count: bankedAnnouncements.length,
+                },
+              )}
             </Text>
           ) : null}
           {publicCosts.environments.map((environment) => {
@@ -490,7 +534,9 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
               >
                 <Text className="flex-1 text-sm text-foreground">{environment.label}</Text>
                 <Switch
-                  accessibilityLabel={`Include ${environment.label} in public reset estimates`}
+                  accessibilityLabel={gt("Include {computer} in public reset estimates", {
+                    computer: environment.label,
+                  })}
                   value={checked}
                   onValueChange={(enabled) => {
                     const ids = selectedIds ?? effectivePublicSelectedIds;
@@ -505,14 +551,16 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
             );
           })}
           {publicHistory.status === "loading" ? (
-            <Text className="text-sm text-foreground-muted">Reading public reset history…</Text>
+            <Text className="text-sm text-foreground-muted">
+              {gt("Reading public reset history…")}
+            </Text>
           ) : publicHistory.status === "unavailable" ? (
             <Text className="text-sm text-foreground-muted">
-              Codex Resets is unavailable. Saved quota observations still work normally.
+              {gt("Codex Resets is unavailable. Saved quota observations still work normally.")}
             </Text>
           ) : publicEstimates.length === 0 ? (
             <Text className="text-sm text-foreground-muted">
-              The public history does not contain two regular resets yet.
+              {gt("The public history does not contain two regular resets yet.")}
             </Text>
           ) : (
             [...publicEstimates].reverse().map((row) => {
@@ -529,24 +577,37 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
                 <View key={row.interval.id} className="gap-1 border-t border-subtle pt-3">
                   <View className="flex-row justify-between gap-3">
                     <Text className="flex-1 text-sm text-foreground">
-                      Reset {new Date(row.endedBy.announcedAt).toLocaleString()}
+                      {gt("Reset {time}", {
+                        time: new Date(row.endedBy.announcedAt).toLocaleString(),
+                      })}
                     </Text>
                     <Text className="text-sm text-foreground">
-                      {row.costUsd === null ? "Unavailable" : formatUsd(row.costUsd)}
+                      {row.costUsd === null
+                        ? gt("Unavailable", { $context: "cost estimate status" })
+                        : formatUsd(row.costUsd)}
                     </Text>
                   </View>
                   <Text className="text-xs text-foreground-muted">
-                    From {new Date(row.startedBy.announcedAt).toLocaleString()}
-                    {row.records > 0 ? ` · ${row.records.toLocaleString()} usage rows` : ""}
-                    {tokens > 0 ? ` · ${formatTokens(tokens)} tokens` : ""}
+                    {gt("From {time}", {
+                      time: new Date(row.startedBy.announcedAt).toLocaleString(),
+                    })}
+                    {row.records > 0
+                      ? gt(" · {count} usage rows", { count: row.records.toLocaleString() })
+                      : ""}
+                    {tokens > 0 ? gt(" · {count} tokens", { count: formatTokens(tokens) }) : ""}
                   </Text>
                   {row.reason ? (
                     <Text className="text-xs text-foreground-muted">{row.reason}</Text>
                   ) : null}
                   {row.models.map((model) => (
                     <Text key={model.model} className="text-xs text-foreground-muted">
-                      {model.model}:{" "}
-                      {model.unpricedRecords > 0 ? "Unpriced" : formatUsd(model.costUsd)}
+                      {gt("{model}: {cost}", {
+                        model: model.model,
+                        cost:
+                          model.unpricedRecords > 0
+                            ? gt("Unpriced", { $context: "model usage cost status" })
+                            : formatUsd(model.costUsd),
+                      })}
                     </Text>
                   ))}
                 </View>

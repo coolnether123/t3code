@@ -105,7 +105,17 @@ for (const name of ["format", "lint", "agent-context", "typecheck", "tests"]) {
           if (result.status !== 0) classified = false;
           continue;
         }
-        const suites = JSON.parse(NodeFS.readFileSync(report, "utf8")).testResults;
+        const { testResults: suites, unhandledErrors } = JSON.parse(
+          NodeFS.readFileSync(report, "utf8"),
+        );
+        if (unhandledErrors?.length) {
+          exit = 1;
+          classified = false;
+          NodeFS.writeSync(
+            log,
+            `Vitest reported ${unhandledErrors.length} unhandled errors in ${report}\n`,
+          );
+        }
         suiteCount += suites.length;
         let failedBatch = false;
         for (const suite of suites) {

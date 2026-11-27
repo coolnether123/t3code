@@ -145,6 +145,7 @@ await page.viewport(1400, 900);
 // A returning user: the first-run gate would otherwise wait on onboarding evidence.
 __setClientSettingsForTests({
   ...DEFAULT_CLIENT_SETTINGS,
+  agentInterface: false,
   onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
 });
 
@@ -410,10 +411,15 @@ const openSettings =
   (router: AppRouter, to: "/settings/general" | "/settings/appearance") => async () => {
     await act(() => router.navigate({ to }));
     // A section title from each page, since neither page has a heading that names it.
-    const name = to === "/settings/general" ? "Time format" : "Interface";
-    await expect.element(page.getByRole("heading", { name, exact: true })).toBeVisible();
-    // Appearance highlights its code font preview off-thread, then attaches it in a shadow root.
-    if (to === "/settings/appearance") {
+    if (to === "/settings/general") {
+      await expect
+        .element(page.getByRole("heading", { name: "Time format", exact: true }))
+        .toBeVisible();
+    } else {
+      await vi.waitFor(() =>
+        expect(document.querySelector("#appearance-interface h2")).toBeVisible(),
+      );
+      // Appearance highlights its code font preview off-thread, then attaches it in a shadow root.
       await vi.waitFor(
         () =>
           expect([...document.querySelectorAll("div")].some((node) => node.shadowRoot)).toBe(true),

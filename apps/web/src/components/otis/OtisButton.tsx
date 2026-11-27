@@ -1,3 +1,4 @@
+import { useGT } from "gt-react";
 import { OtisRing } from "./OtisRing";
 import { useEffect, useRef, useState } from "react";
 import { ThreadId, type EnvironmentId, type ScopedThreadRef } from "@t3tools/contracts";
@@ -12,6 +13,7 @@ export function OtisButton({
   environmentId: EnvironmentId | null;
   onOpen: (thread: ScopedThreadRef) => unknown;
 }) {
+  const gt = useGT();
   const abort = useRef<AbortController | null>(null);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Cancel the in-flight request when the button unmounts.
   useEffect(() => () => abort.current?.abort(), []);
@@ -35,18 +37,18 @@ export function OtisButton({
               controller.signal,
             );
             if (controller.signal.aborted) return;
-            if (!result.threadId) throw new Error("Otis chat could not be opened.");
-            await onOpen(scopeThreadRef(environmentId, ThreadId.make(result.threadId)));
+            if (result.threadId)
+              await onOpen(scopeThreadRef(environmentId, ThreadId.make(result.threadId)));
+            else setError(gt("Otis chat could not be opened."));
           } catch (error) {
             if (!controller.signal.aborted)
-              setError(error instanceof Error ? error.message : "Otis is unavailable.");
-          } finally {
-            if (!controller.signal.aborted) setBusy(false);
+              setError(error instanceof Error ? error.message : gt("Otis is unavailable."));
           }
+          if (!controller.signal.aborted) setBusy(false);
         }}
       >
         <OtisRing small />
-        {busy ? "Opening Otis..." : "Otis"}
+        {busy ? gt("Opening Otis...") : gt("Otis")}
       </button>
       {error ? <p role="alert">{error}</p> : null}
     </>

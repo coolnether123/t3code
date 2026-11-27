@@ -1,5 +1,6 @@
 import type { UsageQuotaSample, UsageSummary } from "@t3tools/contracts";
 import { QUOTA_STALE_MS, QUOTA_WEEK_MS, quotaForecast } from "@t3tools/shared/usageQuotaForecast";
+import { msg } from "gt-react";
 
 export type LimitProvider = "codex" | "claude" | "antigravity";
 export type LimitProviderFilter = LimitProvider | "both";
@@ -33,7 +34,7 @@ export function limitWindows(summary: UsageSummary | null | undefined): readonly
       key: CODEX_WEEKLY_KEY,
       provider: "codex",
       windowId: "weekly",
-      label: "Weekly",
+      label: msg("Weekly"),
       windowMs: QUOTA_WEEK_MS,
       status:
         codex === undefined || (codex.status === "ready" && codex.samples.length === 0)
@@ -42,7 +43,7 @@ export function limitWindows(summary: UsageSummary | null | undefined): readonly
       message:
         codex?.message ??
         (codex === undefined && summary !== null && summary !== undefined
-          ? "This computer's server does not report quota history."
+          ? msg("This computer's server does not report quota history.")
           : null),
       samples: codex?.status === "ready" ? codex.samples : [],
     },
@@ -65,10 +66,10 @@ export function limitWindows(summary: UsageSummary | null | undefined): readonly
       key: "claude:seven_day",
       provider: "claude",
       windowId: "seven_day",
-      label: "Weekly",
+      label: msg("Weekly"),
       windowMs: QUOTA_WEEK_MS,
       status: "missing",
-      message: "Update this computer's T3 server to record Claude limits.",
+      message: msg("Update this computer's T3 server to record Claude limits."),
       samples: [],
     });
   }

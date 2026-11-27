@@ -85,7 +85,7 @@ export function lintAgainstBase(root, files, base, artifact) {
   const linkedModules = [];
   const cleanup = () => {
     for (const modules of linkedModules) NodeFS.unlinkSync(modules);
-    const removed = execute("git", ["worktree", "remove", tree], root);
+    const removed = execute("git", ["-c", "core.longpaths=true", "worktree", "remove", tree], root);
     if (removed.status !== 0) throw new Error(`Cannot clean lint baseline: ${removed.stderr}`);
   };
   try {

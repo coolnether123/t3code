@@ -30,6 +30,7 @@ import {
   type QuotaValueSnapshot,
 } from "@t3tools/shared/usageQuota";
 import { Link } from "@tanstack/react-router";
+import { msg, T, useGT, useMessages } from "gt-react";
 import { RefreshCwIcon } from "lucide-react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
@@ -81,14 +82,15 @@ const TABS: readonly {
   readonly label: string;
   readonly codexOnly?: true;
 }[] = [
-  { id: "history", label: "Reset history", codexOnly: true },
-  { id: "cycles", label: "Cycles" },
-  { id: "models", label: "Models" },
-  { id: "planner", label: "Planner", codexOnly: true },
-  { id: "public", label: "Public resets", codexOnly: true },
+  { id: "history", label: msg("Reset history"), codexOnly: true },
+  { id: "cycles", label: msg("Cycles") },
+  { id: "models", label: msg("Models") },
+  { id: "planner", label: msg("Planner"), codexOnly: true },
+  { id: "public", label: msg("Public resets"), codexOnly: true },
 ];
 
 function PendingHistoryStatus() {
+  const gt = useGT();
   const [waitExceeded, setWaitExceeded] = useState(false);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Cancel the loading warning timer when this status unmounts.
   useEffect(() => {
@@ -98,29 +100,37 @@ function PendingHistoryStatus() {
   return (
     <p role="status" className="text-sm text-muted-foreground">
       {waitExceeded
-        ? "Saved readings are taking longer than expected. Check this computer's connection or reload the page."
-        : "Reading saved limits…"}
+        ? gt(
+            "Saved readings are taking longer than expected. Check this computer's connection or reload the page.",
+          )
+        : gt("Reading saved limits…")}
     </p>
   );
 }
 
 /** Shown in place of the chart when the selected limit has no saved readings. */
 function LimitNotRecorded({ limit }: { readonly limit: LimitWindow }) {
-  const name = `${LIMIT_PROVIDER_NAMES[limit.provider]} ${limit.label.toLowerCase()} limit`;
+  const gt = useGT();
+  const name = gt("{provider} {window} limit", {
+    provider: LIMIT_PROVIDER_NAMES[limit.provider],
+    window: limit.label.toLowerCase(),
+  });
   return (
     <section className="rounded-lg border border-dashed border-border p-5" aria-label={name}>
-      <h2 className="text-sm font-medium">No saved readings for the {name} yet</h2>
+      <h2 className="text-sm font-medium">
+        {gt("No saved readings for the {name} yet", { name })}
+      </h2>
       {limit.message ? <p className="mt-2 text-sm text-muted-foreground">{limit.message}</p> : null}
       <p className="mt-2 max-w-2xl text-xs leading-relaxed text-muted-foreground">
         {limit.provider === "claude" ? (
-          <>
+          <T>
             T3 reads Claude's session and weekly limits through the Claude CLI on this computer
             every few minutes, without sending a prompt. If the CLI is signed out, run{" "}
             <code className="rounded bg-muted px-1 py-0.5">claude auth login</code> once in a
             terminal; readings appear within a few minutes.
-          </>
+          </T>
         ) : (
-          <>Codex readings come from the Codex Limits tracker running on this computer.</>
+          <T>Codex readings come from the Codex Limits tracker running on this computer.</T>
         )}
       </p>
     </section>
@@ -128,6 +138,8 @@ function LimitNotRecorded({ limit }: { readonly limit: LimitWindow }) {
 }
 
 export function UsageResetPage() {
+  const gt = useGT();
+  const m = useMessages();
   const [historyInput] = useState(() => ({ ...makeWindow(1), quotaHistoryOnly: true }));
   const [view, setView] = useState(readLimitsView);
   const updateView = (next: Partial<LimitsView>) =>
@@ -186,11 +198,17 @@ export function UsageResetPage() {
         history.environments.find((environment) => environment.summary !== null)?.summary,
     ))();
   const visibleWindows = (() =>
-    allWindows.filter(
-      (limit): limit is LimitWindow & { provider: "codex" | "claude" } =>
-        limit.provider !== "antigravity" &&
-        (view.provider === "both" || limit.provider === view.provider),
-    ))();
+    allWindows
+      .filter(
+        (limit): limit is LimitWindow & { provider: "codex" | "claude" } =>
+          limit.provider !== "antigravity" &&
+          (view.provider === "both" || limit.provider === view.provider),
+      )
+      .map((limit) => ({
+        ...limit,
+        label: m(limit.label),
+        message: limit.message ? m(limit.message) : limit.message,
+      })))();
   const selectedWindow = (() =>
     visibleWindows.find((limit) => limit.key === view.windowKey) ??
     visibleWindows.find(hasReadings) ??
@@ -416,7 +434,7 @@ export function UsageResetPage() {
           };
     }))();
   const costScope =
-    selected.length === 0 ? "no computers" : selected.map((entry) => entry.label).join(", ");
+    selected.length === 0 ? gt("no computers") : selected.map((entry) => entry.label).join(", ");
   const currentValues = (() =>
     quotaValueSnapshots(
       source?.environmentId,
@@ -513,7 +531,7 @@ export function UsageResetPage() {
     if (refreshActive.current) return;
     refreshActive.current = true;
     setRefreshing(true);
-    setRefreshMessage("Refreshing readings and API costs…");
+    setRefreshMessage(gt("Refreshing readings and API costs…"));
     try {
       setRefreshMessage(
         await refreshCodexMonitor({
@@ -549,7 +567,7 @@ export function UsageResetPage() {
         }),
       );
     } catch {
-      setRefreshMessage("Refresh did not finish. Check your connection and try again.");
+      setRefreshMessage(gt("Refresh did not finish. Check your connection and try again."));
     }
     refreshActive.current = false;
     setRefreshing(false);
@@ -584,38 +602,55 @@ export function UsageResetPage() {
       environment.isPending &&
       environment.connection.phase === "reconnecting"
     ) {
-      return `${environment.label} is reconnecting. Limits appear when it is back.`;
+      return gt("{computer} is reconnecting. Limits appear when it is back.", {
+        computer: environment.label,
+      });
     }
     return null;
   })();
   const chartRef = useRef<HTMLDivElement>(null);
   const valueNote = current
     ? current.value.costObservedUntil
-      ? `API value is complete through ${dateTime(current.value.costObservedUntil)}; newer transcript usage is still being read.`
+      ? gt("API value is complete through {date}; newer transcript usage is still being read.", {
+          date: dateTime(current.value.costObservedUntil),
+        })
       : current.value.historicalCalibration
-        ? `Remaining value is provisional, calibrated from ${dateTime(current.value.historicalCalibration.since)} to ${dateTime(current.value.historicalCalibration.until)} until this cycle has enough measured use.`
+        ? gt(
+            "Remaining value is provisional, calibrated from {since} to {until} until this cycle has enough measured use.",
+            {
+              since: dateTime(current.value.historicalCalibration.since),
+              until: dateTime(current.value.historicalCalibration.until),
+            },
+          )
         : current.period.usedPercentagePoints < 5 && current.value.remainingValueUsd === null
-          ? `${current.period.usedPercentagePoints} of 5 percentage points observed; more readings are needed to price what is left.`
+          ? gt(
+              "{observed} of 5 percentage points observed; more readings are needed to price what is left.",
+              {
+                observed: current.period.usedPercentagePoints,
+              },
+            )
           : current.value.reason
     : null;
 
   return (
-    <AppRouteModal label="Limits">
+    <AppRouteModal label={gt("Limits")}>
       <header className="flex min-h-12 shrink-0 items-center border-b px-3 py-1.5 sm:ps-5 sm:pe-2">
         <div className="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
           <Link
             to="/usage"
             className="inline-flex min-h-11 items-center rounded-md text-sm text-muted-foreground hover:text-foreground"
           >
-            Usage
+            <T>Usage</T>
           </Link>
           <span aria-hidden className="text-muted-foreground">
             /
           </span>
-          <h1 className="truncate text-sm font-medium">Limits</h1>
+          <h1 className="truncate text-sm font-medium">
+            <T>Limits</T>
+          </h1>
           <div className="order-last w-full sm:order-none sm:ms-2 sm:w-auto">
             <ToggleGroup
-              aria-label="Providers"
+              aria-label={gt("Providers")}
               variant="segmented"
               value={[view.provider]}
               onValueChange={(value) => {
@@ -627,7 +662,9 @@ export function UsageResetPage() {
             >
               <Toggle value="codex">Codex</Toggle>
               <Toggle value="claude">Claude</Toggle>
-              <Toggle value="both">Both</Toggle>
+              <Toggle value="both">
+                <T>Both</T>
+              </Toggle>
             </ToggleGroup>
           </div>
           <div className="ms-auto flex items-center gap-1">
@@ -660,8 +697,8 @@ export function UsageResetPage() {
               className="size-9"
               variant="ghost"
               size="icon-sm"
-              aria-label="Refresh limits"
-              title="Refresh limits"
+              aria-label={gt("Refresh limits")}
+              title={gt("Refresh limits")}
               aria-busy={refreshing}
               disabled={refreshing}
               onClick={() => void refreshMonitor()}
@@ -687,7 +724,9 @@ export function UsageResetPage() {
           ) : null}
           {!history.isPending && history.environments.length === 0 ? (
             <p role="status" className="py-6 text-sm text-muted-foreground">
-              No saved limit readings yet. They appear once a connected computer records them.
+              <T>
+                No saved limit readings yet. They appear once a connected computer records them.
+              </T>
             </p>
           ) : null}
           <PlanOutlook
@@ -714,23 +753,28 @@ export function UsageResetPage() {
           ) : null}
           {view.provider !== "claude" ? (
             <section
-              aria-label="Codex credit balance"
+              aria-label={gt("Codex credit balance")}
               className="rounded-xl border border-border p-4 text-sm"
             >
-              <p className="font-medium">Codex credits</p>
+              <p className="font-medium">
+                <T>Codex credits</T>
+              </p>
               <p className="mt-1 text-xl tabular-nums">
                 {creditReading?.credits?.unlimited
-                  ? "Unlimited"
+                  ? gt("Unlimited")
                   : creditBalance != null
                     ? formatCredits(Number(creditBalance))
-                    : "No credit reading yet"}
+                    : gt("No credit reading yet")}
               </p>
               {creditReading ? (
                 <p className="mt-1 text-xs text-muted-foreground">
                   {creditChange !== null && previousCreditReading
-                    ? `${creditChange > 0 ? "+" : ""}${formatCredits(creditChange)} credits since ${dateTime(previousCreditReading.observedAt)}. `
-                    : "Change available after two balance readings. "}
-                  Last reading {dateTime(creditReading.observedAt)}.
+                    ? gt("{count} credits since {date}.", {
+                        count: `${creditChange > 0 ? "+" : ""}${formatCredits(creditChange)}`,
+                        date: dateTime(previousCreditReading.observedAt),
+                      })
+                    : gt("Change available after two balance readings.")}{" "}
+                  {gt("Last reading {date}.", { date: dateTime(creditReading.observedAt) })}
                 </p>
               ) : null}
             </section>
@@ -750,7 +794,7 @@ export function UsageResetPage() {
                 selectedCycle={selectedCycle}
                 onCycleChange={setSelectedCycle}
                 windowMs={selectedWindow.windowMs}
-                title={`${selectedWindow.label} limit`}
+                title={gt("{window} limit", { window: selectedWindow.label })}
                 providerName={LIMIT_PROVIDER_NAMES[quotaProvider]}
                 {...(quotaProvider === "codex" ? { news } : {})}
                 manualResets={
@@ -784,16 +828,20 @@ export function UsageResetPage() {
                           <div id="api-value" className="flex justify-between gap-2" tabIndex={0} />
                         }
                       >
-                        <dt className="text-muted-foreground">API value</dt>
+                        <dt className="text-muted-foreground">
+                          <T>API value</T>
+                        </dt>
                         <dd className="tabular-nums">
                           {current.value.costUsd === null
-                            ? "Pending"
+                            ? gt("Pending")
                             : formatUsd(current.value.costUsd)}
                         </dd>
                       </TooltipTrigger>
                       <TooltipPopup>
-                        API-equivalent value of the recorded transcript usage this cycle. An
-                        estimate, not a bill.
+                        <T>
+                          API-equivalent value of the recorded transcript usage this cycle. An
+                          estimate, not a bill.
+                        </T>
                       </TooltipPopup>
                     </Tooltip>
                     <Tooltip>
@@ -806,22 +854,26 @@ export function UsageResetPage() {
                           />
                         }
                       >
-                        <dt className="text-muted-foreground">Left at API prices</dt>
+                        <dt className="text-muted-foreground">
+                          <T>Left at API prices</T>
+                        </dt>
                         <dd className="tabular-nums">
                           {current.value.remainingValueUsd === null
-                            ? "Learning"
+                            ? gt("Learning")
                             : `≈ ${estimate(current.value.remainingValueUsd)}`}
                         </dd>
                       </TooltipTrigger>
                       <TooltipPopup>
-                        What the remaining limit is worth at API prices, at this cycle's burn.
+                        <T>
+                          What the remaining limit is worth at API prices, at this cycle's burn.
+                        </T>
                       </TooltipPopup>
                     </Tooltip>
                   </>
                 }
               />
               <p className="mt-2 text-xs text-muted-foreground">
-                Transcript costs from {costScope}
+                {gt("Transcript costs from {scope}", { scope: costScope })}
                 {valueNote ? ` · ${valueNote}` : ""}
               </p>
             </div>
@@ -837,10 +889,10 @@ export function UsageResetPage() {
             />
           ) : null}
           {historyAnswered && activeTab !== undefined ? (
-            <section aria-label="Limit details" className="min-w-0">
+            <section aria-label={gt("Limit details")} className="min-w-0">
               <div
                 role="tablist"
-                aria-label="Limit details"
+                aria-label={gt("Limit details")}
                 className="flex gap-5 overflow-x-auto border-b border-border"
               >
                 {tabs.map((tab) => (
@@ -859,7 +911,7 @@ export function UsageResetPage() {
                         : "border-transparent text-muted-foreground hover:text-foreground",
                     )}
                   >
-                    {tab.label}
+                    {m(tab.label)}
                   </button>
                 ))}
               </div>

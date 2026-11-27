@@ -159,9 +159,8 @@ export const OtisTreeRow = memo(function OtisTreeRow({
       await runFleetAction(environmentId, { type, nodeId: node.id, requestId: attempt.current.id });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : gt("Otis could not confirm the action."));
-    } finally {
-      setSending(false);
     }
+    setSending(false);
   }
   const menu = useOtisRowMenu({ node, environmentId, onOpen, canRetry, onWorkerAction: runAction });
   const action = node.chat ? () => onOpen(node) : branch ? () => onExpand(node.id) : undefined;

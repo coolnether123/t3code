@@ -49,6 +49,23 @@ const hostPlatform = HostProcess.Platform.defaultValue();
 const observedPlatforms: ReadonlyArray<NodeJS.Platform> =
   hostPlatform === "linux" ? ["linux", "darwin"] : hostPlatform === "darwin" ? ["darwin"] : [];
 
+it.live("leaves relay clients untracked on Windows", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-relay-ledger-" });
+    const ledger = yield* RelayClientLedger.make({ stateDir });
+    const forget = yield* ledger.track(process.pid);
+    yield* ledger.reapOrphans;
+    yield* forget;
+    expect(yield* fs.exists(path.join(stateDir, "relay-clients"))).toBe(false);
+  }).pipe(
+    Effect.scoped,
+    Effect.provideService(HostProcess.Platform, "win32"),
+    Effect.provide(NodeServices.layer),
+  ),
+);
+
 describe.each(observedPlatforms)("RelayClientLedger observing as %s", (platform) => {
   const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     effect.pipe(

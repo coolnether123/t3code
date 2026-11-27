@@ -243,8 +243,6 @@ it("opens the same Otis row menu by right click, keyboard, and touch hold", asyn
   parentElement.dispatchEvent(
     new KeyboardEvent("keydown", { key: "F10", shiftKey: true, bubbles: true }),
   );
-  await expect.element(menu).toHaveFocus();
-  menu.element().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
   const openChat = menu.getByRole("menuitem", { name: "Open chat" });
   await expect.element(openChat).toHaveFocus();
   openChat.element().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));

@@ -7,6 +7,7 @@ import {
 import { CommandResolutionCache } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 
 import { findInstalledChrome, resolveInstalledChrome } from "./ChromeAutomation.ts";
 
@@ -27,7 +28,7 @@ const withDiscovery = <A, E, R>(
           const type = files[filePath];
           return type === undefined
             ? unavailableFileSystem.stat(filePath)
-            : Effect.succeed({ type } as FileSystem.File.Info);
+            : Effect.succeed({ type, mtime: Option.none() } as FileSystem.File.Info);
         },
       }),
     ),
@@ -77,7 +78,7 @@ it.effect("discovers portable Chrome from PATH without a browser or profile oper
     Effect.gen(function* () {
       assert.equal(yield* findInstalledChrome(), executablePath);
     }),
-    { [executablePath]: "File" },
+    { "D:\\Portable": "Directory", [executablePath]: "File" },
     { PATH: "D:\\Portable", PATHEXT: ".EXE" },
   );
 });

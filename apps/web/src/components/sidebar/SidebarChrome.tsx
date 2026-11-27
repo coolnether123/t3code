@@ -325,10 +325,14 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
           />
           <SidebarUtilityItem
             icon={<LayersIcon />}
-            label="Skills & repeated input"
+            label={gt("Skills & repeated input")}
             onClick={handleRepeatedInputClick}
           />
-          <SidebarUtilityItem icon={<BotIcon />} label="Codex chats" onClick={handleCodexClick} />
+          <SidebarUtilityItem
+            icon={<BotIcon />}
+            label={gt("Codex chats")}
+            onClick={handleCodexClick}
+          />
         </>
       )}
       <SidebarThreadUndoNotice />

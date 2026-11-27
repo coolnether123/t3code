@@ -68,7 +68,7 @@ function useRowMenuTrigger(show: (position: Position, source: ContextMenuSource)
         ("pointerType" in event.nativeEvent && event.nativeEvent.pointerType === "touch");
       cancel();
       if (consumed.current && (window.desktopBridge || isContextMenuOpen())) return;
-      consumed.current ||= touch;
+      if (touch) consumed.current = true;
       const source = contextMenuSourceOf(event);
       const rect =
         event.target instanceof HTMLElement ? event.target.getBoundingClientRect() : null;

@@ -1,3 +1,4 @@
+import { useGT } from "gt-react";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { createBrowserAudio, requestSpeech } from "../../voice/browserSpeech";
 import { useEffect, useRef, useState } from "react";
@@ -15,6 +16,7 @@ export function OtisDictation({
   onText: (text: string) => void;
   onActiveChange: (active: boolean) => void;
 }) {
+  const gt = useGT();
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const audio = useRef<ReturnType<typeof createBrowserAudio> | null>(null);
@@ -38,7 +40,7 @@ export function OtisDictation({
       <button
         type="button"
         disabled={disabled || transcribing}
-        aria-label={recording ? "Finish dictation" : "Dictate message"}
+        aria-label={recording ? gt("Finish dictation") : gt("Dictate message")}
         onClick={async () => {
           if (recording) {
             if (preparing.current) {
@@ -64,7 +66,7 @@ export function OtisDictation({
           onActiveChange(true);
           let lease: string | undefined;
           let microphone: ReturnType<typeof createBrowserAudio> | undefined;
-          try {
+          const capture = async () => {
             let text = await device.capture(controller.signal);
             if (controller.signal.aborted) return;
             if (text === null) {
@@ -85,7 +87,7 @@ export function OtisDictation({
                 controller.signal,
               );
               lease = acquired.sessionId;
-              if (!lease) throw new Error("Dictation is unavailable. Try again.");
+              if (!lease) throw new Error(gt("Dictation is unavailable. Try again."));
               const result = await requestSpeech(
                 environmentId,
                 { action: "transcribe", sessionId: lease, ...recording },
@@ -94,27 +96,30 @@ export function OtisDictation({
               text = result.text ?? "";
             }
             if (!controller.signal.aborted && text.trim()) onText(text.trim());
-          } catch (error) {
-            if (!controller.signal.aborted)
-              setError(error instanceof Error ? error.message : "Dictation failed.");
-          } finally {
-            microphone?.close();
-            if (audio.current === microphone) audio.current = null;
-            if (lease)
-              await requestSpeech(
-                environmentId,
-                { action: "release", sessionId: lease },
-                AbortSignal.timeout(30000),
-              ).catch(() => {});
-            if (abort.current === controller) {
-              preparing.current = false;
-              onActiveChange(false);
-              if (!controller.signal.aborted) {
-                setRecording(false);
-                setTranscribing(false);
+          };
+          await capture()
+            .catch((error: unknown) => {
+              if (!controller.signal.aborted)
+                setError(error instanceof Error ? error.message : gt("Dictation failed."));
+            })
+            .finally(async () => {
+              microphone?.close();
+              if (audio.current === microphone) audio.current = null;
+              if (lease)
+                await requestSpeech(
+                  environmentId,
+                  { action: "release", sessionId: lease },
+                  AbortSignal.timeout(30000),
+                ).catch(() => {});
+              if (abort.current === controller) {
+                preparing.current = false;
+                onActiveChange(false);
+                if (!controller.signal.aborted) {
+                  setRecording(false);
+                  setTranscribing(false);
+                }
               }
-            }
-          }
+            });
         }}
       >
         {recording ? <SquareIcon /> : <MicIcon />}

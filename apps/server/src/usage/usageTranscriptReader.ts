@@ -516,7 +516,9 @@ async function* readFileChunks(filePath: string, start: number, end?: number) {
   const file = await NodeFSP.open(filePath, "r");
   try {
     const buffer = Buffer.allocUnsafe(256 * 1024);
-    for (let position = start; end === undefined || position <= end;) {
+    let position = start;
+    while (true) {
+      if (end !== undefined && position > end) return;
       const length =
         end === undefined ? buffer.length : Math.min(buffer.length, end - position + 1);
       const { bytesRead } = await file.read(buffer, 0, length, position);

@@ -17,7 +17,7 @@ import {
 } from "@t3tools/shared/usagePlanOutlook";
 import { quotaDuration } from "@t3tools/shared/usageQuotaForecast";
 import { AsyncResult } from "effect/reactivity";
-import { useGT } from "gt-react";
+import { useGT, useMessages } from "gt-react";
 import { useEffect, useEffectEvent, useRef, useState, useSyncExternalStore } from "react";
 import { getDocumentActivity, subscribeDocumentActivity } from "~/lib/documentActivity";
 import { environmentPresentations } from "~/state/presentation";
@@ -275,6 +275,7 @@ function PlanCard({
   readonly environmentId: EnvironmentId | undefined;
 }) {
   const gt = useGT();
+  const m = useMessages();
   const [expanded, setExpanded] = useState(false);
   const credits = plan.id === "codex" ? live?.resetCredits : undefined;
   const hasCredits = !!credits?.availableCount;
@@ -285,7 +286,7 @@ function PlanCard({
       ? [
           {
             id: window.key,
-            label: window.label,
+            label: m(window.label),
             reading: planOutlook(window.samples, now, plan.id),
           },
         ]

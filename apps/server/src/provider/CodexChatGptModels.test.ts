@@ -89,6 +89,26 @@ it.effect(
           ],
           currentValue: "low",
         },
+        {
+          id: "computerControl",
+          label: "Browser provider",
+          type: "select",
+          currentValue: "chrome",
+          options: [
+            {
+              id: "chrome",
+              label: "T3 managed Chrome",
+              description:
+                "Use T3's separate persistent Chrome profile. This does not control your normal Chrome profile or Windows desktop.",
+              isDefault: true,
+            },
+            {
+              id: "preview",
+              label: "T3 Preview",
+              description: "Use T3's isolated collaborative preview browser.",
+            },
+          ],
+        },
       ]);
       const b = yield* chatGptModels("account-b", native).pipe(
         Effect.provideService(HttpClient.HttpClient, http),

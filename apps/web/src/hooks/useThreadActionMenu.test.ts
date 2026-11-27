@@ -19,6 +19,7 @@ function deferred<T>() {
 
 const state = vi.hoisted(() => ({
   granted: new Set<string>(),
+  agentInterface: false,
   effects: [] as string[],
   completed: deferred<void>(),
   show: vi.fn<
@@ -45,6 +46,7 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("../state/session", () => ({
   readEnvironmentScope: (environmentId: string, scope: string) =>
     scope === AuthOrchestrationOperateScope && state.granted.has(environmentId),
+  readEnvironmentScopeDenied: (environmentId: string) => !state.granted.has(environmentId),
 }));
 vi.mock("../state/entities", () => ({
   readEnvironmentServerConfigLoaded: () => true,
@@ -111,7 +113,7 @@ vi.mock("./useHandleNewThread", () => ({
   useNewThreadHandler: () => async () => recordEffect("draft"),
 }));
 vi.mock("./useSettings", () => ({
-  getClientSettings: () => ({ agentInterface: false }),
+  getClientSettings: () => ({ agentInterface: state.agentInterface }),
   useClientSettings: (select: (settings: unknown) => unknown) =>
     select({
       confirmThreadDelete: true,
@@ -162,11 +164,19 @@ const createMenu = (options: { readonly onFind?: (threadRef: typeof target) => v
 beforeEach(() => {
   state.granted = new Set(["primary"]);
   state.effects = [];
+  state.agentInterface = false;
   state.completed = deferred<void>();
   state.show.mockReset().mockResolvedValue(null);
 });
 
 describe("thread menu permissions", () => {
+  it.each([true, false])("uses Agent interface preference %s for branch actions", (enabled) => {
+    state.agentInterface = enabled;
+    createMenu().openMenu(position);
+    const items = state.show.mock.calls[0]![0];
+    expect(items.some((item) => item.id === "new-thread-on-branch")).toBe(!enabled);
+  });
+
   it.each(["rename", "regenerate-title", "delete", "pin", "settle", "archive"] as const)(
     "%s rechecks after the native menu closes",
     async (action) => {
