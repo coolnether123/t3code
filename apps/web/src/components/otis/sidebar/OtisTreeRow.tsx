@@ -74,26 +74,33 @@ export function OtisRowMeta({
   const gt = useGT();
   const lane = node.kind === "lane";
   const counts = [
-    node.sub.running && gt("{count} running", { count: node.sub.running }),
-    node.sub.queued && gt("{count} queued", { count: node.sub.queued }),
-    node.sub.failedUnseen && gt("{count} failed", { count: node.sub.failedUnseen }),
-    node.sub.done && gt("{count} done", { count: node.sub.done }),
-  ].filter(Boolean);
+    {
+      key: "running",
+      text: node.sub.running && gt("{count} running", { count: node.sub.running }),
+    },
+    { key: "queued", text: node.sub.queued && gt("{count} queued", { count: node.sub.queued }) },
+    {
+      key: "failed",
+      text: node.sub.failedUnseen && gt("{count} failed", { count: node.sub.failedUnseen }),
+    },
+    { key: "done", text: node.sub.done && gt("{count} done", { count: node.sub.done }) },
+  ].filter(({ text }) => Boolean(text));
   const age = useRelativeTimeState(lane ? null : (node.endedAt ?? node.startedAt));
   const elapsed = age.status === "relative" ? (node.endedAt ? age.label : age.value) : null;
   const detail = [
-    labels.model,
-    lane
-      ? counts.length > 0
-        ? counts.map((count) => <span className="whitespace-nowrap">{count}</span>)
-        : labels.state || gt("Idle")
-      : node.waiting
-        ? gt("Needs you")
-        : labels.state || gt("Idle"),
-    elapsed,
-  ]
-    .flat()
-    .filter(Boolean);
+    { key: "model", text: labels.model, nowrap: false },
+    ...(lane && counts.length > 0
+      ? counts.map((count) => ({ ...count, nowrap: true }))
+      : [
+          {
+            key: "state",
+            text: !lane && node.waiting ? gt("Needs you") : labels.state || gt("Idle"),
+            nowrap: false,
+          },
+        ]),
+    { key: "elapsed", text: elapsed, nowrap: false },
+  ].filter(({ text }) => Boolean(text));
+
   const cost =
     node.costSource !== "api-equivalent-t3" || node.costUsd == null
       ? // oxlint-disable-next-line t3code/no-em-dash-copy -- Specified missing-value glyph in the cost column.
@@ -108,10 +115,10 @@ export function OtisRowMeta({
   return (
     <span className="flex items-baseline justify-between gap-1 text-xs text-muted-foreground">
       <span className="min-w-0 flex-1">
-        {detail.map((part, index) => (
-          <Fragment key={index}>
+        {detail.map(({ key, text, nowrap }, index) => (
+          <Fragment key={key}>
             {index > 0 && " · "}
-            {part}
+            {nowrap ? <span className="whitespace-nowrap">{text}</span> : text}
           </Fragment>
         ))}
       </span>
