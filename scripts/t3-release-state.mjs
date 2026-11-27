@@ -17,7 +17,29 @@ function writeJson(file, value) {
 }
 
 export function readReleaseState(root) {
-  return JSON.parse(NodeFS.readFileSync(NodePath.join(root, "state.json"), "utf8"));
+  const file = NodePath.join(root, "state.json");
+  const info = NodeFS.lstatSync(file);
+  if (!info.isFile() || info.nlink !== 1) throw new Error("Release state is not a physical file");
+  return JSON.parse(NodeFS.readFileSync(file, "utf8"));
+}
+
+export function physicalDirectory(path) {
+  const parent = NodePath.dirname(path);
+  if (parent !== path && !physicalDirectory(parent)) return false;
+  let info;
+  try {
+    info = NodeFS.lstatSync(path);
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+  if (
+    !info.isDirectory() ||
+    info.isSymbolicLink() ||
+    NodeFS.realpathSync(path).toLowerCase() !== path.toLowerCase()
+  )
+    throw new Error(`Directory is not physical: ${path}`);
+  return true;
 }
 
 export function initializeReleaseState(root, release) {
@@ -31,7 +53,8 @@ export function initializeReleaseState(root, release) {
 // Keeping the journal separate permits the supervisor to recover without a CLI.
 export class ReleaseTransaction {
   constructor(root, adapter) {
-    this.root = NodeFS.realpathSync(root);
+    this.root = NodePath.resolve(root);
+    if (!physicalDirectory(this.root)) throw new Error("Missing physical release root");
     this.adapter = adapter;
   }
 
@@ -39,9 +62,9 @@ export class ReleaseTransaction {
     writeJson(NodePath.join(this.root, "state.json"), state);
   }
 
-  receipt(value) {
+  receipt(value, deployment = true) {
     writeJson(NodePath.join(this.root, `receipt-${value.id}.json`), value);
-    writeJson(NodePath.join(this.root, "last-deploy.json"), value);
+    if (deployment) writeJson(NodePath.join(this.root, "last-deploy.json"), value);
   }
 
   async exclusive(operation) {
@@ -94,6 +117,7 @@ export class ReleaseTransaction {
         await this.adapter.stop();
         state.pending.backup = await this.adapter.backup(receipt.id);
         backupForRollback = state.pending.backup;
+        receipt.backup = backupForRollback;
         state.pending.phase = "switching";
         this.save(state);
         state.current = candidate;
@@ -104,7 +128,7 @@ export class ReleaseTransaction {
         receipt.result = "healthy";
         receipt.finishedAt = new Date().toISOString();
         this.receipt(receipt);
-        state.good = [candidate, ...state.good.filter((value) => value !== candidate)].slice(0, 3);
+        state.good = [candidate, ...state.good.filter((value) => value !== candidate)].slice(0, 2);
         state.pending = null;
         this.save(state);
       } catch (error) {
@@ -117,6 +141,71 @@ export class ReleaseTransaction {
         receipt.finishedAt = new Date().toISOString();
         this.receipt(receipt);
       }
+      if (receipt.result === "healthy" && this.adapter.retain) {
+        try {
+          const result = await this.adapter.retain(
+            state,
+            {},
+            (next) => this.save(next),
+            (plan) => {
+              receipt.retention = plan;
+              this.receipt(receipt);
+            },
+          );
+          receipt.retention = { ...result, phase: "finished" };
+          this.receipt(receipt);
+        } catch (error) {
+          receipt.retention = {
+            ...receipt.retention,
+            ok: false,
+            phase: "failed",
+            failure: String(error),
+          };
+          try {
+            this.receipt(receipt);
+          } catch (receiptError) {
+            receipt.retention.receiptFailure = String(receiptError);
+          }
+        }
+      }
+      return receipt;
+    });
+  }
+
+  async retain(options = {}) {
+    return this.exclusive(async () => {
+      const state = readReleaseState(this.root);
+      if (state.pending) throw new Error("Pending deployment requires recovery first");
+      const receipt = {
+        id: NodeCrypto.randomUUID(),
+        operation: "retention",
+        startedAt: new Date().toISOString(),
+        retireRelease: options.retireRelease ?? null,
+      };
+      try {
+        Object.assign(
+          receipt,
+          await this.adapter.retain(
+            state,
+            options,
+            (next) => this.save(next),
+            (plan) => {
+              Object.assign(receipt, plan);
+              this.receipt(receipt, false);
+            },
+          ),
+          { phase: "finished" },
+        );
+      } catch (error) {
+        if (!options.dryRun)
+          this.receipt(
+            { ...receipt, ok: false, failure: String(error), finishedAt: new Date().toISOString() },
+            false,
+          );
+        throw error;
+      }
+      receipt.finishedAt = new Date().toISOString();
+      if (!options.dryRun) this.receipt(receipt, false);
       return receipt;
     });
   }
@@ -146,8 +235,14 @@ export class ReleaseTransaction {
     return this.exclusive(async () => {
       const state = readReleaseState(this.root);
       if (!state.pending) return { recovered: false };
+      const { id } = state.pending;
+      const attempt = /^[a-f0-9-]{36}$/.test(id ?? "")
+        ? NodePath.join(this.root, `recovery-${id}.json`)
+        : null;
+      if (attempt) writeJson(attempt, { id, ok: false, phase: "recovering" });
       const result = await this.rollback(state);
-      const receipt = { recovered: true, ...result, at: new Date().toISOString() };
+      const receipt = { id, recovered: true, ...result, at: new Date().toISOString() };
+      if (attempt) writeJson(attempt, receipt);
       writeJson(NodePath.join(this.root, "last-recovery.json"), receipt);
       return receipt;
     });

@@ -61,17 +61,35 @@ function fixture(t) {
   return { root, data, calls, adapter, transaction: new ReleaseTransaction(root, adapter) };
 }
 
+NodeTest.test("healthy candidate becomes current and retains its previous release", async (t) => {
+  const f = fixture(t);
+  for (const candidate of ["one", "two", "three"]) {
+    const receipt = await f.transaction.switchTo(candidate);
+    NodeAssert.equal(receipt.result, "healthy");
+    NodeAssert.ok(receipt.checks.pid);
+  }
+  NodeAssert.deepEqual(readReleaseState(f.root).good, ["three", "two"]);
+  NodeAssert.equal(readReleaseState(f.root).pending, null);
+});
+
 NodeTest.test(
-  "healthy candidate becomes current and preserves the last three good identities",
+  "automatic retention shares the switch lease and cannot roll back a healthy release",
   async (t) => {
     const f = fixture(t);
-    for (const candidate of ["one", "two", "three"]) {
-      const receipt = await f.transaction.switchTo(candidate);
-      NodeAssert.equal(receipt.result, "healthy");
-      NodeAssert.ok(receipt.checks.pid);
-    }
-    NodeAssert.deepEqual(readReleaseState(f.root).good, ["three", "two", "one"]);
-    NodeAssert.equal(readReleaseState(f.root).pending, null);
+    f.adapter.retain = async (state) => {
+      NodeAssert.equal(state.pending, null);
+      NodeAssert.equal(readReleaseState(f.root).current, "one");
+      await NodeAssert.rejects(
+        f.transaction.exclusive(async () => {}),
+        /EADDRINUSE/,
+      );
+      throw new Error("Cannot inspect backup root");
+    };
+    const result = await f.transaction.switchTo("one");
+    NodeAssert.equal(result.result, "healthy");
+    NodeAssert.match(result.retention.failure, /Cannot inspect backup root/);
+    NodeAssert.equal(readReleaseState(f.root).current, "one");
+    NodeAssert.deepEqual(f.calls, ["idle", "stop", "start:one"]);
   },
 );
 

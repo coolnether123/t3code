@@ -21,6 +21,13 @@ try {
         if ($script:starts -eq 2 -and [IO.File]::ReadAllText($config) -ne $original) { throw 'Old config was not restored' }
     }
     function Test-T3Owners { $script:ownersChecked=$true }
+    function synthetic {
+        param([string]$Script, [string]$ConfigPath, [string]$OriginalCli, [string]$BackupPath)
+        if ((Split-Path $Script -Leaf) -ne 't3-cli-forward.mjs' -or $ConfigPath -ne $config -or
+            (Split-Path $BackupPath -Parent) -ne $root) { throw 'Unexpected CLI forwarding call' }
+        $script:cliChecked=$true
+        $global:LASTEXITCODE=0
+    }
     $DryRun=$true
     Invoke-Repin
     if (-not $idleChecked -or $stops -or $starts -or (Get-ChildItem $root -Directory).Count) { throw 'Dry run mutated state or missed idle check' }
@@ -35,7 +42,7 @@ try {
         if (-not (Test-Path -LiteralPath (Join-Path $backups[0].FullName $name))) { throw "Missing backup $name" }
     }
     Invoke-Repin
-    if (-not $ownersChecked -or $settings.supervisorScript -eq 'old') { throw 'Successful re-pin was not verified' }
+    if (-not $ownersChecked -or -not $cliChecked -or $settings.supervisorScript -eq 'old') { throw 'Successful re-pin was not verified' }
     [IO.File]::WriteAllText((Join-Path $root 'state.json'),'{"current":"synthetic-current","pending":{"id":"test"}}')
     try { Invoke-Repin; throw 'Expected pending refusal' } catch {
         if ($_.Exception.Message -notlike '*Resolve pending deployment*') { throw }

@@ -7,6 +7,7 @@ import { ReleaseTransaction, readReleaseState } from "./t3-release-state.mjs";
 import { supervisorCommand } from "./t3-supervisor.mjs";
 import { restoreOfflineUserdata } from "./t3-restore-userdata.mjs";
 import { idleEvidence } from "./t3-deploy-idle.mjs";
+import { retainDeployment } from "./t3-release-retention.mjs";
 
 function run(exe, args, input) {
   return new Promise((resolve, reject) => {
@@ -37,89 +38,6 @@ const writeJson = (file, value) => {
   }
   NodeFS.renameSync(tmp, file);
 };
-export function retainReleases(root) {
-  const state = readReleaseState(root);
-  if (state.pending) throw new Error("Retention requires a completed transaction");
-  const keep = new Set(
-    [state.current, ...state.good].map((p) => NodePath.resolve(p).toLowerCase()),
-  );
-  const deleted = [];
-  for (const entry of NodeFS.readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !/^[a-f0-9]{40}$/.test(entry.name)) continue;
-    const target = NodePath.join(root, entry.name);
-    if (keep.has(NodePath.resolve(target).toLowerCase())) continue;
-    if (
-      NodeFS.lstatSync(target).isSymbolicLink() ||
-      NodePath.dirname(NodeFS.realpathSync(target)).toLowerCase() !==
-        NodeFS.realpathSync(root).toLowerCase()
-    )
-      throw new Error("Retention target escapes release root");
-    const receipt = readJson(NodePath.join(target, "release.json"));
-    if (receipt.commit !== entry.name) throw new Error("Retention identity mismatch");
-    NodeFS.rmSync(target, { recursive: true });
-    deleted.push(entry.name);
-  }
-  return deleted;
-}
-// Unknown and unsuccessful snapshots are retained for recovery and diagnosis.
-export function retainSnapshots(config) {
-  const state = readReleaseState(config.releaseRoot);
-  if (state.pending) return [];
-  const lastFile = NodePath.join(config.releaseRoot, "last-deploy.json");
-  if (!NodeFS.existsSync(lastFile)) return [];
-  const latest = readJson(lastFile);
-  const verifiedAt = Date.parse(latest.finishedAt);
-  if (
-    latest.result !== "healthy" ||
-    latest.candidate !== state.current ||
-    !Number.isFinite(verifiedAt)
-  )
-    return [];
-  if (!NodeFS.existsSync(config.backupRoot)) return [];
-  const root = NodePath.resolve(config.backupRoot);
-  if (
-    NodeFS.lstatSync(root).isSymbolicLink() ||
-    NodeFS.realpathSync(root).toLowerCase() !== root.toLowerCase()
-  )
-    throw new Error("Snapshot retention root escapes configured path");
-  const keep = new Set(
-    [state.current, ...state.good.slice(0, 3)].map((p) => NodePath.resolve(p).toLowerCase()),
-  );
-  const targets = [];
-  for (const entry of NodeFS.readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const target = NodePath.join(root, entry.name);
-    const receiptFile = NodePath.join(config.releaseRoot, `receipt-${entry.name}.json`);
-    if (!NodeFS.existsSync(receiptFile)) continue;
-    const receipt = readJson(receiptFile);
-    const finishedAt = Date.parse(receipt.finishedAt);
-    if (
-      receipt.result !== "healthy" ||
-      !Number.isFinite(finishedAt) ||
-      finishedAt >= verifiedAt ||
-      typeof receipt.previous !== "string"
-    )
-      continue;
-    if (keep.has(NodePath.resolve(receipt.previous).toLowerCase())) continue;
-    const manifest = readJson(NodePath.join(target, "snapshot.json"));
-    if (
-      receipt.id !== entry.name ||
-      manifest.id !== entry.name ||
-      manifest.source !== config.baseDir ||
-      manifest.offline !== true
-    )
-      throw new Error("Snapshot retention identity mismatch");
-    if (
-      NodeFS.lstatSync(target).isSymbolicLink() ||
-      NodePath.dirname(NodeFS.realpathSync(target)).toLowerCase() !== root.toLowerCase()
-    )
-      throw new Error("Snapshot retention target escapes backup root");
-    targets.push(target);
-  }
-  // Validate the complete deletion set before removing any private snapshot.
-  for (const target of targets) NodeFS.rmSync(target, { recursive: true });
-  return targets.map((target) => NodePath.basename(target));
-}
 export function productionAdapter(config, io = {}) {
   let oldRuntime;
   let switchAt;
@@ -174,6 +92,33 @@ export function productionAdapter(config, io = {}) {
   };
   const liveUserdata = () => NodeFS.realpathSync(NodePath.join(config.baseDir, "userdata"));
   return {
+    retain(state, options, save, recordPlan) {
+      return retainDeployment(
+        config,
+        state,
+        options,
+        async (current) => {
+          const statuses = await owners("status");
+          if (
+            statuses.length !== 2 ||
+            !["server", "web"].every((mode) =>
+              statuses.some(
+                (status) =>
+                  status.mode === mode &&
+                  status.pid &&
+                  !status.paused &&
+                  typeof status.release === "string" &&
+                  NodePath.resolve(status.release).toLowerCase() ===
+                    NodePath.resolve(current).toLowerCase(),
+              ),
+            )
+          )
+            throw new Error("Both supervisors must be serving the current release for retention");
+        },
+        save,
+        recordPlan,
+      );
+    },
     async validate(candidate) {
       if (io.expectedCurrent) {
         const state = readReleaseState(config.releaseRoot);
@@ -366,6 +311,18 @@ export function productionAdapter(config, io = {}) {
 async function main() {
   const [operation, configFile, candidate, proofModel] = process.argv.slice(2);
   const config = readJson(configFile);
+  if (operation === "retain") {
+    if (proofModel !== undefined && proofModel !== "--dry-run")
+      throw new Error("Unknown retention option");
+    const transaction = new ReleaseTransaction(config.releaseRoot, productionAdapter(config));
+    const result = await transaction.retain({
+      retireRelease: candidate === "-" ? undefined : candidate,
+      dryRun: proofModel === "--dry-run",
+    });
+    console.log(JSON.stringify(result));
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
   config.modelSelection = {
     ...config.modelSelection,
     model: operation === "nightly" ? "gpt-6.2-sol" : (proofModel ?? "gpt-6.2-sol"),
@@ -440,10 +397,6 @@ async function main() {
                 : (() => {
                     throw new Error("Unknown operation");
                   })();
-  if (result.result === "healthy") {
-    result.deletedReleases = retainReleases(config.releaseRoot);
-    result.deletedSnapshots = retainSnapshots(config);
-  }
   console.log(JSON.stringify(result));
   if (result.ok === false || (result.result && result.result !== "healthy")) process.exitCode = 1;
 }

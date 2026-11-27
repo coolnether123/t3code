@@ -72,11 +72,23 @@ Do not manually clear `pending` or edit the release pointer during recovery.
 Rollback restores the pre-switch userdata snapshot, including database WAL and
 SHM files. Data created during the unsuccessful candidate is retained in a
 separate `userdata.failed-*` directory for diagnosis. Treat those copies as
-private data. Retention deletes only receipted SHA release directories outside
-the last three good releases. After a newer verified good deployment, snapshot
-retention removes older successful snapshots outside those releases. Failed,
-pending and unrecognized snapshots remain available for recovery. Failed builds
-are retained.
+private data. After a healthy release, the deployment lease also covers
+retention. The owner keeps the serving and previous releases and the two newest
+verified healthy offline snapshots across the configured backup root and
+`data-backups` inside the release root. It removes older healthy snapshots and
+completed rollback snapshots only when two verified points were taken after
+the older attempt finished. Pending recovery blocks retention. Rollback-failed,
+linked and ambiguous snapshots stay on disk, as do transaction receipts and
+builds with no matching healthy deployment.
+
+To reconcile history without a deployment, run the pinned `t3-deploy.ps1`
+with `-Retain -DryRun`. On installations that still list a third good release,
+add `-RetireRelease <full-sha>` to select it. Review the eligible paths and holds
+before dropping `-DryRun`. The command uses the same lease, checks both
+supervisors, and records the result in a separate transaction receipt. It does
+not stop services, copy live userdata, or change the serving or previous release.
+Check the `retention` field in a healthy deployment receipt for cleanup failures
+or holds. A failed cleanup leaves the verified deployment serving.
 
 `state.json`, `last-deploy.json`, `last-recovery.json` and `last-idle.json` under the
 release root expose the current release, checks and fallback evidence. A new

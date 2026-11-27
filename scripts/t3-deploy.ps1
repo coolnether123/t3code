@@ -1,8 +1,18 @@
 [CmdletBinding()]
-param([string]$Commit = 'HEAD', [string]$Config = 'A:/Runtime/T3CodeReleases/deploy-config.json', [switch]$DryRun, [switch]$Recover, [switch]$Status, [ValidateSet("gpt-6.2-sol")][string]$ProofModel = "gpt-6.2-sol")
+param([string]$Commit = 'HEAD', [string]$Config = 'A:/Runtime/T3CodeReleases/deploy-config.json', [switch]$DryRun, [switch]$Recover, [switch]$Status, [switch]$Retain, [ValidatePattern('^[a-f0-9]{40}$')][string]$RetireRelease, [ValidateSet("gpt-6.2-sol")][string]$ProofModel = "gpt-6.2-sol")
 $ErrorActionPreference = 'Stop'
 $node = 'A:/Dev/Tooling/t3-node-v24.19.0/node.exe'
 $settings = Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json
+if ($RetireRelease -and -not $Retain) { throw 'Use -Retain with -RetireRelease' }
+if ($Retain) {
+    if ($Status -or $Recover -or $PSBoundParameters.ContainsKey('Commit') -or $PSBoundParameters.ContainsKey('ProofModel')) {
+        throw 'Retention cannot be combined with deployment, status or recovery'
+    }
+    $retentionArgs = @('retain', $Config, $(if ($RetireRelease) { $RetireRelease } else { '-' }))
+    if ($DryRun) { $retentionArgs += '--dry-run' }
+    & $node (Join-Path $PSScriptRoot 't3-deploy.mjs') @retentionArgs
+    exit $LASTEXITCODE
+}
 if ($Status -or $Recover) {
     $operation = if ($Status) { 'status' } else { 'recover' }
     & $node (Join-Path $PSScriptRoot 't3-deploy.mjs') $operation $Config

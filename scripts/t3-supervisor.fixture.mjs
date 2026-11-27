@@ -8,7 +8,6 @@ import * as NodeNet from "node:net";
 import * as NodeEvents from "node:events";
 import { supervisorCommand } from "./t3-supervisor.mjs";
 import { initializeReleaseState } from "./t3-release-state.mjs";
-import { retainReleases } from "./t3-deploy.mjs";
 NodeTest.test(
   "both supervisors acknowledge pause and replace only their captured children",
   async (t) => {
@@ -53,27 +52,6 @@ NodeTest.test(
     }
   },
 );
-NodeTest.test(
-  "retention deletes only receipted SHA folders outside the three good versions",
-  (t) => {
-    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-retention-synthetic-"));
-    t.after(() => NodeFS.rmSync(root, { recursive: true }));
-    const releases = ["a", "b", "c", "d"].map((c) => NodePath.join(root, c.repeat(40)));
-    for (const dir of releases) {
-      NodeFS.mkdirSync(dir);
-      NodeFS.writeFileSync(
-        NodePath.join(dir, "release.json"),
-        JSON.stringify({ commit: NodePath.basename(dir) }),
-      );
-    }
-    initializeReleaseState(root, releases[0]);
-    const state = { version: 1, current: releases[0], good: releases.slice(0, 3), pending: null };
-    NodeFS.writeFileSync(NodePath.join(root, "state.json"), JSON.stringify(state));
-    NodeAssert.deepEqual(retainReleases(root), ["d".repeat(40)]);
-    NodeAssert.ok(releases.slice(0, 3).every((r) => NodeFS.existsSync(r)));
-  },
-);
-
 NodeTest.test(
   "failed recovery starts both owners and watchdog restarts current with pending",
   async (t) => {
