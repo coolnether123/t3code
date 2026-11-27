@@ -1,4 +1,5 @@
 import type { OtisFleetEvent, OtisNode, OtisTreeBatch, OtisWaiting } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 
 type Load = Extract<OtisFleetEvent, { type: "load" }>["load"];
 export interface FleetState {
@@ -26,8 +27,20 @@ export function applyTreeBatch(current: ReadonlyMap<string, OtisNode>, batch: Ot
     if (node.settled) nodes.delete(node.id);
     else nodes.set(node.id, node);
   }
+  for (const node of batch.nodes) {
+    if (node.state !== "failed" || !node.parent || !node.endedAt || node.settled) continue;
+    if (nodes.get(node.id) !== node || batch.reset) continue;
+    const parent = nodes.get(node.lane) ?? nodes.get(node.parent);
+    const revision = current.get(node.id);
+    if (parent && revision && revision.state !== "failed")
+      retryParentRevisions.set(node, parent.rev);
+    const prior = revision && retryParentRevisions.get(revision);
+    if (prior !== undefined && revision?.endedAt === node.endedAt)
+      retryParentRevisions.set(node, prior);
+  }
   return nodes;
 }
+const retryParentRevisions = new WeakMap<OtisNode, number>();
 export function applyFleetEvent(state: FleetState, event: OtisFleetEvent): FleetState {
   switch (event.type) {
     case "unavailable":
@@ -90,7 +103,9 @@ export function flattenFleet(nodes: ReadonlyMap<string, OtisNode>, expanded: Rea
 export interface NativeFleetThread {
   readonly environmentId: string;
   readonly threadId: string;
-  readonly pendingRuntimeRequest: { readonly id: string } | null;
+  readonly pendingRuntimeRequest: { readonly id: string; readonly createdAt?: DateTime.Utc } | null;
+  readonly settledOverride?: "settled" | "active" | null;
+  readonly latestRunCompletedAt?: DateTime.Utc | null;
 }
 export function fleetNeedsYou(
   nodes: ReadonlyMap<string, OtisNode>,
@@ -98,7 +113,15 @@ export function fleetNeedsYou(
 ) {
   const pending = new Map<string, Set<string>>();
   for (const thread of threads) {
-    if (!thread.pendingRuntimeRequest) continue;
+    const request = thread.pendingRuntimeRequest;
+    if (!request || thread.settledOverride === "settled") continue;
+    if (
+      request.createdAt &&
+      thread.latestRunCompletedAt &&
+      DateTime.toEpochMillis(request.createdAt) <
+        DateTime.toEpochMillis(thread.latestRunCompletedAt)
+    )
+      continue;
     let ids = pending.get(thread.environmentId);
     if (!ids) pending.set(thread.environmentId, (ids = new Set()));
     ids.add(thread.threadId);
@@ -124,6 +147,41 @@ const chicagoTime = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
   minute: "2-digit",
 });
+
+export function canRetryFleetRun(node: OtisNode, nodes: ReadonlyMap<string, OtisNode>) {
+  if (
+    node.kind !== "run" ||
+    node.state !== "failed" ||
+    node.seenAt ||
+    !node.endedAt ||
+    /\bneon\b/i.test(node.model) ||
+    !node.parent
+  )
+    return false;
+  const parent = nodes.get(node.lane) ?? nodes.get(node.parent);
+  if (!parent || parent.kind !== "lane") return false;
+  const endedAt = Date.parse(node.endedAt);
+  if (parent.lastActivityAt) {
+    if (Date.parse(parent.lastActivityAt) > endedAt) return false;
+  } else {
+    const failureRevision = retryParentRevisions.get(node);
+    if (
+      failureRevision !== undefined
+        ? failureRevision !== parent.rev
+        : Date.parse(parent.observedAt) > endedAt
+    )
+      return false;
+  }
+  return !Array.from(nodes.values()).some(
+    (sibling) =>
+      sibling.id !== node.id &&
+      sibling.kind === "run" &&
+      sibling.parent === node.parent &&
+      (node.taskId ? sibling.taskId === node.taskId : sibling.title === node.title) &&
+      Date.parse(sibling.startedAt) > Date.parse(node.startedAt),
+  );
+}
+
 export function fleetRowLabels(
   node: OtisNode,
   nodes: ReadonlyMap<string, OtisNode>,
@@ -149,6 +207,7 @@ export function fleetRowLabels(
   const descendants = node.kind !== "lane" && collapsed ? node.sub.tokens : 0;
   return {
     title: node.title,
+    canRetry: canRetryFleetRun(node, nodes),
     model: /opus[- .](\d+)[- .](\d+)/i.test(node.model)
       ? node.model.replace(/^.*opus[- .](\d+)[- .](\d+).*$/i, "Opus $1.$2")
       : (["Fable", "Sol", "Astra", "Neon"].find((name) =>
