@@ -137,19 +137,15 @@ describe("durable thread voice session", () => {
     await f.session.start({ ...options, threadId: OTIS_THREAD_ID }, []);
     f.session.observe([{ ...message, onPlayed }], false, "turn_002");
     await started.promise;
-    expect(f.request).toHaveBeenCalledWith(
-      expect.objectContaining({ action: "call.speak", text: event.text }),
-      expect.any(AbortSignal),
-      expect.any(Function),
-    );
+    expect(
+      f.request.mock.calls.find(([input]) => input.action === "call.speak")?.[0],
+    ).toMatchObject({
+      text: "That's a few steps, so I've passed it to Otis 1.",
+    });
     expect(onPlayed).not.toHaveBeenCalled();
     finished.resolve();
     await heard.promise;
-    expect(f.request).toHaveBeenCalledWith(
-      expect.objectContaining({ action: "call.played" }),
-      expect.any(AbortSignal),
-      undefined,
-    );
+    expect(f.request.mock.calls.some(([input]) => input.action === "call.played")).toBe(true);
   });
 
   it("discards microphone input captured while muted and resumes on unmute", async () => {

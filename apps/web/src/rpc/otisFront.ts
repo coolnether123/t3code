@@ -8,7 +8,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 export function subscribeOtisFront(
   after: () => number | undefined,
 ): Stream.Stream<OtisFrontUpdate, never, EnvironmentSupervisor.EnvironmentSupervisor> {
-  const unavailable = Stream.make<OtisFrontUpdate>({ type: "unavailable" });
+  const unavailable = Stream.make({ type: "unavailable" } as const);
   return Stream.unwrap(
     EnvironmentSupervisor.EnvironmentSupervisor.pipe(
       Effect.map((supervisor) =>
