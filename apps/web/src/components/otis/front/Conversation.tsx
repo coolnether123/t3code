@@ -85,21 +85,21 @@ export function Conversation({
             return (
               <article
                 key={item.id}
-                className={`grid min-w-0 @sm:grid-cols-[44px_48px_minmax(0,1fr)] @sm:gap-x-2 ${grouped ? "mt-1.5" : "mt-3.5"}`}
+                className={`grid min-w-0 @md:grid-cols-[44px_48px_minmax(0,1fr)] @md:gap-x-2 ${grouped ? "mt-1.5" : "mt-3.5"}`}
               >
-                <div className="hidden text-xs text-muted-foreground tabular-nums @sm:block">
+                <div className="hidden text-xs text-muted-foreground tabular-nums @md:block">
                   {!grouped && at}
                   {item.channel === "voice" && item.from === "jared" && (
                     <span className="block">{gt("said")}</span>
                   )}
                 </div>
                 <div
-                  className={`hidden text-xs @sm:block ${item.from === "jared" ? "text-muted-foreground" : ""}`}
+                  className={`hidden text-xs @md:block ${item.from === "jared" ? "text-muted-foreground" : ""}`}
                 >
                   {!grouped && sender}
                 </div>
                 {!grouped && (
-                  <div className="text-xs text-muted-foreground @sm:hidden">
+                  <div className="text-xs text-muted-foreground @md:hidden">
                     {sender} · {at}
                     {item.channel === "voice" && item.from === "jared" && ` ${gt("said")}`}
                   </div>

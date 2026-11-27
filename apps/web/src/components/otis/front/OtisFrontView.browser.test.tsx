@@ -84,8 +84,14 @@ it("opens the Otis route, sends a typed turn and renders fixture updates on desk
   ] as const) {
     await page.viewport(width, height);
     const status = expect.element(page.getByText("Otis #1 working", { exact: true }));
-    if (width === 390) await status.not.toBeVisible();
-    else await status.toBeVisible();
+    const sender = expect.element(page.getByText("You · 3:58", { exact: true }));
+    if (width === 390) {
+      await status.not.toBeVisible();
+      await sender.toBeVisible();
+    } else {
+      await status.toBeVisible();
+      await sender.not.toBeVisible();
+    }
     const element = document.querySelector('[data-front-item="itm_001"]')!;
     expect(element.getBoundingClientRect().height).toBeLessThan(
       2 * parseFloat(getComputedStyle(element).lineHeight),
