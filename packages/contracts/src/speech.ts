@@ -473,6 +473,7 @@ export const CallRequest = Schema.Struct({
   revision: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
   resetTranscript: Schema.optional(Schema.Boolean),
   deliveredAudio: Schema.optional(Schema.Array(DeliveredVoiceAudio)),
+  frontTurnId: Schema.optional(Schema.NonEmptyString),
 });
 export type CallRequest = typeof CallRequest.Type;
 export const ValidCallRequest = CallRequest.check(

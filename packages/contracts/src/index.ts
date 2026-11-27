@@ -1,5 +1,7 @@
 export * from "./baseSchemas.ts";
 export * from "./otisTree.ts";
+export * as OtisFront from "./otisFront.ts";
+export type { OtisFrontUpdate } from "./otisFrontRpc.ts";
 export * from "./assistantCitations.ts";
 export * from "./composerContext.ts";
 export * from "./composerContextClipboard.ts";

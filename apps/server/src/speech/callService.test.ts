@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 import * as Clock from "effect/Clock";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
+  OTIS_THREAD_ID,
   ProviderInstanceId,
   ProviderDriverKind,
   type CallOptions,
@@ -49,11 +50,12 @@ const upload: CallRequest = {
   startedAt: "2026-10-18T00:00:00.000Z",
   endedAt: "2026-10-18T00:00:01.000Z",
 };
-async function fixture() {
+async function fixture(callOptions = options, front?: CallPorts["front"]) {
   const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-call-synthetic-"));
   directories.push(directory);
   const store = new CallStore(directory);
   const ports: CallPorts = {
+    ...(front ? { front } : {}),
     verify: vi.fn(async () => ({
       runtimeMode: "full-access" as const,
       interactionMode: "default" as const,
@@ -76,12 +78,47 @@ async function fixture() {
   const service = new CallService(store, ports);
   const request = (input: Omit<CallRequest, "callId">) =>
     service.handle({ callId: "call-1", ...input }, new AbortController().signal);
-  await request({ action: "call.open", options });
+  await request({ action: "call.open", options: callOptions });
   await request({ action: "call.prepare" });
   return { store, service, ports, request, directory };
 }
 
 describe("durable calls", () => {
+  it("archives Otis voice input and retries it with the same Front Door identity", async () => {
+    const turn = vi.fn<NonNullable<CallPorts["front"]>["turn"]>();
+    const cancel = vi.fn<NonNullable<CallPorts["front"]>["cancel"]>(async ({ turnId }) => ({
+      turnId,
+      cancelled: true,
+    }));
+    const f = await fixture({ ...options, threadId: OTIS_THREAD_ID }, { turn, cancel });
+    await f.service.handle(upload, new AbortController().signal);
+    await f.request({ action: "call.transcribe", utteranceId: "utterance-1" });
+    turn.mockImplementationOnce(async () => {
+      expect(await f.store.utterance("call-1", "utterance-1")).toMatchObject({
+        text: "Read the build status.",
+      });
+      throw new Error("Fixture lost the response");
+    });
+    turn.mockResolvedValue({ turnId: "otis-turn" });
+    const deliver = () => f.request({ action: "call.deliver", utteranceId: "utterance-1" });
+    await expect(deliver()).rejects.toThrow("Fixture lost the response");
+    expect((await deliver()).utterance?.deliveredAt).toBeDefined();
+    await deliver();
+    const input = {
+      channel: "voice",
+      clientTurnId: "voice:call-1:utterance-1",
+      text: "Read the build status.",
+    };
+    expect(turn.mock.calls).toEqual([[input], [input]]);
+    await f.request({
+      action: "call.interrupt",
+      utteranceId: "utterance-1",
+      frontTurnId: "remote-turn",
+    });
+    await f.request({ action: "call.interrupt", utteranceId: "utterance-1" });
+    expect(cancel.mock.calls).toEqual([[{ turnId: "remote-turn" }], [{ turnId: "otis-turn" }]]);
+    expect(f.ports.dispatch).not.toHaveBeenCalled();
+  });
   it("reports complete open-call coverage, removes hung-up calls, and fails closed on unavailable archives", async () => {
     const f = await fixture();
     expect(await f.store.openCallSnapshot()).toMatchObject({

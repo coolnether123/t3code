@@ -18,6 +18,13 @@ import { WS_METHODS } from "./rpc.ts";
 /** Incremental client enforcement; the server still authorizes every request. */
 export const CLIENT_GUARDED_RPC_SCOPES = {
   "otis.act": AuthOrchestrationOperateScope,
+  "otis.front.subscribe": AuthOrchestrationOperateScope,
+  "otis.front.turn": AuthOrchestrationOperateScope,
+  "otis.front.cancel": AuthOrchestrationOperateScope,
+  "otis.front.action": AuthOrchestrationOperateScope,
+  "otis.front.history": AuthOrchestrationOperateScope,
+  "otis.front.report": AuthOrchestrationOperateScope,
+  "otis.front.heard": AuthOrchestrationOperateScope,
   "otis.subscribe": AuthOrchestrationReadScope,
   "otis.nodeTail": AuthOrchestrationReadScope,
   [WS_METHODS.providerAuthRemoveMethod]: AuthProvidersManageScope,

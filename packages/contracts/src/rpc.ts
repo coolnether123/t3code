@@ -53,6 +53,7 @@ import {
 } from "./providerSetup.ts";
 import * as Schema from "effect/Schema";
 import { otisRpcs } from "./otisTree.ts";
+import { otisFrontRpcs } from "./otisFrontRpc.ts";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
@@ -2545,6 +2546,7 @@ export const LegacyUsageRpcGroup = RpcGroup.make(
 
 export const WsRpcGroup = RpcGroup.make(
   ...otisRpcs,
+  ...otisFrontRpcs,
   WsServerGetUsageReportRpc,
   WsServerGetResetCheckRpc,
   WsServerStartResetCheckRpc,

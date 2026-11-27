@@ -220,6 +220,9 @@ export default defineConfig({
     ignorePatterns: [
       ".repos/**",
       "infra/task-cache/vendor/**",
+      // Copied verbatim from the Otis Front Door contract.
+      "packages/contracts/src/otisFront.ts",
+      "apps/server/src/otis/fixtures/front-bodies.json",
       // Macroscope requires one glob per line; Markdown formatting corrupts it.
       ".macroscope/ignore.md",
       ".alchemy",
@@ -256,6 +259,7 @@ export default defineConfig({
       ".repos",
       ".repos/**",
       "infra/task-cache/vendor/**",
+      "packages/contracts/src/otisFront.ts",
       "dist",
       "dist-electron",
       "node_modules",

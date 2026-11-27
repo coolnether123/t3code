@@ -5,6 +5,7 @@ import type {
   SpeechResponse,
   ModelSelection,
 } from "@t3tools/contracts";
+import { OTIS_THREAD_ID } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -59,6 +60,8 @@ type Message = {
   streaming: boolean;
   turnId?: string | null;
   voiceDelegation?: boolean;
+  nextPause?: boolean;
+  onPlayed?: () => void;
 };
 export interface Recording {
   id: string;
@@ -964,6 +967,9 @@ export class ThreadVoiceSession {
     if (!this.active || this.recovering) return;
     this.pendingFiller ??= { id, endedAt: time() };
   }
+  get isActive() {
+    return this.active;
+  }
   observe(
     messages: readonly Message[],
     running: boolean,
@@ -982,6 +988,10 @@ export class ThreadVoiceSession {
     if (this.deps.audio.emittingSpeech) this.pendingFiller = undefined;
     for (const message of messages) {
       if (message.role !== "assistant") continue;
+      if (message.nextPause && this.capture) {
+        if (!this.inputHolding) this.deps.audio.finishAtPause();
+        continue;
+      }
       if (
         this.saved.silencedMessages?.includes(message.id) ||
         (message.turnId && this.saved.silencedTurns?.includes(message.turnId))
@@ -1187,6 +1197,9 @@ export class ThreadVoiceSession {
           if (item.messageId) {
             this.saved!.offsets[item.messageId] = item.end!;
             await this.persist();
+            const message = this.messages.find(({ id }) => id === item.messageId);
+            if (message?.onPlayed && item.end === this.speechText(message).length)
+              message.onPlayed();
           }
           generated = false;
           this.queue.shift();
@@ -1348,6 +1361,9 @@ export class ThreadVoiceSession {
           action: "call.interrupt",
           utteranceId: this.deps.id(),
           deliveredAudio: this.saved!.deliveredAudio,
+          ...(this.saved!.options.threadId === OTIS_THREAD_ID && this.turnId
+            ? { frontTurnId: this.turnId }
+            : {}),
         }),
       ]);
       this.running = false;

@@ -13,6 +13,13 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 // Trace queries and dashboards depend on these labels, including deviations from method prefixes.
 const RPC_AGGREGATES = {
   "otis.usage": "otis",
+  "otis.front.subscribe": "otis",
+  "otis.front.turn": "otis",
+  "otis.front.cancel": "otis",
+  "otis.front.action": "otis",
+  "otis.front.history": "otis",
+  "otis.front.report": "otis",
+  "otis.front.heard": "otis",
   "otis.subscribe": "otis",
   "otis.act": "otis",
   "otis.nodeTail": "otis",
