@@ -8,7 +8,7 @@ import { useRelativeTimeState } from "~/hooks/useRelativeTimeState";
 import { useOtisRowMenu } from "./useOtisRowMenu";
 import { runFleetAction } from "./fleetData";
 import { usePrimaryEnvironmentId } from "~/state/environments";
-import { memo, useRef, useState } from "react";
+import { Fragment, memo, useRef, useState } from "react";
 
 interface Props extends ReturnType<typeof fleetRowLabels> {
   node: OtisNode;
@@ -78,22 +78,22 @@ export function OtisRowMeta({
     node.sub.queued && gt("{count} queued", { count: node.sub.queued }),
     node.sub.failedUnseen && gt("{count} failed", { count: node.sub.failedUnseen }),
     node.sub.done && gt("{count} done", { count: node.sub.done }),
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  ].filter(Boolean);
   const age = useRelativeTimeState(lane ? null : (node.endedAt ?? node.startedAt));
   const elapsed = age.status === "relative" ? (node.endedAt ? age.label : age.value) : null;
   const detail = [
     labels.model,
     lane
-      ? counts || labels.state || gt("Idle")
+      ? counts.length > 0
+        ? counts.map((count) => <span className="whitespace-nowrap">{count}</span>)
+        : labels.state || gt("Idle")
       : node.waiting
         ? gt("Needs you")
         : labels.state || gt("Idle"),
     elapsed,
   ]
-    .filter(Boolean)
-    .join(" · ");
+    .flat()
+    .filter(Boolean);
   const cost =
     node.costSource !== "api-equivalent-t3" || node.costUsd == null
       ? // oxlint-disable-next-line t3code/no-em-dash-copy -- Specified missing-value glyph in the cost column.
@@ -107,7 +107,14 @@ export function OtisRowMeta({
     .join(" · ");
   return (
     <span className="flex items-baseline justify-between gap-1 text-xs text-muted-foreground">
-      <span className="min-w-0 flex-1">{detail}</span>
+      <span className="min-w-0 flex-1">
+        {detail.map((part, index) => (
+          <Fragment key={index}>
+            {index > 0 && " · "}
+            {part}
+          </Fragment>
+        ))}
+      </span>
       <span
         className="shrink-0 whitespace-nowrap text-right tabular-nums"
         aria-label={gt("API-equivalent cost and tokens: {metrics}", { metrics })}

@@ -9,8 +9,8 @@ import {
 } from "@t3tools/contracts";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import * as Schema from "effect/Schema";
-import { ChevronLeft, ChevronRight } from "lucide-react";
-import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import { ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
+import { useEffect, useId, useState, useSyncExternalStore, type ReactNode } from "react";
 import { fleetRowLabels, flattenFleet, type FleetState } from "@t3tools/client-runtime/otis/tree";
 import { isElectron } from "~/env";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
@@ -63,6 +63,8 @@ function FleetList({
   const expanded = new Set(isMobile ? path : expandedIds);
   const rows = flattenFleet(nodes, expanded);
   const visibleTreeNodes = new Set(rows.map(({ node }) => node.id));
+  const [workersExpanded, setWorkersExpanded] = useState(false);
+  const workersId = useId();
   const [featuredWorkers, setFeaturedWorkers] = useState<readonly OtisNode[]>([]);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Read the configured worker shortcuts from the current environment.
   useEffect(() => {
@@ -236,19 +238,35 @@ function FleetList({
         )}
         {!parent && workers.length > 0 && (
           <section aria-label={gt("Otis workers")} className="mb-2 border-b pb-2">
-            <h2 className="px-2 py-1 text-xs font-medium text-muted-foreground">
-              {gt("Otis workers")}
-            </h2>
-            {workers.map((node) => (
+            <h2>
               <button
-                key={node.id}
+                type="button"
                 data-fleet-link=""
-                className="min-w-0"
-                onClick={() => open(node)}
+                className="text-xs font-medium text-muted-foreground"
+                aria-expanded={workersExpanded}
+                aria-controls={workersId}
+                onClick={() => setWorkersExpanded(!workersExpanded)}
               >
-                <span className="truncate">{node.title}</span>
+                {workersExpanded ? (
+                  <ChevronDown size={14} aria-hidden="true" />
+                ) : (
+                  <ChevronRight size={14} aria-hidden="true" />
+                )}
+                {gt("Otis workers")}
               </button>
-            ))}
+            </h2>
+            <div id={workersId} hidden={!workersExpanded}>
+              {workers.map((node) => (
+                <button
+                  key={node.id}
+                  data-fleet-link=""
+                  className="min-w-0"
+                  onClick={() => open(node)}
+                >
+                  <span className="truncate">{node.title}</span>
+                </button>
+              ))}
+            </div>
           </section>
         )}
         {connecting
