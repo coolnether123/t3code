@@ -1,4 +1,3 @@
-import { OTIS_THREAD_ID } from "@t3tools/contracts";
 import { shouldPreserveAssistantLineBreaks } from "@t3tools/shared/assistantInsights";
 import { MessageId, type RunId, type TurnItemId } from "@t3tools/contracts";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
@@ -47,11 +46,6 @@ const NO_VCS_STATUS = Atom.make(AsyncResult.initial());
 
 export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
-  const [expanded, setExpanded] = useState(false);
-  const fold =
-    ctx.threadRef?.threadId === OTIS_THREAD_ID &&
-    row.message.text.length > 650 &&
-    !row.message.streaming;
   const gt = useGT();
   // The timeline holds a streaming message's row while only its text grows.
   const liveText = useAssistantMessageText(
@@ -66,14 +60,7 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
     <>
       <div className="relative min-w-0 px-1 py-0.5">
         <MessageAuthorHeading>T3 Code</MessageAuthorHeading>
-        <div
-          data-thread-find-text="true"
-          className={
-            fold && !expanded
-              ? "max-h-[236px] overflow-hidden [mask-image:linear-gradient(#000_62%,transparent)]"
-              : undefined
-          }
-        >
+        <div data-thread-find-text="true">
           <AssistantCitationSource
             messageId={row.message.id}
             {...(ctx.threadRef ? { threadRef: ctx.threadRef } : {})}
@@ -101,14 +88,6 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
             />
           </AssistantCitationSource>
         </div>
-        {fold ? (
-          <button
-            className="mt-2 block text-otis-more font-semibold text-otis-more"
-            onClick={() => setExpanded(!expanded)}
-          >
-            {expanded ? gt("Show less") : gt("Show more")}
-          </button>
-        ) : null}
         {ctx.onOpenTurnDiff ? (
           <AssistantChangedFilesSection
             turnSummary={row.assistantTurnDiffSummary}

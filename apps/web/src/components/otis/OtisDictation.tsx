@@ -3,6 +3,8 @@ import { createBrowserAudio, requestSpeech } from "../../voice/browserSpeech";
 import { useEffect, useRef, useState } from "react";
 import { MicIcon, SquareIcon } from "lucide-react";
 import { createDeviceSpeech } from "../../voice/deviceSpeech";
+import { Button } from "../ui/button";
+import { useGT } from "gt-react";
 
 export function OtisDictation({
   environmentId,
@@ -13,8 +15,9 @@ export function OtisDictation({
   environmentId: EnvironmentId;
   disabled?: boolean;
   onText: (text: string) => void;
-  onActiveChange: (active: boolean) => void;
+  onActiveChange?: (active: boolean) => void;
 }) {
+  const gt = useGT();
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const audio = useRef<ReturnType<typeof createBrowserAudio> | null>(null);
@@ -29,16 +32,18 @@ export function OtisDictation({
       abort.current = null;
       controller?.abort();
       audio.current?.close();
-      onActiveChange(false);
+      onActiveChange?.(false);
     },
     [onActiveChange],
   );
   return (
     <>
-      <button
+      <Button
+        size="sm"
+        variant="ghost"
         type="button"
         disabled={disabled || transcribing}
-        aria-label={recording ? "Finish dictation" : "Dictate message"}
+        aria-label={recording ? gt("Finish dictation") : gt("Dictate message")}
         onClick={async () => {
           if (recording) {
             if (preparing.current) {
@@ -46,7 +51,7 @@ export function OtisDictation({
               abort.current = null;
               controller?.abort();
               audio.current?.close();
-              onActiveChange(false);
+              onActiveChange?.(false);
               setRecording(false);
               return;
             }
@@ -61,7 +66,7 @@ export function OtisDictation({
           speech.current = device;
           setError(undefined);
           setRecording(true);
-          onActiveChange(true);
+          onActiveChange?.(true);
           let lease: string | undefined;
           let microphone: ReturnType<typeof createBrowserAudio> | undefined;
           try {
@@ -96,7 +101,7 @@ export function OtisDictation({
             if (!controller.signal.aborted && text.trim()) onText(text.trim());
           } catch (error) {
             if (!controller.signal.aborted)
-              setError(error instanceof Error ? error.message : "Dictation failed.");
+              setError(error instanceof Error ? error.message : gt("Dictation failed."));
           } finally {
             microphone?.close();
             if (audio.current === microphone) audio.current = null;
@@ -108,7 +113,7 @@ export function OtisDictation({
               ).catch(() => {});
             if (abort.current === controller) {
               preparing.current = false;
-              onActiveChange(false);
+              onActiveChange?.(false);
               if (!controller.signal.aborted) {
                 setRecording(false);
                 setTranscribing(false);
@@ -118,11 +123,12 @@ export function OtisDictation({
         }}
       >
         {recording ? <SquareIcon /> : <MicIcon />}
-      </button>
+        {recording ? gt("Finish") : gt("Dictate")}
+      </Button>
       {error ? (
         <span
           role="alert"
-          className="absolute inset-x-4 bottom-full mb-2 rounded-xl bg-otis-bubble p-3 text-sm"
+          className="absolute inset-x-4 bottom-full mb-2 rounded-md border border-border bg-card p-3 text-sm text-destructive"
         >
           {error}
         </span>

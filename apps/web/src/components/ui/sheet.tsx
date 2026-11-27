@@ -172,3 +172,5 @@ export {
   SheetTitle,
   SheetDescription,
 };
+
+export const SheetTrigger = SheetPrimitive.Trigger;

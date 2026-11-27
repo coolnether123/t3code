@@ -1,8 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
 import type { OtisNode } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import {
   applyFleetEvent,
   applyTreeBatch,
+  canRetryFleetRun,
   flattenFleet,
   fleetNeedsYou,
   fleetRowLabels,
@@ -44,6 +46,72 @@ const lane: OtisNode = {
   tailSeq: 0,
 };
 describe("fleet rows", () => {
+  it("counts only outstanding requests on active native threads", () => {
+    const nodes = new Map([[lane.id, lane]]);
+    const request = {
+      environmentId: "home",
+      threadId: "thread",
+      pendingRuntimeRequest: { id: "q", createdAt: DateTime.makeUnsafe("2026-11-23T03:13:00Z") },
+    };
+    expect(fleetNeedsYou(nodes, [request])).toEqual(new Set([lane.id]));
+    expect(fleetNeedsYou(nodes, [{ ...request, settledOverride: "settled" }])).toEqual(new Set());
+    expect(
+      fleetNeedsYou(nodes, [
+        { ...request, latestRunCompletedAt: DateTime.makeUnsafe(lane.startedAt) },
+      ]),
+    ).toEqual(new Set());
+  });
+  it("offers Retry only for the latest unseen failure while its lane is still idle", () => {
+    const endedAt = "2026-11-23T04:00:00Z";
+    const failed: OtisNode = {
+      ...lane,
+      id: "failed",
+      parent: lane.id,
+      lane: lane.id,
+      kind: "run",
+      state: "failed",
+      endedAt,
+      model: "GPT-6.2 Sol",
+      taskId: "task",
+    };
+    const parent = { ...lane, lastActivityAt: endedAt };
+    expect(canRetryFleetRun(failed, new Map([[lane.id, parent]]))).toBe(true);
+    expect(canRetryFleetRun({ ...failed, seenAt: endedAt }, new Map([[lane.id, parent]]))).toBe(
+      false,
+    );
+    expect(canRetryFleetRun({ ...failed, model: "GPT-5 Neon" }, new Map([[lane.id, parent]]))).toBe(
+      false,
+    );
+    expect(
+      canRetryFleetRun(
+        failed,
+        new Map([[lane.id, { ...parent, lastActivityAt: "2026-11-23T04:01:00Z" }]]),
+      ),
+    ).toBe(false);
+    expect(
+      canRetryFleetRun(
+        failed,
+        new Map([
+          [lane.id, parent],
+          ["newer", { ...failed, id: "newer", startedAt: "2026-11-23T03:59:00Z" }],
+        ]),
+      ),
+    ).toBe(false);
+    const running = { ...failed, state: "running", endedAt: null, rev: 1 } as const;
+    const old = new Map([
+      [lane.id, lane],
+      [running.id, running],
+    ]);
+    const observed = { ...failed, rev: 2 };
+    const observedFailure = applyTreeBatch(old, { seq: 2, nodes: [{ ...lane, rev: 2 }, observed] });
+    expect(canRetryFleetRun(observed, observedFailure)).toBe(true);
+    expect(
+      canRetryFleetRun(
+        observed,
+        applyTreeBatch(observedFailure, { seq: 3, nodes: [{ ...lane, rev: 3 }] }),
+      ),
+    ).toBe(false);
+  });
   it("keeps all 499 children behind their fold, then promotes the child needing attention without scrambling its peers", () => {
     const children = Array.from({ length: 499 }, (_, index): OtisNode => ({
       ...lane,

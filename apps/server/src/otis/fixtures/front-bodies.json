@@ -1,0 +1,474 @@
+{
+  "FrontState": [
+    {
+      "seq": 1,
+      "observedAt": "2026-11-26T09:58:00Z",
+      "otis1": {
+        "state": "working",
+        "reachVia": "message pipe",
+        "model": "Opus 5.5",
+        "effort": "high",
+        "contextTokens": 412000,
+        "contextLimit": 700000,
+        "activeHandoffs": 1
+      },
+      "talker": {
+        "model": "Haiku 5.5",
+        "effort": "low"
+      },
+      "waiting": [
+        {
+          "id": "ask_7c1e02",
+          "lane": "RimWorld",
+          "title": "Upload OK: Chronos, XenoPreview, CPO",
+          "since": "2026-11-26T08:57:00Z",
+          "actions": [
+            {
+              "id": "act_answer_ask_7c1e02",
+              "label": "Answer…",
+              "confirm": null,
+              "input": "Your answer for RimWorld"
+            },
+            {
+              "id": "act_open_ask_7c1e02",
+              "label": "Open",
+              "confirm": null,
+              "input": null
+            }
+          ],
+          "nodeId": "lane:rimworld"
+        },
+        {
+          "id": "ask_9d40aa",
+          "lane": "Facilities",
+          "title": "Clock out time for tonight",
+          "since": "2026-11-26T09:40:00Z",
+          "actions": [
+            {
+              "id": "act_answer_ask_9d40aa",
+              "label": "Answer…",
+              "confirm": null,
+              "input": "Clock out at"
+            }
+          ],
+          "nodeId": null
+        }
+      ],
+      "working": [
+        {
+          "nodeId": "run:d8e3f9a2",
+          "lane": "Sheltered",
+          "title": "1.7.5014 matrix",
+          "model": "Sol",
+          "effort": "high",
+          "state": "running",
+          "startedAt": "2026-11-26T07:16:00Z",
+          "costUsd": 3.42
+        },
+        {
+          "nodeId": "run:5b21c7e0",
+          "lane": "Videos",
+          "title": "FAREWELL shots 11–25",
+          "model": "Opus 5.5",
+          "effort": "high",
+          "state": "running",
+          "startedAt": "2026-11-26T09:20:00Z",
+          "costUsd": null
+        },
+        {
+          "nodeId": "sub:otis1:a17f",
+          "lane": "Otis #1",
+          "title": "Otis tab design",
+          "model": "Opus 5.5",
+          "effort": null,
+          "state": "starting",
+          "startedAt": "2026-11-26T09:49:00Z",
+          "costUsd": null
+        },
+        {
+          "nodeId": "run:0c9e44b1",
+          "lane": "T3",
+          "title": "Alt-click harness",
+          "model": "Sol",
+          "effort": "medium",
+          "state": "queued",
+          "startedAt": "2026-11-26T09:24:00Z",
+          "costUsd": 0
+        }
+      ],
+      "report": {
+        "reportId": "rep_20261126",
+        "heard": false,
+        "window": "11:40 PM to 3:58 AM"
+      }
+    }
+  ],
+  "TurnRequest": [
+    {
+      "clientTurnId": "c_8f2a",
+      "channel": "typed",
+      "text": "What's on me?"
+    },
+    {
+      "clientTurnId": "c_8f2b",
+      "channel": "voice",
+      "text": "Read me the FAREWELL task.",
+      "attachments": []
+    }
+  ],
+  "TurnAccepted": [
+    {
+      "turnId": "turn_001"
+    }
+  ],
+  "TurnCancelled": [
+    {
+      "turnId": "turn_004",
+      "cancelled": true
+    },
+    {
+      "turnId": "turn_001",
+      "cancelled": false
+    }
+  ],
+  "ActionRequest": [
+    {
+      "requestId": "req_01"
+    },
+    {
+      "requestId": "req_02",
+      "input": "Yes, upload all three"
+    }
+  ],
+  "ActionResult": [
+    {
+      "accepted": true
+    },
+    {
+      "accepted": false,
+      "message": "That ask was already answered."
+    }
+  ],
+  "ConversationPage": [
+    {
+      "items": [
+        {
+          "id": "itm_002",
+          "at": "2026-11-26T09:58:05Z",
+          "from": "otis",
+          "channel": "typed",
+          "status": "done",
+          "turnId": "turn_001",
+          "text": "Four things. The 1.7.5014 matrix (GPT-6.2 Sol, high), 2h 42m in. FAREWELL shots 11–25 (Opus 5.5, high), 38m. The Otis tab design is starting, and the alt-click harness is queued.",
+          "basis": {
+            "kind": "read",
+            "reads": [
+              {
+                "id": "r1",
+                "source": "work",
+                "observedAt": "2026-11-26T09:58:00Z"
+              }
+            ]
+          },
+          "cards": []
+        },
+        {
+          "id": "itm_001",
+          "at": "2026-11-26T09:58:04Z",
+          "from": "jared",
+          "channel": "typed",
+          "status": "done",
+          "turnId": "turn_001",
+          "text": "What's running right now?",
+          "basis": null,
+          "cards": []
+        }
+      ],
+      "next": "itm_001"
+    },
+    {
+      "items": [],
+      "next": null
+    }
+  ],
+  "LatestMorningReport": [
+    {
+      "reportId": "rep_20261126",
+      "builtAt": "2026-11-26T09:58:00Z",
+      "window": {
+        "from": "2026-11-25T23:40:00-06:00",
+        "to": "2026-11-26T09:58:00Z"
+      },
+      "title": "Overnight",
+      "windowLabel": "11:40 PM to 3:58 AM",
+      "summary": "2 went wrong · 4 done · 1 needs you",
+      "sections": [
+        {
+          "id": "went-wrong",
+          "title": "What went wrong, and what we learned",
+          "empty": "Nothing broke.",
+          "items": [
+            {
+              "id": "card_ww_1",
+              "kind": "lesson",
+              "title": "The sidebar couldn't open the RimWorld and Sheltered parents.",
+              "status": null,
+              "lines": [
+                {
+                  "label": "Fix",
+                  "text": "They were bound as Claude app chats. Otis now binds them by their T3 thread (b151997).",
+                  "href": null
+                },
+                {
+                  "label": "Learned",
+                  "text": "Bind a parent by the host it actually runs in.",
+                  "href": null
+                }
+              ],
+              "actions": [],
+              "updatedAt": "2026-11-26T09:58:00Z"
+            },
+            {
+              "id": "card_ww_2",
+              "kind": "lesson",
+              "title": "Codex workers exited before finishing, 3 times",
+              "status": {
+                "label": "3 times",
+                "tone": "bad"
+              },
+              "lines": [
+                {
+                  "label": "Fix",
+                  "text": "The launcher now keeps the client open until the outcome arrives.",
+                  "href": null
+                },
+                {
+                  "label": "Learned",
+                  "text": "No lesson recorded yet. Otis #1 has been asked for one.",
+                  "href": null
+                }
+              ],
+              "actions": [],
+              "updatedAt": "2026-11-26T09:58:00Z"
+            }
+          ]
+        },
+        {
+          "id": "done",
+          "title": "What got done",
+          "empty": null,
+          "items": [
+            {
+              "id": "card_done_1",
+              "kind": "receipt",
+              "title": "Keyboard build 11796 signed",
+              "status": {
+                "label": "done",
+                "tone": "good"
+              },
+              "lines": [
+                {
+                  "label": "Receipt",
+                  "text": "Run 41ac09d2 (GPT-6.2 Sol, high)",
+                  "href": "otis://node/run:41ac09d2"
+                }
+              ],
+              "actions": [],
+              "updatedAt": "2026-11-26T08:10:00Z"
+            }
+          ]
+        },
+        {
+          "id": "next",
+          "title": "What's next",
+          "empty": "Nothing queued.",
+          "items": []
+        },
+        {
+          "id": "needs-you",
+          "title": "Needs you",
+          "empty": "Nothing needs you.",
+          "items": [
+            {
+              "id": "card_ny_1",
+              "kind": "ask",
+              "title": "Upload OK: Chronos, XenoPreview, CPO",
+              "status": {
+                "label": "Needs you",
+                "tone": "warn"
+              },
+              "lines": [],
+              "actions": [
+                {
+                  "id": "act_answer_ask_7c1e02",
+                  "label": "Answer…",
+                  "confirm": null,
+                  "input": "Your answer for RimWorld"
+                }
+              ],
+              "updatedAt": "2026-11-26T08:57:00Z"
+            }
+          ]
+        }
+      ],
+      "script": "Morning. Four things landed overnight, two broke, and we learned something from one of them.",
+      "heardAt": null
+    },
+    null
+  ],
+  "MorningReport": [
+    {
+      "reportId": "rep_20261126",
+      "builtAt": "2026-11-26T09:58:00Z",
+      "window": {
+        "from": "2026-11-25T23:40:00-06:00",
+        "to": "2026-11-26T09:58:00Z"
+      },
+      "title": "Overnight",
+      "windowLabel": "11:40 PM to 3:58 AM",
+      "summary": "2 went wrong · 4 done · 1 needs you",
+      "sections": [
+        {
+          "id": "went-wrong",
+          "title": "What went wrong, and what we learned",
+          "empty": "Nothing broke.",
+          "items": [
+            {
+              "id": "card_ww_1",
+              "kind": "lesson",
+              "title": "The sidebar couldn't open the RimWorld and Sheltered parents.",
+              "status": null,
+              "lines": [
+                {
+                  "label": "Fix",
+                  "text": "They were bound as Claude app chats. Otis now binds them by their T3 thread (b151997).",
+                  "href": null
+                },
+                {
+                  "label": "Learned",
+                  "text": "Bind a parent by the host it actually runs in.",
+                  "href": null
+                }
+              ],
+              "actions": [],
+              "updatedAt": "2026-11-26T09:58:00Z"
+            },
+            {
+              "id": "card_ww_2",
+              "kind": "lesson",
+              "title": "Codex workers exited before finishing, 3 times",
+              "status": {
+                "label": "3 times",
+                "tone": "bad"
+              },
+              "lines": [
+                {
+                  "label": "Fix",
+                  "text": "The launcher now keeps the client open until the outcome arrives.",
+                  "href": null
+                },
+                {
+                  "label": "Learned",
+                  "text": "No lesson recorded yet. Otis #1 has been asked for one.",
+                  "href": null
+                }
+              ],
+              "actions": [],
+              "updatedAt": "2026-11-26T09:58:00Z"
+            }
+          ]
+        },
+        {
+          "id": "done",
+          "title": "What got done",
+          "empty": null,
+          "items": [
+            {
+              "id": "card_done_1",
+              "kind": "receipt",
+              "title": "Keyboard build 11796 signed",
+              "status": {
+                "label": "done",
+                "tone": "good"
+              },
+              "lines": [
+                {
+                  "label": "Receipt",
+                  "text": "Run 41ac09d2 (GPT-6.2 Sol, high)",
+                  "href": "otis://node/run:41ac09d2"
+                }
+              ],
+              "actions": [],
+              "updatedAt": "2026-11-26T08:10:00Z"
+            }
+          ]
+        },
+        {
+          "id": "next",
+          "title": "What's next",
+          "empty": "Nothing queued.",
+          "items": []
+        },
+        {
+          "id": "needs-you",
+          "title": "Needs you",
+          "empty": "Nothing needs you.",
+          "items": [
+            {
+              "id": "card_ny_1",
+              "kind": "ask",
+              "title": "Upload OK: Chronos, XenoPreview, CPO",
+              "status": {
+                "label": "Needs you",
+                "tone": "warn"
+              },
+              "lines": [],
+              "actions": [
+                {
+                  "id": "act_answer_ask_7c1e02",
+                  "label": "Answer…",
+                  "confirm": null,
+                  "input": "Your answer for RimWorld"
+                }
+              ],
+              "updatedAt": "2026-11-26T08:57:00Z"
+            }
+          ]
+        }
+      ],
+      "script": null,
+      "heardAt": "2026-11-26T10:12:00Z"
+    }
+  ],
+  "ReportHeard": [
+    {
+      "reportId": "rep_20261126",
+      "heardAt": "2026-11-26T10:12:00Z"
+    }
+  ],
+  "FrontCapabilities": [
+    {
+      "version": 1,
+      "cards": [
+        "handoff",
+        "work",
+        "ask",
+        "receipt",
+        "report"
+      ],
+      "actions": [
+        "stop",
+        "open",
+        "answer",
+        "play",
+        "heard"
+      ]
+    }
+  ],
+  "FrontError": [
+    {
+      "error": "unavailable",
+      "message": "Can't reach the lanes service."
+    }
+  ]
+}

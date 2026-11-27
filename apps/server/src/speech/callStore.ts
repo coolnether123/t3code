@@ -124,6 +124,7 @@ export interface CallRecord extends CallOptions {
   steps: string[];
   recentUtterances?: string[];
   recentPlayed?: string[];
+  frontTurnId?: string;
 }
 export const sha256 = (value: string | Uint8Array) =>
   NodeCrypto.createHash("sha256").update(value).digest("hex");

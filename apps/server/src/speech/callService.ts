@@ -11,6 +11,7 @@ import {
   EventId,
   CALL_PREPARE_TIMEOUT_MS,
   MessageId,
+  OTIS_THREAD_ID,
   ThreadId,
   ValidCallRequest,
   type CallOptions,
@@ -22,12 +23,17 @@ import {
   type ServerProvider,
   type RuntimeMode,
   type ProviderInteractionMode,
+  type OtisFront,
 } from "@t3tools/contracts";
 import { callIdentifier, type CallStore, type CallRecord, sha256 } from "./callStore.ts";
 import type { CallOperator } from "./callOperator.ts";
 import { BackchannelClips } from "./backchannelClips.ts";
 
 export interface CallPorts {
+  front?: {
+    turn(input: OtisFront.TurnRequest): Promise<OtisFront.TurnAccepted>;
+    cancel(input: { turnId: string }): Promise<OtisFront.TurnCancelled>;
+  };
   verify(
     options: CallOptions,
   ): Promise<{ runtimeMode: RuntimeMode; interactionMode: ProviderInteractionMode }>;
@@ -128,7 +134,8 @@ export class CallService {
   async status(callId: string): Promise<CallStatus> {
     await this.recoverExpirations();
     const record = await this.store.require(callId);
-    const operator = await this.operator?.read(record.threadId);
+    const operator =
+      record.threadId === OTIS_THREAD_ID ? undefined : await this.operator?.read(record.threadId);
     return {
       callId,
       threadId: record.threadId,
@@ -403,8 +410,8 @@ export class CallService {
           await this.store.changed(record);
           break;
         case "call.interrupt":
-          await this.interrupt(record, callIdentifier(input.utteranceId));
-          if (input.deliveredAudio) {
+          await this.interrupt(record, callIdentifier(input.utteranceId), input.frontTurnId);
+          if (input.deliveredAudio && record.threadId !== OTIS_THREAD_ID) {
             await this.ports.dispatch({
               type: "thread.activity.append",
               commandId: CommandId.make(`voice-heard:${record.callId}:${input.utteranceId}`),
@@ -492,7 +499,10 @@ export class CallService {
         await this.store.changed(record);
         await this.store.unbind(record.threadId, record.callId);
       });
-      if (!(await this.store.read(callId, "call-ended.json"))) {
+      if (
+        record.threadId !== OTIS_THREAD_ID &&
+        !(await this.store.read(callId, "call-ended.json"))
+      ) {
         await this.ports.dispatch({
           type: "thread.activity.append",
           commandId: CommandId.make(`call-ended:${callId}`),
@@ -554,8 +564,9 @@ export class CallService {
       }
       return { call: await this.status(input.callId) };
     }
-    await this.ports.verify(input.options);
-    if (this.operator && input.options.operatorSelection) {
+    const otis = input.options.threadId === OTIS_THREAD_ID;
+    if (!otis) await this.ports.verify(input.options);
+    if (!otis && this.operator && input.options.operatorSelection) {
       await this.ports.verifyVoice?.(input.options.modelSelection);
       await this.ports.verify({
         threadId: input.options.threadId,
@@ -573,12 +584,14 @@ export class CallService {
       lastClientAt: time(),
       version: "",
       closed: false,
-      steps: ["Call log saved on PC", "Selected chat model and options configured"],
+      steps: otis
+        ? ["Call log saved on PC"]
+        : ["Call log saved on PC", "Selected chat model and options configured"],
     };
     await this.store.write("_threads", bindingName, { callId: input.callId });
     await this.store.changed(record);
     this.scheduleExpiry(record.callId, record.lastClientAt! + ABANDONED_CALL_MS);
-    await this.operator?.reopen(record.threadId, record.callId);
+    if (!otis) await this.operator?.reopen(record.threadId, record.callId);
     return { call: await this.status(input.callId) };
   }
   private async prepare(
@@ -590,8 +603,13 @@ export class CallService {
   ) {
     const record = await this.store.require(callId);
     active(record);
-    await this.ports.verify({ ...record, modelSelection: modelSelection ?? record.modelSelection });
-    if (this.operator && operatorSelection) {
+    const otis = record.threadId === OTIS_THREAD_ID;
+    if (!otis)
+      await this.ports.verify({
+        ...record,
+        modelSelection: modelSelection ?? record.modelSelection,
+      });
+    if (!otis && this.operator && operatorSelection) {
       const voice = modelSelection ?? record.modelSelection;
       await this.ports.verifyVoice?.(voice);
       await this.ports.verify({ ...record, modelSelection: operatorSelection });
@@ -836,7 +854,16 @@ export class CallService {
     // Recovery changes the call and utterance IDs, but keeps the provider's deduplication identity.
     const messageId = `voice:${utterance.retryOf?.callId ?? record.callId}:${utterance.retryOf?.utteranceId ?? id}`;
     await this.store.write(record.callId, `${id}.delivery.json`, { messageId, preparedAt: now() });
-    if (utterance.text.trim()) {
+    let frontTurnId: string | undefined;
+    if (utterance.text.trim() && record.threadId === OTIS_THREAD_ID) {
+      if (!this.ports.front) throw new Error("Otis is unavailable. Saved speech is retained.");
+      const accepted = await this.ports.front.turn({
+        clientTurnId: messageId,
+        channel: "voice",
+        text: utterance.text.trim(),
+      });
+      frontTurnId = accepted.turnId;
+    } else if (utterance.text.trim()) {
       let command = await this.store.read<
         Extract<OrchestrationCommand, { type: "thread.turn.start" }>
       >(record.callId, `${id}.dispatch.json`);
@@ -891,9 +918,11 @@ export class CallService {
         receipt,
       );
     await this.store.write(record.callId, `${id}.delivery.json`, receipt);
-    await this.store.serial(record.callId, async () =>
-      this.store.changed(await this.store.require(record.callId)),
-    );
+    await this.store.serial(record.callId, async () => {
+      const current = await this.store.require(record.callId);
+      if (frontTurnId) current.frontTurnId = frontTurnId;
+      await this.store.changed(current);
+    });
     return this.store.utterance(record.callId, id);
   }
   private async speak(
@@ -938,7 +967,12 @@ export class CallService {
       text: input.text,
     };
   }
-  private async interrupt(record: CallRecord, id: string) {
+  private async interrupt(record: CallRecord, id: string, frontTurnId?: string) {
+    if (record.threadId === OTIS_THREAD_ID) {
+      const turnId = frontTurnId ?? record.frontTurnId;
+      if (turnId) await this.ports.front?.cancel({ turnId });
+      return;
+    }
     await this.ports.dispatch({
       type: "thread.turn.interrupt",
       commandId: CommandId.make(`voice-interrupt:${record.callId}:${id}`),

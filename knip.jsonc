@@ -5,6 +5,10 @@
   // These executables are supplied by the OS or installed separately from npm.
   "ignoreBinaries": ["eas", "file", "mkfifo", "pkill", "pkg-config", "plutil", "sips"],
   "workspaces": {
+    "packages/contracts": {
+      // The verbatim Otis Front Door schema exports the full wire contract.
+      "ignoreIssues": { "src/otisFront.ts": ["exports", "nsExports"] },
+    },
     ".": {
       // Keep vendored reference repositories outside the root project.
       "project": ["*.{js,mjs,cjs,ts,mts,cts}", ".github/**/*.cjs"],

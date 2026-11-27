@@ -75,9 +75,7 @@ export function OtisRowMeta({
   const lane = node.kind === "lane";
   const counts = [
     node.sub.running && gt("{count} running", { count: node.sub.running }),
-    node.sub.queued && gt("{count} queued", { count: node.sub.queued }),
     node.sub.failedUnseen && gt("{count} failed", { count: node.sub.failedUnseen }),
-    node.sub.done && gt("{count} done", { count: node.sub.done }),
   ]
     .filter(Boolean)
     .join(" · ");
@@ -85,11 +83,7 @@ export function OtisRowMeta({
   const elapsed = age.status === "relative" ? (node.endedAt ? age.label : age.value) : null;
   const detail = [
     labels.model,
-    lane
-      ? counts || labels.state || gt("Idle")
-      : node.waiting
-        ? gt("Needs you")
-        : labels.state || gt("Idle"),
+    lane ? counts : node.waiting ? gt("Needs you") : labels.state || gt("Idle"),
     elapsed,
   ]
     .filter(Boolean)
@@ -107,7 +101,7 @@ export function OtisRowMeta({
     .join(" · ");
   return (
     <span className="flex items-baseline justify-between gap-1 text-xs text-muted-foreground">
-      <span className="min-w-0 flex-1">{detail}</span>
+      <span className="min-w-0 flex-1 truncate">{detail}</span>
       <span
         className="shrink-0 whitespace-nowrap text-right tabular-nums"
         aria-label={gt("API-equivalent cost and tokens: {metrics}", { metrics })}
@@ -137,21 +131,10 @@ export const OtisTreeRow = memo(function OtisTreeRow({
   const [error, setError] = useState("");
   const attempt = useRef<{ type: "seen" | "retry"; id: string } | null>(null);
   const title = question || labels.title;
-  const failedAt = node.state === "failed" ? (node.endedAt ?? node.observedAt) : null;
-  const failureAge = useRelativeTimeState(failedAt);
-  const retryWindowMs = 24 * 60 * 60 * 1000;
-  const canRetry =
-    node.kind === "run" &&
-    labels.model !== "Neon" &&
-    failureAge.status === "relative" &&
-    failureAge.elapsedMs < retryWindowMs;
+  const { canRetry } = labels;
   async function runAction(type: "retry" | "seen") {
     if (!environmentId || sending) return;
-    if (
-      type === "retry" &&
-      (!canRetry || failedAt === null || Date.now() - Date.parse(failedAt) >= retryWindowMs)
-    )
-      return;
+    if (type === "retry" && !canRetry) return;
     setSending(true);
     setError("");
     if (attempt.current?.type !== type) attempt.current = { type, id: randomUUID() };
@@ -171,7 +154,19 @@ export const OtisTreeRow = memo(function OtisTreeRow({
         {!lane && <StateMark node={node} label={labels.state} />}
         <FleetTitle
           title={title}
-          detail={[labels.model, labels.state].filter(Boolean).join(" \u00b7 ")}
+          detail={[
+            labels.model,
+            labels.state,
+            lane &&
+              node.sub.failed !== undefined &&
+              node.sub.done !== undefined &&
+              gt("{failed} failed, {done} done since the lane started", {
+                failed: node.sub.failed,
+                done: node.sub.done,
+              }),
+          ]
+            .filter(Boolean)
+            .join(" · ")}
         />
         {lane && <NeedsYouPill node={node} />}
       </span>
@@ -225,7 +220,7 @@ export const OtisTreeRow = memo(function OtisTreeRow({
           <span className="text-xs text-muted-foreground">{childCount}</span>
         )}
       </div>
-      {node.state === "failed" && !node.seenAt && (
+      {node.state === "failed" && (
         <div className="flex justify-end gap-3 px-2 text-xs">
           {canRetry && (
             <button data-fleet-action="" disabled={sending} onClick={() => void runAction("retry")}>

@@ -2,7 +2,13 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import { it, expect } from "@effect/vitest";
-import { OtisTreeBatch, clientRpcRequiredScopes, type OtisFleetEvent } from "@t3tools/contracts";
+import {
+  OtisFront,
+  OtisTreeBatch,
+  clientRpcRequiredScopes,
+  type OtisFleetEvent,
+  type OtisFrontUpdate,
+} from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -19,6 +25,8 @@ import {
 } from "../../../../packages/client-runtime/src/otis/tree.ts";
 
 const decodeFixtureBatch = Schema.decodeUnknownEffect(Schema.fromJsonString(OtisTreeBatch));
+const decodeTurnRequest = Schema.decodeUnknownEffect(OtisFront.TurnRequest);
+const decodeTurnAccepted = Schema.decodeUnknownEffect(OtisFront.TurnAccepted);
 const producerFixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -26,6 +34,69 @@ const producerFixture = Effect.gen(function* () {
   const fixture = (yield* fs.readFileString(file)).trimEnd().split(/\r?\n/);
   return { fixture, batches: yield* Effect.forEach(fixture, (line) => decodeFixtureBatch(line)) };
 }).pipe(Effect.provide(NodeServices.layer));
+
+it.effect("posts typed turns and forwards the Otis fixture stream across a reconnect", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const fixture = (yield* fs.readFileString(
+      yield* path.fromFileUrl(new URL("./fixtures/front-events.ndjson", import.meta.url)),
+    ))
+      .trimEnd()
+      .split(/\r?\n/);
+    const bodies = JSON.parse(
+      yield* fs.readFileString(
+        yield* path.fromFileUrl(new URL("./fixtures/front-bodies.json", import.meta.url)),
+      ),
+    );
+    const turn = yield* decodeTurnRequest(bodies.TurnRequest[0]);
+    const accepted = yield* decodeTurnAccepted(bodies.TurnAccepted[0]);
+    const first = feed();
+    const second = feed();
+    const cursors: Array<string | null> = [];
+    const posted: unknown[] = [];
+    const bridge = yield* OtisBridge.make({
+      origin: "http://localhost:5197",
+      token: "fixture",
+      reconnect: Effect.never,
+      fetch: async (url, init) => {
+        const route = new URL(String(url));
+        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer fixture");
+        expect(init?.redirect).toBe("error");
+        if (route.pathname === "/api/v1/front/turns") {
+          expect(init?.method).toBe("POST");
+          posted.push(JSON.parse(String(init?.body)));
+          return Response.json(accepted);
+        }
+        expect(route.pathname).toBe("/api/v1/front/events");
+        cursors.push(route.searchParams.get("after"));
+        return cursors.length === 1 ? first.response : second.response;
+      },
+    });
+    const rpc = yield* otisRpcHandlers.pipe(Effect.provideService(OtisBridge.OtisBridge, bridge));
+    expect(yield* rpc["otis.front.turn"](turn)).toEqual(accepted);
+    expect(yield* rpc["otis.front.turn"](turn)).toEqual(accepted);
+    expect(posted).toEqual([turn, turn]);
+    const updates = yield* Queue.unbounded<OtisFrontUpdate>();
+    yield* Stream.runForEach(rpc["otis.front.subscribe"]({}), (event) =>
+      Queue.offer(updates, event),
+    ).pipe(Effect.forkScoped);
+    expect(yield* Queue.take(updates)).toEqual({ type: "connected" });
+    for (const line of fixture.slice(0, 5)) {
+      first.line(line);
+      expect(yield* Queue.take(updates)).toEqual(OtisFront.decodeFrontStreamLine(line));
+    }
+    first.close();
+    expect(yield* Queue.take(updates)).toEqual({ type: "connected" });
+    for (const line of fixture.slice(4)) second.line(line);
+    for (const line of fixture.slice(5)) {
+      const expected = OtisFront.decodeFrontStreamLine(line);
+      if (OtisFront.isKnownFrontEvent(expected))
+        expect(yield* Queue.take(updates)).toEqual(expected);
+    }
+    expect(cursors).toEqual([null, "5"]);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
 
 function feed() {
   let sink!: ReadableStreamDefaultController<Uint8Array>;

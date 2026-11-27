@@ -27,5 +27,12 @@ export const otisRpcHandlers = Effect.gen(function* () {
     "otis.usage": bridge.usage,
     "otis.act": bridge.act,
     "otis.nodeTail": bridge.tail,
+    "otis.front.subscribe": bridge.front.subscribe,
+    "otis.front.turn": bridge.front.turn,
+    "otis.front.cancel": bridge.front.cancel,
+    "otis.front.action": bridge.front.action,
+    "otis.front.history": bridge.front.history,
+    "otis.front.report": bridge.front.report,
+    "otis.front.heard": bridge.front.heard,
   };
 });

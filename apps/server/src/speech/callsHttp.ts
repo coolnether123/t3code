@@ -10,6 +10,7 @@ import {
   HttpServerRespondable,
 } from "effect/http";
 import { authenticateRawRouteWithScope } from "../http.ts";
+import { OtisBridge } from "../otis/OtisBridge.ts";
 import { proxySpeech, streamSpeech, speechInputMode, SpeechUnavailableError } from "./proxy.ts";
 import { ServerConfig } from "../config.ts";
 import { VoiceThreadService } from "./VoiceThreadService.ts";
@@ -47,9 +48,14 @@ export const speechRouteLayer = HttpRouter.add(
       return HttpServerResponse.jsonUnsafe({ threadId: yield* engine.openOtis() });
     const providers = yield* ProviderRegistry;
     const providerService = yield* AuxiliaryProviderSessions;
+    const { front } = yield* OtisBridge;
     const calls = new CallService(
       callStore(config.stateDir),
       {
+        front: {
+          turn: (input) => runPromise(front.turn(input)),
+          cancel: (input) => runPromise(front.cancel(input)),
+        },
         verify: async (options) => {
           const snapshot = await runPromise(engine.snapshot(options.threadId));
           if (!snapshot.projection.thread || snapshot.projection.thread.archivedAt)

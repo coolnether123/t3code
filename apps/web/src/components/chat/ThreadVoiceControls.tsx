@@ -1,9 +1,6 @@
+/* oxlint-disable t3code/no-untranslated-copy -- Existing call-control copy is outside the Otis tab. */
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import { useEnvironmentScope } from "../../state/session";
-import { use } from "react";
-import { OtisChromeHost } from "../otis/OtisChromeHost";
-import { createPortal } from "react-dom";
-import { OtisChrome } from "../otis/OtisChrome";
 import { useEffect, useLayoutEffect, useRef, useState, useImperativeHandle, type Ref } from "react";
 import { MicIcon, SendIcon, Settings2Icon, SquareIcon, XIcon } from "lucide-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -282,38 +279,6 @@ export function ThreadVoiceControls({
   const unheard = (call?.operatorUpdates ?? updates).filter(
     (update) => !update.heardAt && (update.status === "done" || update.status === "needs-Jared"),
   );
-  const otisHost = use(OtisChromeHost);
-  if (otisHost)
-    return createPortal(
-      <OtisChrome
-        canCall={canCall}
-        active={active}
-        ready={
-          props.enabled && configurationReady && !!models.voice.model && !!models.operator.model
-        }
-        status={callStatusLabel(state, call)}
-        error={configurationError ?? (state === "error" ? detail : undefined)}
-        start={() =>
-          void sessionRef.current?.start(
-            {
-              threadId: props.threadId,
-              modelSelection: models.voice,
-              operatorSelection: models.operator,
-              backchannels,
-            },
-            messages,
-          )
-        }
-        retry={() => {
-          if (!configurationReady) void configure(models);
-          else void sessionRef.current?.resume();
-        }}
-        end={() => void sessionRef.current?.stop()}
-        mute={(muted) => sessionRef.current?.setMuted(muted)}
-        speaker={(enabled) => audioRef.current?.setSpeaker(enabled)}
-      />,
-      otisHost,
-    );
   return (
     <Popover open={expanded} onOpenChange={setExpanded}>
       <div ref={anchorRef} className="relative min-w-0 w-full" data-voice-state={state}>

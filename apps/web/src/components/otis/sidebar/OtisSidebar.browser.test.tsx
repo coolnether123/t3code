@@ -47,7 +47,8 @@ function exampleTree() {
   const parent: OtisNode = {
     ...roots[0]!,
     chat: { host: "otis", threadId: "fixture-parent" },
-    sub: { ...base.sub, nodes: 5, running: 2 },
+    sub: { ...base.sub, nodes: 7, running: 2, failed: 46, done: 312 },
+    lastActivityAt: "2026-11-23T00:00:00Z",
   };
   const a: OtisNode = {
     ...child,
@@ -74,6 +75,10 @@ function exampleTree() {
     title: "Check the gap in voice playback",
     state: "failed",
     stateReason: "Process ended without a result",
+    startedAt: "2026-11-22T23:59:00Z",
+    endedAt: parent.lastActivityAt!,
+    seenAt: null,
+    taskId: "voice-gap",
   };
   const finished: OtisNode = {
     ...b,
@@ -82,11 +87,31 @@ function exampleTree() {
     state: "done",
     settled: true,
   };
-  return { nodes: [parent, ...roots.slice(1), a, b, c, d], a, b, finished };
+  return {
+    nodes: [
+      parent,
+      ...roots.slice(1),
+      a,
+      b,
+      c,
+      d,
+      { ...d, id: "seen", taskId: "seen", title: "Seen failure", seenAt: d.endedAt },
+      {
+        ...d,
+        id: "old",
+        title: "Superseded failure",
+        startedAt: "2026-11-22T23:58:00Z",
+      },
+    ],
+    a,
+    b,
+    d,
+    finished,
+  };
 }
 it("opens the native parent chat, expands its children, and follows it on desktop and phone", async () => {
   await page.viewport(1280, 844);
-  const { nodes, a, b, finished } = exampleTree();
+  const { nodes, a, b, d, finished } = exampleTree();
   const frames = new TransformStream<OtisFleetEvent, OtisFleetEvent>();
   const writer = frames.writable.getWriter();
   using _rpc = answerRpc("otis.subscribe", ({ read }: { read?: OtisTreeRead }) =>
@@ -140,6 +165,9 @@ it("opens the native parent chat, expands its children, and follows it on deskto
   await page.getByRole("button", { name: "Expand Otis #1" }).click();
   const lane = page.getByRole("region", { name: "Otis fleet" });
   await expect.element(lane.getByText(a.title)).toBeVisible();
+  await expect.element(lane.getByText(d.title)).toBeVisible();
+  await expect.element(lane.getByText("Superseded failure")).toBeVisible();
+  await expect.element(lane.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
   await lane.getByRole("button", { name: /^Otis #1/ }).click();
   await expect.element(page.getByRole("heading", { name: "Otis #1" })).toBeVisible();
   await expect.element(page.getByText("Initial parent turn.")).toBeVisible();
@@ -160,12 +188,20 @@ it("opens the native parent chat, expands its children, and follows it on deskto
     type: "delta",
     seq: 2,
     nodes: [
-      { ...nodes[0]!, tailSeq: 20, rev: nodes[0]!.rev + 1 },
+      {
+        ...nodes[0]!,
+        tailSeq: 20,
+        rev: nodes[0]!.rev + 1,
+        lastActivityAt: "2026-11-23T00:01:00Z",
+      },
       { ...a, waiting: 1, rev: a.rev + 1 },
       { ...b, tokens: { in: 100000, out: 0, cached: 0, total: 100000 }, rev: b.rev + 1 },
     ],
   });
   await expect.element(page.getByText("New parent turn.")).toBeVisible();
+  await expect
+    .element(lane.getByRole("button", { name: "Retry", exact: true }))
+    .not.toBeInTheDocument();
   expect(tail).toHaveBeenLastCalledWith({ nodeId: "lane:otis-1", after: 10 });
   await expect
     .element(lane.getByRole("button", { name: new RegExp(b.title) }).getByText(/\$3\.10/))
@@ -186,7 +222,10 @@ it("opens the native parent chat, expands its children, and follows it on deskto
   await lane.getByRole("button", { name: "Expand Otis #1" }).click();
   await expect.element(lane.getByText(a.title)).toBeVisible();
   await expect.element(lane.getByText("Facilities")).not.toBeInTheDocument();
-  await expect.element(lane.getByText(/Astra \u00b7 2 running/)).toBeVisible();
+  const meta = lane.getByText(/Astra \u00b7 2 running/);
+  await expect.element(meta).toBeVisible();
+  expect(meta.element().scrollHeight).toBe(meta.element().clientHeight);
+  expect(meta.element().textContent).not.toMatch(/46|312/);
   await expect.element(lane.getByRole("button", { name: "Done · 1" })).toBeVisible();
   await page.screenshot({ path: "__screenshots__/fleet-v1-phone.png" });
   await lane.getByRole("button", { name: "Open chat", exact: true }).click();

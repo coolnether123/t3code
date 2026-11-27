@@ -1,5 +1,7 @@
 import {
   OtisActionResult,
+  OtisFront,
+  type OtisFrontUpdate,
   OtisLaneUsage,
   type OtisLaneUsageInput,
   OtisRpcError,
@@ -35,6 +37,28 @@ interface Bridge {
   readonly read: (query: OtisTreeRead) => Effect.Effect<OtisTreeReadResult, OtisRpcError>;
   readonly act: (input: OtisAction) => Effect.Effect<OtisActionResult, OtisRpcError>;
   readonly tail: (input: OtisTailInput) => Effect.Effect<OtisTailPage, OtisRpcError>;
+  readonly front: FrontBridge;
+}
+
+interface FrontBridge {
+  readonly subscribe: (input: { readonly after?: number }) => Stream.Stream<OtisFrontUpdate>;
+  readonly turn: (
+    input: OtisFront.TurnRequest,
+  ) => Effect.Effect<OtisFront.TurnAccepted, OtisRpcError>;
+  readonly cancel: (input: {
+    readonly turnId: string;
+  }) => Effect.Effect<OtisFront.TurnCancelled, OtisRpcError>;
+  readonly action: (
+    input: OtisFront.ActionRequest & { readonly actionId: string },
+  ) => Effect.Effect<OtisFront.ActionResult, OtisRpcError>;
+  readonly history: (input: {
+    readonly before?: string;
+    readonly limit?: number;
+  }) => Effect.Effect<OtisFront.ConversationPage, OtisRpcError>;
+  readonly report: () => Effect.Effect<OtisFront.LatestMorningReport, OtisRpcError>;
+  readonly heard: (input: {
+    readonly reportId: string;
+  }) => Effect.Effect<OtisFront.ReportHeard, OtisRpcError>;
 }
 
 const unavailable = { type: "unavailable" } as const;
@@ -47,6 +71,15 @@ export class OtisBridge extends Context.Reference<Bridge>("t3/otis/OtisBridge", 
     act: () => unconfigured,
     read: () => unconfigured,
     tail: () => unconfigured,
+    front: {
+      subscribe: () => Stream.make(unavailable),
+      turn: () => unconfigured,
+      cancel: () => unconfigured,
+      action: () => unconfigured,
+      history: () => unconfigured,
+      report: () => unconfigured,
+      heard: () => unconfigured,
+    },
   }),
 }) {}
 
@@ -84,6 +117,7 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
   readonly featuredWorkerIds?: readonly string[];
   readonly localReadOrigin?: string | undefined;
   readonly localActionToken?: string | undefined;
+  readonly taskDashboardUrl?: string | undefined;
   readonly fetch?: typeof fetch;
   readonly reconnect: Effect.Effect<void>;
 }) {
@@ -91,13 +125,19 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
     options.origin === undefined && options.localReadOrigin !== undefined && !options.token;
   const origin = configuredOrigin(options.origin ?? options.localReadOrigin);
   if (!origin || (!localRead && !options.token)) return yield* OtisBridge;
+  const dashboard = configuredOrigin(options.taskDashboardUrl ?? options.origin);
+  const taskDashboardUrl = dashboard?.protocol === "https:" ? dashboard.href : undefined;
   const fetchImpl = options.fetch ?? (yield* FetchHttpClient.Fetch);
   const encodeBody = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
-  const request = Effect.fn("OtisBridge.request")(function* (path: string, body?: unknown) {
+  const request = Effect.fn("OtisBridge.request")(function* (
+    path: string,
+    body?: unknown,
+    base = "/api/v1/lanes",
+  ) {
     const headers = new Headers({ "Content-Type": "application/json" });
     if (localRead) {
       headers.set("X-Otis-Actor", "user:local");
-      if (options.localActionToken && path === "nodes/act") {
+      if (options.localActionToken && base === "/api/v1/lanes" && path === "nodes/act") {
         headers.set("Authorization", `Bearer ${options.localActionToken}`);
       }
     } else {
@@ -109,7 +149,7 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
         : yield* encodeBody(body).pipe(Effect.mapError(invalidResponse));
     const response = yield* Effect.tryPromise({
       try: (signal) =>
-        fetchImpl(new URL(`/api/v1/lanes/${path}`, origin), {
+        fetchImpl(new URL(`${base}/${path}`, origin), {
           method: body === undefined ? "GET" : "POST",
           ...(encoded === undefined ? {} : { body: encoded }),
           signal,
@@ -162,18 +202,14 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
     { bufferSize: 1 },
   );
 
-  const lines = (path: string) =>
-    Stream.unwrap(
-      request(path).pipe(
-        Effect.map((response) =>
-          Stream.fromReadableStream({ evaluate: () => response.body!, onError: unreachable }).pipe(
-            Stream.decodeText(),
-            Stream.splitLines,
-            Stream.filter((line) => line.trim().length > 0),
-          ),
-        ),
-      ),
+  const responseLines = (response: Response) =>
+    Stream.fromReadableStream({ evaluate: () => response.body!, onError: unreachable }).pipe(
+      Stream.decodeText(),
+      Stream.splitLines,
+      Stream.filter((line) => line.trim().length > 0),
     );
+  const lines = (path: string, base?: string) =>
+    Stream.unwrap(request(path, undefined, base).pipe(Effect.map(responseLines)));
   const readTree = Effect.suspend(() =>
     lines(seq === undefined ? "tree-stream" : `tree-stream?after=${seq}`).pipe(
       Stream.mapEffect((line) => treeLine(line)),
@@ -243,8 +279,12 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
     Effect.forkScoped,
   );
 
-  const requestJson = Effect.fn("OtisBridge.requestJson")(function* (path: string, body?: unknown) {
-    const response = yield* request(path, body);
+  const requestJson = Effect.fn("OtisBridge.requestJson")(function* (
+    path: string,
+    body?: unknown,
+    base?: string,
+  ) {
+    const response = yield* request(path, body, base);
     return yield* Effect.tryPromise({
       try: () => response.json() as Promise<unknown>,
       catch: invalidResponse,
@@ -296,7 +336,85 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
     const raw = yield* requestJson(`usage?${query}`);
     return yield* decodeUsage(raw).pipe(Effect.mapError(invalidResponse));
   });
-  return { act, tail, subscribe, read, usage } satisfies Bridge;
+  const frontRequest = Effect.fn("OtisBridge.front.request")(function* <A>(
+    schema: Schema.Decoder<A>,
+    path: string,
+    body?: unknown,
+  ) {
+    if (localRead && body !== undefined) return yield* unconfigured;
+    const raw = yield* requestJson(path, body, OtisFront.FRONT_API_BASE);
+    return yield* Schema.decodeUnknownEffect(schema)(raw).pipe(Effect.mapError(invalidResponse));
+  });
+  const decodeFrontLine = Schema.decodeUnknownEffect(
+    Schema.fromJsonString(OtisFront.FrontStreamEvent),
+  );
+  const front: FrontBridge = {
+    subscribe: ({ after }) =>
+      Stream.suspend(() => {
+        let cursor = after;
+        return Stream.suspend(() => {
+          let progressed = false;
+          const path = cursor === undefined ? "events" : `events?after=${cursor}`;
+          return Stream.unwrap(
+            request(path, undefined, OtisFront.FRONT_API_BASE).pipe(
+              Effect.map((response) =>
+                Stream.succeed<OtisFrontUpdate>({
+                  type: "connected",
+                  ...(taskDashboardUrl ? { taskDashboardUrl } : {}),
+                }).pipe(
+                  Stream.concat(
+                    responseLines(response).pipe(
+                      Stream.mapEffect((line) => decodeFrontLine(line)),
+                      Stream.filter((event) => {
+                        if (event.type !== "reset" && cursor !== undefined && event.seq <= cursor)
+                          return event.type === "state";
+                        progressed ||= event.seq !== cursor;
+                        cursor = event.seq;
+                        return true;
+                      }),
+                      Stream.filter(OtisFront.isKnownFrontEvent),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ).pipe(
+            Stream.catch(() => Stream.empty),
+            Stream.concat(
+              Stream.suspend(() =>
+                progressed
+                  ? Stream.empty
+                  : Stream.succeed(unavailable).pipe(
+                      Stream.concat(Stream.fromEffect(options.reconnect).pipe(Stream.drain)),
+                    ),
+              ),
+            ),
+          );
+        }).pipe(Stream.forever);
+      }),
+    turn: (input) => frontRequest(OtisFront.TurnAccepted, "turns", input),
+    cancel: ({ turnId }) =>
+      frontRequest(OtisFront.TurnCancelled, `turns/${encodeURIComponent(turnId)}/cancel`, {}),
+    action: ({ actionId, ...input }) =>
+      frontRequest(OtisFront.ActionResult, `actions/${encodeURIComponent(actionId)}`, input),
+    history: ({ before, limit }) => {
+      const query = new URLSearchParams();
+      if (before !== undefined) query.set("before", before);
+      if (limit !== undefined) query.set("limit", String(limit));
+      return frontRequest(
+        OtisFront.ConversationPage,
+        query.size ? `conversation?${query}` : "conversation",
+      );
+    },
+    report: () => frontRequest(OtisFront.LatestMorningReport, "reports/morning/latest"),
+    heard: ({ reportId }) =>
+      frontRequest(
+        OtisFront.ReportHeard,
+        `reports/morning/${encodeURIComponent(reportId)}/heard`,
+        {},
+      ),
+  };
+  return { act, tail, subscribe, read, usage, front } satisfies Bridge;
 });
 
 export function nativeChats(sql: SqlClient.SqlClient, environmentId: string) {
@@ -433,6 +551,10 @@ export const layer = Layer.effect(
         Effect.orElseSucceed(() => undefined),
       ),
       token: yield* Config.option(Config.String("T3_OTIS_TOKEN")).pipe(
+        Effect.map(Option.getOrUndefined),
+        Effect.orElseSucceed(() => undefined),
+      ),
+      taskDashboardUrl: yield* Config.option(Config.String("T3_OTIS_DASHBOARD_URL")).pipe(
         Effect.map(Option.getOrUndefined),
         Effect.orElseSucceed(() => undefined),
       ),
