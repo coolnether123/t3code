@@ -83,10 +83,12 @@ function FleetList({
         (node) =>
           node.kind === "run" &&
           node.chat?.host === "otis" &&
-          node.chat.threadId &&
           !node.settled &&
           !featuredIds.has(node.id) &&
-          (node.state === "running" || node.state === "idle") &&
+          (node.state === "queued" ||
+            node.state === "starting" ||
+            node.state === "running" ||
+            node.state === "idle") &&
           (isMobile || !visibleTreeNodes.has(node.id)),
       ),
     );
