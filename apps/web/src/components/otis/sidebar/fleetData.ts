@@ -1,7 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
-import { settledChildren } from "@t3tools/client-runtime/rpc/otis-history";
+import { readOtisTree, settledChildren } from "@t3tools/client-runtime/rpc/otis-history";
 import { runStreamInEnvironment } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, OtisAction, OtisNode } from "@t3tools/contracts";
+import type { EnvironmentId, OtisAction, OtisNode, OtisTreeRead } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
@@ -44,7 +44,25 @@ export async function readDonePage(
   before: string | null,
   signal: AbortSignal,
 ): Promise<DonePage> {
-  const stream = settledChildren(parent, before);
+  const result = await firstTreeRead(environmentId, settledChildren(parent, before), signal);
+  if (!result || !("next" in result)) throw new Error("Done chats unavailable");
+  return result;
+}
+
+export async function readWorkerNodes(
+  environmentId: EnvironmentId,
+  read: Extract<OtisTreeRead, { nodeId: string } | { featuredWorkers: true }>,
+  signal: AbortSignal,
+) {
+  const result = await firstTreeRead(environmentId, readOtisTree(read), signal);
+  return result?.nodes ?? [];
+}
+
+async function firstTreeRead(
+  environmentId: EnvironmentId,
+  stream: ReturnType<typeof readOtisTree>,
+  signal: AbortSignal,
+) {
   const response = await Effect.runPromise(
     AtomRegistry.getResult(appAtomRegistry, connectionAtomRuntime).pipe(
       Effect.flatMap((context) =>
@@ -54,7 +72,5 @@ export async function readDonePage(
     { signal },
   );
   const frame = Option.getOrNull(response);
-  if (frame?.type !== "read" || !("next" in frame.result))
-    throw new Error("Done chats unavailable");
-  return frame.result;
+  return frame?.type === "read" ? frame.result : null;
 }

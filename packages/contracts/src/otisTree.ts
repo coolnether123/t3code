@@ -77,6 +77,7 @@ export const OtisTreeBatch = S.Struct({
 export type OtisTreeBatch = typeof OtisTreeBatch.Type;
 const historyPage = S.Struct({ nodes: S.Array(OtisNode), next: textOrNull });
 export const OtisTreeRead = S.Union([
+  S.Struct({ featuredWorkers: S.Literal(true) }),
   S.Struct({
     parent: id,
     settled: S.Literal(true),

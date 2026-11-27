@@ -10,7 +10,7 @@ import {
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import * as Schema from "effect/Schema";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { fleetRowLabels, flattenFleet, type FleetState } from "@t3tools/client-runtime/otis/tree";
 import { isElectron } from "~/env";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
@@ -26,7 +26,7 @@ import { OtisPlanStrip } from "./OtisPlanStrip";
 import { OtisDoneFold } from "./OtisDoneFold";
 import { OtisTreeRow, NeedsYouPill, OtisRowMeta } from "./OtisTreeRow";
 import { useOtisRowMenu } from "./useOtisRowMenu";
-import { useFleet } from "./fleetData";
+import { readWorkerNodes, useFleet } from "./fleetData";
 import { useConnectingParents } from "./MakeParent";
 import "./fleet.css";
 
@@ -63,15 +63,33 @@ function FleetList({
   const expanded = new Set(isMobile ? path : expandedIds);
   const rows = flattenFleet(nodes, expanded);
   const visibleTreeNodes = new Set(rows.map(({ node }) => node.id));
-  const workers = [...nodes.values()].filter(
-    (node) =>
-      node.kind === "run" &&
-      node.chat?.host === "otis" &&
-      node.chat.threadId &&
-      !node.settled &&
-      (node.state === "running" || node.state === "idle") &&
-      (isMobile || !visibleTreeNodes.has(node.id)),
-  );
+  const [featuredWorkers, setFeaturedWorkers] = useState<readonly OtisNode[]>([]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Read the configured worker shortcuts from the current environment.
+  useEffect(() => {
+    const controller = new AbortController();
+    void readWorkerNodes(environmentId, { featuredWorkers: true }, controller.signal).then(
+      (workers) => {
+        if (!controller.signal.aborted) setFeaturedWorkers(workers);
+      },
+      () => {},
+    );
+    return () => controller.abort();
+  }, [environmentId]);
+  const featuredIds = new Set(featuredWorkers.map((node) => node.id));
+  const workers = featuredWorkers
+    .map((node) => nodes.get(node.id) ?? node)
+    .concat(
+      [...nodes.values()].filter(
+        (node) =>
+          node.kind === "run" &&
+          node.chat?.host === "otis" &&
+          node.chat.threadId &&
+          !node.settled &&
+          !featuredIds.has(node.id) &&
+          (node.state === "running" || node.state === "idle") &&
+          (isMobile || !visibleTreeNodes.has(node.id)),
+      ),
+    );
   const children = new Map<string, { count: number; represented: number }>();
   const bound = new Set<string>();
   for (const node of nodes.values()) {

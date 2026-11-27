@@ -81,6 +81,7 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
     title: string,
   ) => Effect.Effect<unknown, OtisRpcError>;
   readonly resolveChats?: (nodes: readonly OtisNode[]) => Effect.Effect<readonly OtisNode[]>;
+  readonly featuredWorkerIds?: readonly string[];
   readonly localReadOrigin?: string | undefined;
   readonly localActionToken?: string | undefined;
   readonly fetch?: typeof fetch;
@@ -269,12 +270,26 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
     if (result.nodeId !== nodeId) return yield* invalidResponse();
     return result;
   });
-  const read = Effect.fn("OtisBridge.read")(function* (query: OtisTreeRead) {
+  const readNodes = Effect.fn("OtisBridge.readNodes")(function* (
+    query: Exclude<OtisTreeRead, { readonly featuredWorkers: true }>,
+  ) {
     const raw = yield* requestJson("tree-read", query);
     const result = yield* decodeTreeRead(raw).pipe(Effect.mapError(invalidResponse));
     return options.resolveChats
       ? { ...result, nodes: yield* options.resolveChats(result.nodes) }
       : result;
+  });
+  const read = Effect.fn("OtisBridge.read")(function* (query: OtisTreeRead) {
+    if (!("featuredWorkers" in query)) return yield* readNodes(query);
+    const workers = yield* Effect.forEach(options.featuredWorkerIds ?? [], (nodeId) =>
+      readNodes({ nodeId }).pipe(
+        Effect.map((page) =>
+          page.nodes.find((node) => node.id === nodeId && node.kind === "run" && node.chat),
+        ),
+        Effect.orElseSucceed(() => undefined),
+      ),
+    );
+    return { nodes: workers.filter((node) => node !== undefined), next: null };
   });
   const usage = Effect.fn("OtisBridge.usage")(function* ({ since, until }: OtisLaneUsageInput) {
     const query = new URLSearchParams({ since, until, groupBy: "day" });
@@ -400,6 +415,7 @@ export const layer = Layer.effect(
     const native = nativeChats(sql, environmentId);
     return yield* make({
       parentBinding: native.parentBinding,
+      featuredWorkerIds: Object.keys(titles),
       resolveChats: (nodes) =>
         native
           .resolveChats(nodes)

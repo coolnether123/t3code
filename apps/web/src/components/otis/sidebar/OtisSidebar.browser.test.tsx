@@ -91,7 +91,10 @@ it("opens the native parent chat, expands its children, and follows it on deskto
   const writer = frames.writable.getWriter();
   using _rpc = answerRpc("otis.subscribe", ({ read }: { read?: OtisTreeRead }) =>
     read
-      ? Stream.make({ type: "read", result: { nodes: [finished], next: null } })
+      ? Stream.make({
+          type: "read",
+          result: { nodes: "featuredWorkers" in read ? [] : [finished], next: null },
+        })
       : Stream.fromReadableStream({ evaluate: () => frames.readable, onError: String }),
   );
   const tail = vi.fn(({ nodeId, after }: OtisTailInput) =>

@@ -25,7 +25,7 @@ vi.mock("../../../../../../packages/client-runtime/src/connection/driver.ts", as
   return { ...actual, layer: Layer.succeed(actual.ConnectionDriver, fakeDriver) };
 });
 
-import type { OtisFleetEvent, OtisNode, OtisTailInput } from "@t3tools/contracts";
+import type { OtisFleetEvent, OtisNode, OtisTailInput, OtisTreeRead } from "@t3tools/contracts";
 import type { OtisAction } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
@@ -51,8 +51,18 @@ it("opens a managed worker directly and replies in its live transcript", async (
   };
   const frames = new TransformStream<OtisFleetEvent, OtisFleetEvent>();
   const writer = frames.writable.getWriter();
-  using _fleet = answerRpc("otis.subscribe", () =>
-    Stream.fromReadableStream({ evaluate: () => frames.readable, onError: String }),
+  const pastWorker: OtisNode = {
+    ...worker,
+    id: "finished-worker",
+    title: "Otis: router unfreeze",
+    state: "done",
+    settled: true,
+    can: [],
+  };
+  using _fleet = answerRpc("otis.subscribe", ({ read }: { read?: OtisTreeRead }) =>
+    read
+      ? Stream.make({ type: "read" as const, result: { nodes: [pastWorker], next: null } })
+      : Stream.fromReadableStream({ evaluate: () => frames.readable, onError: String }),
   );
   const act = vi.fn((_input: OtisAction) => Effect.succeed({ accepted: true }));
   using _act = answerRpc("otis.act", act);
@@ -113,4 +123,10 @@ it("opens a managed worker directly and replies in its live transcript", async (
     nodes: [{ ...worker, tailSeq: 20, rev: worker.rev + 1 }],
   });
   await expect.element(page.getByText("I checked the receipt.")).toBeVisible();
+  await workers.getByRole("button", { name: pastWorker.title }).click();
+  await expect.element(page.getByRole("heading", { name: pastWorker.title })).toBeVisible();
+  await expect.element(page.getByText("I have the release.")).toBeVisible();
+  await expect
+    .element(page.getByRole("textbox", { name: "Message this worker" }))
+    .not.toBeInTheDocument();
 });

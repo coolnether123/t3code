@@ -3,7 +3,7 @@ import { EnvironmentId as EnvId, ThreadId } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { buildThreadRouteParams } from "~/threadRoutes";
 import { useGT } from "gt-react";
-import type { EnvironmentId, OtisTailInput, OtisTailPage } from "@t3tools/contracts";
+import type { EnvironmentId, OtisNode, OtisTailInput, OtisTailPage } from "@t3tools/contracts";
 import { createOtisTreeAtoms } from "@t3tools/client-runtime/state/otis-tree";
 import * as Effect from "effect/Effect";
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
@@ -17,7 +17,7 @@ import { writeLocalStorageValue } from "~/hooks/useLocalStorage";
 import { SidebarInset, useSidebar } from "../ui/sidebar";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { randomUUID } from "~/lib/utils";
-import { runFleetAction, useFleet } from "./sidebar/fleetData";
+import { readWorkerNodes, runFleetAction, useFleet } from "./sidebar/fleetData";
 
 const { tail } = createOtisTreeAtoms(connectionAtomRuntime);
 
@@ -35,8 +35,22 @@ export function OtisTranscriptView({ nodeId }: { nodeId: string }) {
   const { setOpen, setOpenMobile, isMobile } = useSidebar();
   const node = nodes.get(nodeId);
   const [lastNode, setLastNode] = useState(node);
+  const [historicalNode, setHistoricalNode] = useState<OtisNode>();
   if (node && node !== lastNode) setLastNode(node);
-  const shownNode = node ?? (lastNode?.id === nodeId ? lastNode : undefined);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Open the exact record when a finished worker or deep link is outside the live tree.
+  useEffect(() => {
+    if (node || !environmentId) return;
+    const controller = new AbortController();
+    void readWorkerNodes(environmentId, { nodeId }, controller.signal).then(
+      (nodes) => {
+        if (!controller.signal.aborted) setHistoricalNode(nodes.find((node) => node.id === nodeId));
+      },
+      () => {},
+    );
+    return () => controller.abort();
+  }, [environmentId, nodeId, node]);
+  const shownNode =
+    node ?? [historicalNode, lastNode].find((candidate) => candidate?.id === nodeId);
   const chat = shownNode?.chat;
   const canReply =
     node?.kind === "run" && node.chat?.host === "otis" && node.can.includes("message");
@@ -75,7 +89,7 @@ export function OtisTranscriptView({ nodeId }: { nodeId: string }) {
                 }
           }
           tailSeq={shownNode?.tailSeq ?? 0}
-          settled={sidebar === "otis" && node === undefined && lastNode !== undefined}
+          settled={sidebar === "otis" && node === undefined && shownNode?.settled === true}
         />
       )}
       {environmentId && canReply && (
