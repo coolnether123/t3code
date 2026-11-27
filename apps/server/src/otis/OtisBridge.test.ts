@@ -276,6 +276,43 @@ it.effect("reads the local fleet and transcript without granting actions", () =>
   }),
 );
 
+it.effect("grants local T3 only worker replies and keeps the bearer off reads", () =>
+  Effect.gen(function* () {
+    const message = {
+      type: "message",
+      nodeId: "run",
+      requestId: "reply",
+      text: "Continue.",
+    } as const;
+    const paths: string[] = [];
+    const bridge = yield* OtisBridge.make({
+      localReadOrigin: "http://127.0.0.1:5197",
+      localActionToken: "fixture",
+      reconnect: Effect.never,
+      fetch: async (url, init) => {
+        const pathname = new URL(String(url)).pathname;
+        paths.push(pathname);
+        const headers = new Headers(init?.headers);
+        expect(headers.get("x-otis-actor")).toBe("user:local");
+        if (pathname.endsWith("/nodes/act")) {
+          expect(headers.get("authorization")).toBe("Bearer fixture");
+          expect(JSON.parse(String(init?.body))).toEqual(message);
+          return Response.json({ accepted: true });
+        }
+        expect(headers.has("authorization")).toBe(false);
+        return Response.json({ nodes: [], next: null });
+      },
+    });
+    yield* bridge.read({ nodeId: "run" });
+    const denied = yield* Effect.flip(
+      bridge.act({ type: "seen", nodeId: "run", requestId: "one" }),
+    );
+    expect(denied.reason).toBe("unconfigured");
+    expect(yield* bridge.act(message)).toEqual({ accepted: true });
+    expect(paths).toEqual(["/api/v1/lanes/tree-read", "/api/v1/lanes/nodes/act"]);
+  }),
+);
+
 it.effect("keeps the bearer on loopback and separates read from operate grants", () =>
   Effect.gen(function* () {
     for (const origin of [

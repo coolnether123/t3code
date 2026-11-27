@@ -62,6 +62,16 @@ function FleetList({
   const parent = isMobile ? nodes.get(path.at(-1) ?? "") : undefined;
   const expanded = new Set(isMobile ? path : expandedIds);
   const rows = flattenFleet(nodes, expanded);
+  const visibleTreeNodes = new Set(rows.map(({ node }) => node.id));
+  const workers = [...nodes.values()].filter(
+    (node) =>
+      node.kind === "run" &&
+      node.chat?.host === "otis" &&
+      node.chat.threadId &&
+      !node.settled &&
+      (node.state === "running" || node.state === "idle") &&
+      (isMobile || !visibleTreeNodes.has(node.id)),
+  );
   const children = new Map<string, { count: number; represented: number }>();
   const bound = new Set<string>();
   for (const node of nodes.values()) {
@@ -205,6 +215,23 @@ function FleetList({
               void navigate({ to: "/usage-resets", hash: "plans" });
             }}
           />
+        )}
+        {!parent && workers.length > 0 && (
+          <section aria-label={gt("Otis workers")} className="mb-2 border-b pb-2">
+            <h2 className="px-2 py-1 text-xs font-medium text-muted-foreground">
+              {gt("Otis workers")}
+            </h2>
+            {workers.map((node) => (
+              <button
+                key={node.id}
+                data-fleet-link=""
+                className="min-w-0"
+                onClick={() => open(node)}
+              >
+                <span className="truncate">{node.title}</span>
+              </button>
+            ))}
+          </section>
         )}
         {connecting
           .filter(

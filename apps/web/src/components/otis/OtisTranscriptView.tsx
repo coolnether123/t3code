@@ -6,7 +6,7 @@ import { useGT } from "gt-react";
 import type { EnvironmentId, OtisTailInput, OtisTailPage } from "@t3tools/contracts";
 import { createOtisTreeAtoms } from "@t3tools/client-runtime/state/otis-tree";
 import * as Effect from "effect/Effect";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import { connectionAtomRuntime } from "~/connection/runtime";
 import { isElectron } from "~/env";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
@@ -16,7 +16,8 @@ import * as Schema from "effect/Schema";
 import { writeLocalStorageValue } from "~/hooks/useLocalStorage";
 import { SidebarInset, useSidebar } from "../ui/sidebar";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
-import { useFleet } from "./sidebar/fleetData";
+import { randomUUID } from "~/lib/utils";
+import { runFleetAction, useFleet } from "./sidebar/fleetData";
 
 const { tail } = createOtisTreeAtoms(connectionAtomRuntime);
 
@@ -37,6 +38,8 @@ export function OtisTranscriptView({ nodeId }: { nodeId: string }) {
   if (node && node !== lastNode) setLastNode(node);
   const shownNode = node ?? (lastNode?.id === nodeId ? lastNode : undefined);
   const chat = shownNode?.chat;
+  const canReply =
+    node?.kind === "run" && node.chat?.host === "otis" && node.can.includes("message");
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden">
       <WorkspacePageHeader electron={isElectron} className="border-b">
@@ -53,7 +56,9 @@ export function OtisTranscriptView({ nodeId }: { nodeId: string }) {
             {gt("Open chat")}
           </Link>
         )}
-        <span className="ml-auto shrink-0 text-xs text-muted-foreground">{gt("Read only")}</span>
+        {!canReply && (
+          <span className="ml-auto shrink-0 text-xs text-muted-foreground">{gt("Read only")}</span>
+        )}
       </WorkspacePageHeader>
       {environmentId && (
         <Transcript
@@ -73,7 +78,69 @@ export function OtisTranscriptView({ nodeId }: { nodeId: string }) {
           settled={sidebar === "otis" && node === undefined && lastNode !== undefined}
         />
       )}
+      {environmentId && canReply && (
+        <WorkerReply key={nodeId} environmentId={environmentId} nodeId={nodeId} />
+      )}
     </SidebarInset>
+  );
+}
+
+function WorkerReply({ environmentId, nodeId }: { environmentId: EnvironmentId; nodeId: string }) {
+  const gt = useGT();
+  const [draft, setDraft] = useState("");
+  const [result, setResult] = useState("");
+  const [sending, setSending] = useState(false);
+  const attempt = useRef<{ text: string; id: string } | null>(null);
+
+  async function send(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const text = draft.trim();
+    if (!text || sending) return;
+    if (attempt.current?.text !== text) attempt.current = { text, id: randomUUID() };
+    setSending(true);
+    setResult("");
+    try {
+      const receipt = await runFleetAction(environmentId, {
+        type: "message",
+        nodeId,
+        text,
+        requestId: attempt.current.id,
+      });
+      if (!("accepted" in receipt) || !receipt.accepted) throw new Error();
+      attempt.current = null;
+      setDraft("");
+      setResult(gt("Message accepted."));
+    } catch {
+      setResult(gt("Otis could not confirm delivery. You can retry this message."));
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <form className="shrink-0 border-t" onSubmit={(event) => void send(event)}>
+      <div className="mx-auto flex w-full max-w-3xl flex-col gap-2 px-4 py-3 sm:px-6">
+        <div className="flex items-end gap-2">
+          <textarea
+            aria-label={gt("Message this worker")}
+            className="min-w-0 flex-1 resize-y rounded-md border bg-background px-3 py-2 text-sm"
+            disabled={sending}
+            maxLength={8192}
+            rows={2}
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          <Button type="submit" disabled={sending || !draft.trim()}>
+            {gt("Send")}
+          </Button>
+        </div>
+        {result && (
+          <p role="status" className="text-xs text-muted-foreground">
+            {result}
+          </p>
+        )}
+      </div>
+    </form>
   );
 }
 

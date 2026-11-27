@@ -82,6 +82,7 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
   ) => Effect.Effect<unknown, OtisRpcError>;
   readonly resolveChats?: (nodes: readonly OtisNode[]) => Effect.Effect<readonly OtisNode[]>;
   readonly localReadOrigin?: string | undefined;
+  readonly localActionToken?: string | undefined;
   readonly fetch?: typeof fetch;
   readonly reconnect: Effect.Effect<void>;
 }) {
@@ -91,10 +92,16 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
   if (!origin || (!localRead && !options.token)) return yield* OtisBridge;
   const fetchImpl = options.fetch ?? (yield* FetchHttpClient.Fetch);
   const encodeBody = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
-  const headers = new Headers({ "Content-Type": "application/json" });
-  if (localRead) headers.set("X-Otis-Actor", "user:local");
-  else headers.set("Authorization", `Bearer ${options.token}`);
   const request = Effect.fn("OtisBridge.request")(function* (path: string, body?: unknown) {
+    const headers = new Headers({ "Content-Type": "application/json" });
+    if (localRead) {
+      headers.set("X-Otis-Actor", "user:local");
+      if (options.localActionToken && path === "nodes/act") {
+        headers.set("Authorization", `Bearer ${options.localActionToken}`);
+      }
+    } else {
+      headers.set("Authorization", `Bearer ${options.token}`);
+    }
     const encoded =
       body === undefined
         ? undefined
@@ -243,7 +250,8 @@ export const make = Effect.fn("OtisBridge.make")(function* (options: {
     });
   });
   const act = Effect.fn("OtisBridge.act")(function* (input: OtisAction) {
-    if (localRead) return yield* unconfigured;
+    if (localRead && (!options.localActionToken || input.type !== "message"))
+      return yield* unconfigured;
     if (input.type === "parent.bind") {
       if (!options.parentBinding) return yield* unconfigured;
       return yield* decodeAction(
@@ -361,8 +369,49 @@ export const layer = Layer.effect(
     const sql = yield* SqlClient.SqlClient;
     const identity = yield* ServerEnvironment.ServerEnvironmentIdentity;
     const environmentId = yield* identity.getEnvironmentId;
+    const localAppData = yield* Config.option(Config.String("LOCALAPPDATA"));
+    const localActionToken =
+      localReadOrigin && Option.isSome(localAppData) && path.isAbsolute(localAppData.value)
+        ? yield* Effect.gen(function* () {
+            const directory = yield* fs.realPath(path.join(localAppData.value, "Otis"));
+            const file = path.join(directory, "worker-reply.token");
+            if ((yield* fs.realPath(file)) !== file) return undefined;
+            const info = yield* fs.stat(file);
+            if (info.type !== "File" || info.size > 1024n) return undefined;
+            const token = (yield* fs.readFileString(file)).trim();
+            return /^[A-Za-z0-9_~+./=-]{32,512}$/.test(token) ? token : undefined;
+          }).pipe(Effect.orElseSucceed(() => undefined))
+        : undefined;
+    const titles = yield* fs
+      .readFileString(path.join(config.baseDir, "otis-worker-titles.json"))
+      .pipe(
+        Effect.flatMap(
+          Schema.decodeEffect(
+            Schema.fromJsonString(
+              Schema.Record(
+                Schema.String,
+                Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(120)),
+              ),
+            ),
+          ),
+        ),
+        Effect.orElseSucceed((): Record<string, string> => ({})),
+      );
+    const native = nativeChats(sql, environmentId);
     return yield* make({
-      ...nativeChats(sql, environmentId),
+      parentBinding: native.parentBinding,
+      resolveChats: (nodes) =>
+        native
+          .resolveChats(nodes)
+          .pipe(
+            Effect.map((resolved) =>
+              resolved.map((node) =>
+                node.kind === "run" && Object.hasOwn(titles, node.id)
+                  ? { ...node, title: titles[node.id]! }
+                  : node,
+              ),
+            ),
+          ),
       origin: yield* Config.option(Config.String("T3_OTIS_ORIGIN")).pipe(
         Effect.map(Option.getOrUndefined),
         Effect.orElseSucceed(() => undefined),
@@ -372,6 +421,7 @@ export const layer = Layer.effect(
         Effect.orElseSucceed(() => undefined),
       ),
       localReadOrigin,
+      localActionToken,
       reconnect: Effect.sleep("2 seconds"),
     });
   }),
