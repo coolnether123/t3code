@@ -12909,5 +12909,9 @@
   "7604344bb748eecb": "{count} falhas a dispensar",
   "aa97721fc79678ce": "Custo equivalente estimado de API hoje: {cost}",
   "c00d2417f03b5ef2": "Custo informado pelo provedor: {cost} (período desconhecido)",
-  "f2d68a973a45c6e1": "Custo estimado: {cost} (período desconhecido)"
+  "f2d68a973a45c6e1": "Custo estimado: {cost} (período desconhecido)",
+  "1481014f3bb7ce84": "Sem uso hoje",
+  "49a5db026036f614": "Período desconhecido",
+  "65bc2b34c947f70c": "Uso de hoje sem preço",
+  "f93e7027e6d6d0f3": "A estimativa pode excluir o uso sem preço."
 }

@@ -1,13 +1,17 @@
 import { describe, expect, it } from "@effect/vitest";
-import type { OtisNode } from "@t3tools/contracts";
+import { OtisNode } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import {
   applyFleetEvent,
   applyTreeBatch,
   flattenFleet,
   fleetNeedsYou,
+  fleetParentCost,
   fleetRowLabels,
   offlineFleet,
 } from "./tree.ts";
+
+const decodeNode = Schema.decodeUnknownSync(OtisNode);
 
 const lane: OtisNode = {
   id: "parent",
@@ -44,6 +48,39 @@ const lane: OtisNode = {
   tailSeq: 0,
 };
 describe("fleet rows", () => {
+  it("keeps daily usage record counts even when no tokens were reported", () => {
+    const decoded = decodeNode({
+      ...lane,
+      tokens: { in: 0, out: 0, cached: 0, total: 0 },
+      apiUsage: { records: 1, pricedRecords: 0, costUsd: null },
+    });
+    expect(fleetParentCost(decoded)).toEqual({ kind: "unpriced" });
+  });
+  it.each([
+    ["positive tokens", {}, { kind: "unpriced" }],
+    [
+      "zero measured tokens",
+      { tokens: { in: 0, out: 0, cached: 0, total: 0 } },
+      { kind: "no-usage" },
+    ],
+    ["missing tokens", { tokens: null }, { kind: "unknown" }],
+    [
+      "priced zero",
+      { costSource: "api-equivalent-t3", costUsd: 0 },
+      { kind: "api-equivalent-t3", usd: 0 },
+    ],
+    [
+      "provider period unknown",
+      { costSource: "provider", costUsd: 4 },
+      { kind: "provider", usd: 4 },
+    ],
+    ["model-rate period unknown", { costSource: "priced", costUsd: 4 }, { kind: "priced", usd: 4 }],
+  ] satisfies [string, Partial<OtisNode>, ReturnType<typeof fleetParentCost>][])(
+    "classifies parent cost with %s",
+    (_label, fields, expected) => {
+      expect(fleetParentCost({ ...lane, ...fields })).toEqual(expected);
+    },
+  );
   it("keeps all 499 children behind their fold, then promotes the child needing attention without scrambling its peers", () => {
     const children = Array.from({ length: 499 }, (_, index): OtisNode => ({
       ...lane,

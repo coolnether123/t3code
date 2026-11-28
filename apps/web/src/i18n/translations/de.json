@@ -12909,5 +12909,9 @@
   "7604344bb748eecb": "{count} Fehler zu quittieren",
   "aa97721fc79678ce": "Geschätzte API-Kosten heute: {cost}",
   "c00d2417f03b5ef2": "Vom Anbieter gemeldete Kosten: {cost} (Zeitraum unbekannt)",
-  "f2d68a973a45c6e1": "Geschätzte Kosten: {cost} (Zeitraum unbekannt)"
+  "f2d68a973a45c6e1": "Geschätzte Kosten: {cost} (Zeitraum unbekannt)",
+  "1481014f3bb7ce84": "Heute keine Nutzung",
+  "49a5db026036f614": "Zeitraum unbekannt",
+  "65bc2b34c947f70c": "Heutige Nutzung ohne Preis",
+  "f93e7027e6d6d0f3": "Die Schätzung kann Nutzung ohne Preis auslassen."
 }

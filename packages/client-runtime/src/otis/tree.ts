@@ -124,6 +124,19 @@ const chicagoTime = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
   minute: "2-digit",
 });
+
+export function fleetParentCost(
+  node: Pick<OtisNode, "costUsd" | "costSource" | "tokens" | "apiUsage">,
+) {
+  if (node.costUsd !== null && node.costSource !== "unpriced") {
+    return { kind: node.costSource, usd: node.costUsd } as const;
+  }
+  if ((node.apiUsage?.records ?? 0) > 0 || (node.tokens?.total ?? 0) > 0) {
+    return { kind: "unpriced" } as const;
+  }
+  return { kind: node.tokens === null ? "unknown" : "no-usage" } as const;
+}
+
 export function fleetRowLabels(
   node: OtisNode,
   nodes: ReadonlyMap<string, OtisNode>,

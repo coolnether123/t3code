@@ -12909,5 +12909,9 @@
   "7604344bb748eecb": "{count} échecs à ignorer",
   "aa97721fc79678ce": "Coût équivalent API estimé aujourd’hui : {cost}",
   "c00d2417f03b5ef2": "Coût indiqué par le fournisseur : {cost} (période inconnue)",
-  "f2d68a973a45c6e1": "Coût estimé : {cost} (période inconnue)"
+  "f2d68a973a45c6e1": "Coût estimé : {cost} (période inconnue)",
+  "1481014f3bb7ce84": "Aucun usage aujourd’hui",
+  "49a5db026036f614": "Période inconnue",
+  "65bc2b34c947f70c": "Usage non tarifé aujourd’hui",
+  "f93e7027e6d6d0f3": "L’estimation peut exclure l’usage non tarifé."
 }

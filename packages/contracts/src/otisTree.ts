@@ -35,6 +35,7 @@ export const OtisNode = S.Struct({
   tokensReason: S.NullOr(S.Literals(["still-running", "provider-does-not-report"])),
   costUsd: S.NullOr(S.Finite),
   costSource: S.Literals(["provider", "priced", "unpriced", "api-equivalent-t3"]),
+  apiUsage: S.optionalKey(S.Struct({ records: count })),
   sub: S.Struct({
     nodes: count,
     running: count,

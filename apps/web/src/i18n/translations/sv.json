@@ -12916,5 +12916,9 @@
   "7604344bb748eecb": "{count} fel att avfärda",
   "aa97721fc79678ce": "Beräknad API-motsvarande kostnad i dag: {cost}",
   "c00d2417f03b5ef2": "Kostnad rapporterad av leverantören: {cost} (okänd period)",
-  "f2d68a973a45c6e1": "Beräknad kostnad: {cost} (okänd period)"
+  "f2d68a973a45c6e1": "Beräknad kostnad: {cost} (okänd period)",
+  "1481014f3bb7ce84": "Ingen användning i dag",
+  "49a5db026036f614": "Okänd period",
+  "65bc2b34c947f70c": "Ej prissatt användning i dag",
+  "f93e7027e6d6d0f3": "Uppskattningen kan utelämna ej prissatt användning."
 }

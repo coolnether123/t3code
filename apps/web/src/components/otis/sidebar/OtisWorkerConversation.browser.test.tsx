@@ -168,7 +168,7 @@ it("opens a managed worker directly and replies in its live transcript", async (
       "false",
     );
     const meta = parentRow.querySelector<HTMLElement>("[data-otis-parent-meta]")!;
-    for (const field of meta.children as HTMLCollectionOf<HTMLElement>) {
+    for (const field of meta.querySelectorAll<HTMLElement>("[data-otis-parent-metric]")) {
       expect(field.scrollWidth).toBeLessThanOrEqual(field.clientWidth);
       expect(field.getBoundingClientRect().right).toBeLessThanOrEqual(
         meta.getBoundingClientRect().right,

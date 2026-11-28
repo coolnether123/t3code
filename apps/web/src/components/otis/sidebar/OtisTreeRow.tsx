@@ -8,7 +8,7 @@ import { useRelativeTimeState } from "~/hooks/useRelativeTimeState";
 import { useOtisRowMenu } from "./useOtisRowMenu";
 import { runFleetAction } from "./fleetData";
 import { usePrimaryEnvironmentId } from "~/state/environments";
-import { memo, useRef, useState } from "react";
+import { memo, useId, useRef, useState } from "react";
 
 import {
   OtisParentDetails,
@@ -112,6 +112,7 @@ export const OtisTreeRow = memo(function OtisTreeRow({
 }: Props) {
   const gt = useGT();
   const lane = node.kind === "lane";
+  const detailsId = useId();
   const branch = !node.settled && (node.sub.nodes > 0 || childCount > 0);
   const environmentId = usePrimaryEnvironmentId();
   const [sending, setSending] = useState(false);
@@ -205,6 +206,7 @@ export const OtisTreeRow = memo(function OtisTreeRow({
             data-fleet-action=""
             className="flex min-w-0 flex-1 self-stretch items-center gap-1 text-left"
             aria-haspopup="menu"
+            aria-describedby={lane ? detailsId : undefined}
             onClick={action}
           >
             <span className="min-w-0 flex-1">{name}</span>
@@ -219,7 +221,13 @@ export const OtisTreeRow = memo(function OtisTreeRow({
         )}
         {lane && (
           <div className="absolute end-2 top-1">
-            <OtisParentDetails node={node} labels={labels} title={title} question={question} />
+            <OtisParentDetails
+              node={node}
+              labels={labels}
+              title={title}
+              question={question}
+              descriptionId={action ? detailsId : undefined}
+            />
           </div>
         )}
         {branch && !expanded && !lane && childCount > 0 && (
