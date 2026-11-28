@@ -12908,9 +12908,13 @@
   "68ece0dc7d72ac90": "{cost} i dag",
   "8dcb9966faed20e9": "Aktiva arbetare: {count}",
   "f389254cdfc8c0e7": "Detaljer för {title}",
-  "7ca0897e31c7a7aa": "API-motsvarande kostnad i dag: {cost}",
   "f9542c595df3565f": "{tokens} token i dag",
   "cf6adaf48988e348": "{count} misslyckades sedan den överordnade agenten startade",
   "6fc06fe33fb219d5": "Den överordnade agentens tur pågår",
-  "5e729fc4c34f2821": "{count} i kö"
+  "5e729fc4c34f2821": "{count} i kö",
+  "e3b3ab50c23f7fcf": "Ingen modell",
+  "7604344bb748eecb": "{count} fel att avfärda",
+  "aa97721fc79678ce": "Beräknad API-motsvarande kostnad i dag: {cost}",
+  "c00d2417f03b5ef2": "Kostnad rapporterad av leverantören: {cost} (okänd period)",
+  "f2d68a973a45c6e1": "Beräknad kostnad: {cost} (okänd period)"
 }

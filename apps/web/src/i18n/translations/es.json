@@ -12896,9 +12896,13 @@
   "68ece0dc7d72ac90": "{cost} hoy",
   "8dcb9966faed20e9": "Trabajadores en ejecución: {count}",
   "f389254cdfc8c0e7": "Detalles de {title}",
-  "7ca0897e31c7a7aa": "Coste equivalente de API hoy: {cost}",
   "f9542c595df3565f": "{tokens} tokens hoy",
   "cf6adaf48988e348": "{count} fallos desde que se inició el agente principal",
   "6fc06fe33fb219d5": "Turno del agente principal en curso",
-  "5e729fc4c34f2821": "{count} en cola"
+  "5e729fc4c34f2821": "{count} en cola",
+  "e3b3ab50c23f7fcf": "Sin modelo",
+  "7604344bb748eecb": "{count} fallos por descartar",
+  "aa97721fc79678ce": "Coste equivalente estimado de API hoy: {cost}",
+  "c00d2417f03b5ef2": "Coste indicado por el proveedor: {cost} (periodo desconocido)",
+  "f2d68a973a45c6e1": "Coste estimado: {cost} (periodo desconocido)"
 }

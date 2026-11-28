@@ -67,7 +67,7 @@ function PopoverPopup({
       {touchBackdrop ? (
         // On touch, the backdrop consumes outside taps so closing cannot also activate the control beneath.
         <PopoverPrimitive.Backdrop
-          className="fixed inset-0 z-[130] hidden pointer-coarse:block"
+          className="fixed inset-0 z-[130] hidden any-pointer-coarse:block"
           data-slot="popover-backdrop"
         />
       ) : null}

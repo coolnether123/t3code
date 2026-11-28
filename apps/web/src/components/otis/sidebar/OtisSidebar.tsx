@@ -25,7 +25,7 @@ import { OtisButton } from "../OtisButton";
 import { OtisPlanStrip } from "./OtisPlanStrip";
 import { OtisDoneFold } from "./OtisDoneFold";
 import { OtisTreeRow, OtisRowMeta } from "./OtisTreeRow";
-import { OtisParentDetails, OtisParentTurnDot } from "./OtisParentMeta";
+import { OtisParentDetails, OtisParentStatus, OtisParentTurnDot } from "./OtisParentMeta";
 import { useOtisRowMenu } from "./useOtisRowMenu";
 import { readWorkerNodes, useFleet } from "./fleetData";
 import { useConnectingParents } from "./MakeParent";
@@ -216,6 +216,11 @@ function FleetList({
             )}
           </div>
           <div className="px-3">
+            {parent.kind === "lane" && (
+              <div className="flex flex-wrap items-center gap-1">
+                <OtisParentStatus node={parent} />
+              </div>
+            )}
             <OtisRowMeta node={parent} labels={parentLabels} />
           </div>
           {parent.chat && (

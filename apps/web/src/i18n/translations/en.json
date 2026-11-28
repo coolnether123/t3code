@@ -12910,9 +12910,13 @@
   "68ece0dc7d72ac90": "{cost} today",
   "8dcb9966faed20e9": "Running workers: {count}",
   "f389254cdfc8c0e7": "Details for {title}",
-  "7ca0897e31c7a7aa": "API-equivalent cost today: {cost}",
   "f9542c595df3565f": "{tokens} tokens today",
   "cf6adaf48988e348": "{count} failed since the parent started",
   "6fc06fe33fb219d5": "Parent turn running",
-  "5e729fc4c34f2821": "{count} queued"
+  "5e729fc4c34f2821": "{count} queued",
+  "e3b3ab50c23f7fcf": "No model",
+  "7604344bb748eecb": "{count} failures to dismiss",
+  "aa97721fc79678ce": "API-equivalent estimate today: {cost}",
+  "c00d2417f03b5ef2": "Provider-reported cost: {cost} (period unknown)",
+  "f2d68a973a45c6e1": "Estimated cost: {cost} (period unknown)"
 }

@@ -12901,9 +12901,13 @@
   "68ece0dc7d72ac90": "{cost} heute",
   "8dcb9966faed20e9": "Laufende Worker: {count}",
   "f389254cdfc8c0e7": "Details zu {title}",
-  "7ca0897e31c7a7aa": "API-äquivalente Kosten heute: {cost}",
   "f9542c595df3565f": "{tokens} Tokens heute",
   "cf6adaf48988e348": "{count} seit dem Start des übergeordneten Agents fehlgeschlagen",
   "6fc06fe33fb219d5": "Übergeordneter Agent arbeitet",
-  "5e729fc4c34f2821": "{count} in der Warteschlange"
+  "5e729fc4c34f2821": "{count} in der Warteschlange",
+  "e3b3ab50c23f7fcf": "Kein Modell",
+  "7604344bb748eecb": "{count} Fehler zu quittieren",
+  "aa97721fc79678ce": "Geschätzte API-Kosten heute: {cost}",
+  "c00d2417f03b5ef2": "Vom Anbieter gemeldete Kosten: {cost} (Zeitraum unbekannt)",
+  "f2d68a973a45c6e1": "Geschätzte Kosten: {cost} (Zeitraum unbekannt)"
 }
