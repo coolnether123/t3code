@@ -31,12 +31,21 @@ it.layer(NodeServices.layer)("root CLI commands", (it) => {
       Effect.provideService(HostProcess.Environment, { PATH: input.path ?? "", ...input.env }),
     );
 
+  // Drive-letter colons would split a Windows fixture path when the launcher models a POSIX shell.
+  const posixSearchPath = (directory: string) =>
+    Effect.map(Path.Path, (path) => {
+      const absolute = path.resolve(directory);
+      return HostProcess.Platform.defaultValue() === "win32"
+        ? `/${absolute.slice(path.parse(absolute).root.length).replaceAll("\\", "/")}`
+        : absolute;
+    });
+
   const pathWithT3 = Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const bin = yield* fs.makeTempDirectoryScoped({ directory: ".", prefix: ".test-cli-path-" });
     yield* fs.writeFileString(path.join(bin, "t3"), "#!/bin/sh\n", { mode: 0o755 });
-    return path.relative(path.resolve("."), path.resolve(bin));
+    return yield* posixSearchPath(bin);
   });
 
   it.effect("keeps a user-installed Node reachable when the command runs under sudo", () =>
@@ -79,7 +88,7 @@ it.layer(NodeServices.layer)("root CLI commands", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const home = yield* fs.makeTempDirectoryScoped();
+      const home = path.resolve(yield* fs.makeTempDirectoryScoped({ directory: "." }));
       const shim = path.join(home, ".local bin", "t3");
       yield* fs.makeDirectory(path.dirname(shim), { recursive: true });
       yield* fs.writeFileString(shim, "#!/bin/sh\n", { mode: 0o755 });
@@ -97,9 +106,9 @@ it.layer(NodeServices.layer)("root CLI commands", (it) => {
       );
 
       // The link the app installs onto PATH leads to its own launcher, so plain `t3` is right.
-      const linked = yield* fs.makeTempDirectoryScoped();
+      const linked = path.resolve(yield* fs.makeTempDirectoryScoped({ directory: "." }));
       yield* fs.symlink(shim, path.join(linked, "t3"));
-      expect(yield* rootCommand({ ...desktop, path: linked })).toBe(
+      expect(yield* rootCommand({ ...desktop, path: yield* posixSearchPath(linked) })).toBe(
         'sudo env "PATH=$PATH" t3 browser setup',
       );
 
@@ -137,7 +146,7 @@ it.layer(NodeServices.layer)("root CLI commands", (it) => {
           node: "/home/theo/.t3/runtime/versions/1.0.0/t3",
           entry: "/home/theo/.t3/runtime/versions/1.0.0/t3",
           executable: true,
-          path: path.join(prefix, "bin"),
+          path: yield* posixSearchPath(path.join(prefix, "bin")),
           env: { T3CODE_NPM_LAUNCHER_PATH: npmLauncher },
         }),
       ).toBe('sudo env "PATH=$PATH" t3 browser setup');

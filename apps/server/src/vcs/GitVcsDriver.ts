@@ -761,7 +761,11 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       16_384,
     );
     if (stdout === null) return null;
-    const lines = stdout.replace(/\r?\n$/, "").split(/\r?\n/);
+    // Infer the line ending from Git's boolean answer so a POSIX path can end in CR.
+    const lineEnding = stdout.startsWith("true\r\n") ? "\r\n" : "\n";
+    const trimLineEnding = (value: string) =>
+      value.endsWith(lineEnding) ? value.slice(0, -lineEnding.length) : value;
+    const lines = trimLineEnding(stdout).split(lineEnding);
     if (lines[0]?.trim() !== "true") return null;
     // A newline inside a path breaks the line framing; ask for each path on its own.
     if (lines.length !== 3) {

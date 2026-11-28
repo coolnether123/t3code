@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -28,12 +30,14 @@ describe("ClaudeQuotaSampler", () => {
   it.effect("refreshes persisted cycles without a connected client", () =>
     Effect.gen(function* () {
       const now = Date.parse("2026-11-08T09:00:00.000Z");
-      yield* TestClock.adjust(now);
+      yield* TestClock.setTime(now);
+      const clock = yield* Clock.Clock;
       const config = yield* ServerConfig.ServerConfig;
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const historyPath = path.join(config.stateDir, CLAUDE_QUOTA_HISTORY_FILE);
-      const written = yield* Queue.unbounded<void>();
+      const delays = yield* Queue.unbounded<number>();
+      const wakeSampler = yield* Queue.unbounded<void>();
       const window = {
         id: "seven_day",
         label: "Weekly",
@@ -78,25 +82,25 @@ describe("ClaudeQuotaSampler", () => {
       });
       yield* ClaudeQuotaSampler.make.pipe(
         Effect.provide(policy),
-        Effect.provideService(FileSystem.FileSystem, {
-          ...fs,
-          rename: (from, to) =>
-            fs
-              .rename(from, to)
-              .pipe(
-                Effect.tap(() =>
-                  to === historyPath ? Queue.offer(written, undefined) : Effect.void,
-                ),
-              ),
+        Effect.provideService(Clock.Clock, {
+          ...clock,
+          sleep: (duration) =>
+            Queue.offer(delays, Duration.toMillis(duration)).pipe(
+              Effect.andThen(Queue.take(wakeSampler)),
+            ),
         }),
       );
+      expect(yield* Queue.take(delays)).toBe(45_000);
       expect(read).not.toHaveBeenCalled();
       yield* TestClock.adjust("45 seconds");
-      yield* Queue.take(written);
+      yield* Queue.offer(wakeSampler, undefined);
+      // The next delay is requested only after the current reading is persisted.
+      expect(yield* Queue.take(delays)).toBe(60_000);
       const first = decodeClaudeQuotaHistory(JSON.parse(yield* fs.readFileString(historyPath)));
       expect(claudeQuotaHistories(first)[0]?.samples.at(-1)?.resetsAt).toBe(window.resetsAt);
       yield* TestClock.adjust("1 minute");
-      yield* Queue.take(written);
+      yield* Queue.offer(wakeSampler, undefined);
+      expect(yield* Queue.take(delays)).toBe(60_000);
       const second = decodeClaudeQuotaHistory(JSON.parse(yield* fs.readFileString(historyPath)));
       expect(claudeQuotaHistories(second)[0]?.samples.map((sample) => sample.resetsAt)).toEqual([
         "2026-10-22T08:00:00.000Z",
