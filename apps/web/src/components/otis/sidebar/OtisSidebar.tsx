@@ -24,7 +24,7 @@ import { useSidebar, useSidebarVisibility } from "../../ui/sidebar";
 import { OtisButton } from "../OtisButton";
 import { OtisPlanStrip } from "./OtisPlanStrip";
 import { OtisDoneFold } from "./OtisDoneFold";
-import { OtisTreeRow, NeedsYouPill, OtisRowMeta } from "./OtisTreeRow";
+import { OtisTreeRow, OtisRowMeta } from "./OtisTreeRow";
 import { OtisParentDetails, OtisParentTurnDot } from "./OtisParentMeta";
 import { useOtisRowMenu } from "./useOtisRowMenu";
 import { readWorkerNodes, useFleet } from "./fleetData";
@@ -210,7 +210,6 @@ function FleetList({
               <ChevronLeft size={16} className="shrink-0" />
               {parent.kind === "lane" && <OtisParentTurnDot node={parent} />}
               <span className="truncate">{path.map((id) => nodes.get(id)?.title).join(" / ")}</span>
-              {parent.kind === "lane" && <NeedsYouPill node={parent} />}
             </button>
             {parent.kind === "lane" && (
               <OtisParentDetails node={parent} labels={parentLabels} title={parent.title} />

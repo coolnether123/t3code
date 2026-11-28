@@ -33,6 +33,7 @@ export function OtisParentTurnDot({ node }: { node: OtisNode }) {
 export function OtisParentMeta({ node, model }: { node: OtisNode; model: string }) {
   const gt = useGT();
   const fields = useParentFields(node, model);
+  const needsYou = node.waiting + node.sub.waiting;
   return (
     <>
       <span className="flex items-baseline gap-x-1 text-xs text-muted-foreground max-md:pe-7">
@@ -53,9 +54,18 @@ export function OtisParentMeta({ node, model }: { node: OtisNode; model: string 
           </span>
         </span>
       </span>
-      {node.sub.failedUnseen > 0 && (
-        <span className="inline-block whitespace-nowrap rounded-full bg-destructive/10 px-1.5 text-xs font-semibold text-destructive tabular-nums">
-          {gt("{count} failed", { count: node.sub.failedUnseen })}
+      {(needsYou > 0 || node.sub.failedUnseen > 0) && (
+        <span className="flex flex-wrap items-center gap-1">
+          {needsYou > 0 && (
+            <span className="whitespace-nowrap rounded-full bg-warning-surface px-1.5 text-xs font-semibold text-warning-foreground tabular-nums">
+              {gt("{count} needs you", { count: needsYou })}
+            </span>
+          )}
+          {node.sub.failedUnseen > 0 && (
+            <span className="whitespace-nowrap rounded-full bg-destructive/10 px-1.5 text-xs font-semibold text-destructive tabular-nums">
+              {gt("{count} failed", { count: node.sub.failedUnseen })}
+            </span>
+          )}
         </span>
       )}
     </>

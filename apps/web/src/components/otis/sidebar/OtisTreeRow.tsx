@@ -56,16 +56,6 @@ function StateMark({ node, label }: { node: OtisNode; label: string }) {
   );
 }
 
-export function NeedsYouPill({ node }: { node: OtisNode }) {
-  const gt = useGT();
-  const count = node.waiting + node.sub.waiting;
-  return count > 0 ? (
-    <span className="ml-auto shrink-0 whitespace-nowrap rounded-full bg-warning-surface px-1.5 text-xs font-semibold text-warning-foreground">
-      {gt("{count} needs you", { count })}
-    </span>
-  ) : null;
-}
-
 export function OtisRowMeta({
   node,
   labels,
@@ -168,7 +158,6 @@ export const OtisTreeRow = memo(function OtisTreeRow({
             />
           </>
         )}
-        {lane && <NeedsYouPill node={node} />}
       </span>
       <OtisRowMeta node={node} labels={labels} />
     </>
