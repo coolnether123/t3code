@@ -46,6 +46,9 @@ NodeTest.test(
 function fixture(t, missingClient = false) {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-build-fixture-"));
   t.after(() => NodeFS.rmSync(root, { recursive: true, force: true }));
+  const retained = NodePath.join(root, "retained", "keep.txt");
+  NodeFS.mkdirSync(NodePath.dirname(retained));
+  NodeFS.writeFileSync(retained, "existing data");
   const repository = NodePath.join(root, "repository");
   NodeFS.mkdirSync(repository);
   const write = (name, text) => {
@@ -95,6 +98,7 @@ function fixture(t, missingClient = false) {
       const target = NodePath.join(cwd,'node_modules/vite-plus/bin/vp');
       NodeFS.mkdirSync(NodePath.dirname(target),{recursive:true});
       NodeFS.copyFileSync(__filename,target);
+      if (${missingClient}) NodeFS.symlinkSync(${JSON.stringify(NodePath.dirname(retained))}, NodePath.join(cwd, 'node_modules', 'fixture-junction'), 'junction');
     }
     if (process.argv[2] === 'build') {
       NodeFS.mkdirSync(NodePath.join(cwd,'dist'),{recursive:true});
@@ -148,7 +152,7 @@ function fixture(t, missingClient = false) {
       ],
       { encoding: "utf8", windowsHide: true },
     );
-  return { root, releaseRoot, commit, run, git };
+  return { root, releaseRoot, commit, run, git, retained };
 }
 
 NodeTest.test(
@@ -198,6 +202,8 @@ NodeTest.test(
       NodeFS.existsSync(NodePath.join(f.releaseRoot, f.commit, "release.json")),
       false,
     );
+    NodeAssert.deepEqual(NodeFS.readdirSync(f.releaseRoot), []);
+    NodeAssert.equal(NodeFS.readFileSync(f.retained, "utf8"), "existing data");
     NodeAssert.equal(f.git("worktree", "list", "--porcelain").match(/^worktree /gm).length, 1);
   },
 );

@@ -88,7 +88,17 @@ try {
     Write-Host "Prepared $sha. Receipt: $targetRoot\release.json"
 } finally {
     $env:Path = $previousPath
-    if (Test-Path -LiteralPath $sourceRoot) {
-        [void](Invoke-GitText $Repository @('-c', 'core.longpaths=true', 'worktree', 'remove', $sourceRoot))
+    try {
+        if (Test-Path -LiteralPath $sourceRoot) {
+            [void](Invoke-GitText $Repository @('-c', 'core.longpaths=true', 'worktree', 'remove', $sourceRoot))
+        }
+    } finally {
+        # Successful preparation published the directory under its commit.
+        if (Test-Path -LiteralPath $deployRoot) {
+            $staging = Assert-ContainedPath $ReleaseRoot $deployRoot 'build staging'
+            [void](Assert-SafeRoot $staging 'build staging')
+            & $nodePath -e 'process.getBuiltinModule(process.argv[2]).rmSync(process.argv[1], { recursive: true, force: true })' $staging 'node:fs'
+            if ($LASTEXITCODE -ne 0) { throw "Could not delete build staging: $staging" }
+        }
     }
 }
