@@ -41,14 +41,15 @@ it("opens a managed worker directly and replies in its live transcript", async (
   const parent = nodes.find((node) => node.id === "lane:otis-1")!;
   const activeParent: OtisNode = {
     ...parent,
-    title: "Synthetic release parent",
+    title: "Release verification",
     state: "running",
     waiting: 1,
-    model: "Synthetic model",
+    model: "gpt-6.2-sol",
+    modelEvidence: "requested",
     costSource: "api-equivalent-t3",
-    costUsd: 42.17,
+    costUsd: 1234.56,
     tokens: { in: 1200000, out: 0, cached: 0, total: 1200000 },
-    sub: { ...parent.sub, failedUnseen: 4, failed: 9, done: 103, running: 0 },
+    sub: { ...parent.sub, failedUnseen: 4, failed: 9, done: 103, running: 12 },
   };
   const b = nodes.find((node) => node.kind === "run")!;
   const worker: OtisNode = {
@@ -60,6 +61,29 @@ it("opens a managed worker directly and replies in its live transcript", async (
     settled: false,
     can: ["message"],
     tailSeq: 10,
+  };
+  const unknownParent: OtisNode = {
+    ...activeParent,
+    id: "lane:synthetic-unknown",
+    lane: "synthetic-unknown",
+    title: "Documentation and accessibility regression verification",
+    model: "No model assigned",
+    modelEvidence: null,
+    costSource: "unpriced",
+    costUsd: null,
+    tokens: null,
+    state: "idle",
+    waiting: 0,
+    chat: null,
+    sub: { nodes: 1, running: 12, waiting: 0, failedUnseen: 0, failed: 0, tokens: 0 },
+  };
+  const unknownChild = {
+    ...worker,
+    id: "run:synthetic-child",
+    title: "Synthetic accessibility worker",
+    lane: unknownParent.lane,
+    parent: unknownParent.id,
+    chat: null,
   };
   const frames = new TransformStream<OtisFleetEvent, OtisFleetEvent>();
   const writer = frames.writable.getWriter();
@@ -113,9 +137,7 @@ it("opens a managed worker directly and replies in its live transcript", async (
   await writer.write({
     type: "snapshot",
     seq: 1,
-    nodes: nodes.map((node) =>
-      node.id === worker.id ? worker : node.id === parent.id ? activeParent : node,
-    ),
+    nodes: [activeParent, worker, unknownParent, unknownChild],
     waiting: null,
     load: null,
   });
@@ -131,16 +153,55 @@ it("opens a managed worker directly and replies in its live transcript", async (
   expect(sidebar.getBoundingClientRect().width).toBe(230);
   const failureChip = page.getByText("4 failed", { exact: true });
   await expect.element(failureChip).toBeVisible();
-  const range = document.createRange();
-  range.selectNodeContents(failureChip.element());
-  expect(range.getClientRects()).toHaveLength(1);
+  const row = failureChip.element().closest<HTMLElement>("[data-fleet-row]")!;
+  const unknownTitle = page.getByText(unknownParent.title, { exact: true });
+  await expect.element(unknownTitle).toBeVisible();
+  await document.fonts.ready;
+  const ordinaryTitle = page
+    .getByText(activeParent.title, { exact: true })
+    .element() as HTMLElement;
+  expect(ordinaryTitle.scrollWidth).toBeLessThanOrEqual(ordinaryTitle.clientWidth);
+  const unknownRow = unknownTitle.element().closest<HTMLElement>("[data-fleet-row]")!;
+  for (const parentRow of [row, unknownRow]) {
+    expect(parentRow.querySelector(":scope > button[aria-expanded]")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    const meta = parentRow.querySelector<HTMLElement>("[data-otis-parent-meta]")!;
+    for (const field of meta.children as HTMLCollectionOf<HTMLElement>) {
+      expect(field.scrollWidth).toBeLessThanOrEqual(field.clientWidth);
+      expect(field.getBoundingClientRect().right).toBeLessThanOrEqual(
+        meta.getBoundingClientRect().right,
+      );
+    }
+    const info = parentRow.querySelector<HTMLElement>('[data-slot="popover-trigger"]')!;
+    expect(info.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+      meta.getBoundingClientRect().top,
+    );
+  }
+  const needsYou = page.getByText("1 needs you", { exact: true }).element();
+  expect(failureChip.element().getBoundingClientRect().top).toBe(
+    needsYou.getBoundingClientRect().top,
+  );
+  for (const chip of [failureChip.element(), needsYou]) {
+    const range = document.createRange();
+    range.selectNodeContents(chip);
+    expect(range.getClientRects()).toHaveLength(1);
+  }
+  await expect.element(page.getByText("≈$1.2K", { exact: true })).toBeVisible();
+  await expect.element(page.getByText("No model", { exact: true })).toBeVisible();
+  await expect.element(page.getByText("Unknown", { exact: true })).toBeVisible();
   await expect.element(page.getByRole("img", { name: "Parent turn running" })).toBeVisible();
   await expect.element(page.getByText("103 done", { exact: true })).not.toBeInTheDocument();
-  const details = page.getByRole("button", { name: "Details for Synthetic release parent" });
-  (details.element() as HTMLElement).focus();
-  await userEvent.keyboard("{Enter}");
+  const expand = page.getByRole("button", { name: "Expand Release verification" });
+  expect(expand.element()).toHaveAttribute("aria-expanded", "false");
+  await page.getByRole("button", { name: "Details for Release verification" }).click();
   await expect.element(page.getByText("103 done", { exact: true })).toBeVisible();
   await expect.element(page.getByText("1,200,000 tokens today")).toBeVisible();
+  const popup = page.getByRole("dialog").filter({ hasText: "103 done" });
+  await expect.element(popup.getByText("4 failures to dismiss")).toBeVisible();
+  await expect.element(popup.getByText("API-equivalent estimate today: $1,234.56")).toBeVisible();
+  await expect.element(popup.getByText(/gpt-6\.2-sol/)).toBeVisible();
   await writer.write({
     type: "delta",
     seq: 2,

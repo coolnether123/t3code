@@ -10,7 +10,12 @@ import { runFleetAction } from "./fleetData";
 import { usePrimaryEnvironmentId } from "~/state/environments";
 import { memo, useRef, useState } from "react";
 
-import { OtisParentDetails, OtisParentMeta, OtisParentTurnDot } from "./OtisParentMeta";
+import {
+  OtisParentDetails,
+  OtisParentMeta,
+  OtisParentStatus,
+  OtisParentTurnDot,
+} from "./OtisParentMeta";
 
 interface Props extends ReturnType<typeof fleetRowLabels> {
   node: OtisNode;
@@ -112,7 +117,7 @@ export const OtisTreeRow = memo(function OtisTreeRow({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const attempt = useRef<{ type: "seen" | "retry"; id: string } | null>(null);
-  const title = question || labels.title;
+  const title = lane ? labels.title : question || labels.title;
   const failedAt = node.state === "failed" ? (node.endedAt ?? node.observedAt) : null;
   const failureAge = useRelativeTimeState(failedAt);
   const retryWindowMs = 24 * 60 * 60 * 1000;
@@ -143,11 +148,18 @@ export const OtisTreeRow = memo(function OtisTreeRow({
   const action = node.chat ? () => onOpen(node) : branch ? () => onExpand(node.id) : undefined;
   const name = (
     <>
-      <span className={`flex min-w-0 items-center gap-1.5 ${lane ? "min-h-6 pe-7" : ""}`}>
+      <span
+        className={`flex min-w-0 items-center ${lane ? "min-h-6 flex-wrap gap-1 pe-7 any-pointer-coarse:min-h-11 any-pointer-coarse:pe-12" : "gap-1.5"}`}
+      >
         {lane ? (
           <>
-            <OtisParentTurnDot node={node} />
-            <span className="line-clamp-2 min-w-0 flex-1 wrap-anywhere font-medium">{title}</span>
+            <span className="flex min-w-0 max-w-full items-center gap-1">
+              <OtisParentTurnDot node={node} />
+              <span data-otis-parent-title="" className="min-w-0 truncate font-medium">
+                {title}
+              </span>
+            </span>
+            <OtisParentStatus node={node} />
           </>
         ) : (
           <>
@@ -206,8 +218,8 @@ export const OtisTreeRow = memo(function OtisTreeRow({
           </div>
         )}
         {lane && (
-          <div className="absolute end-2 top-0">
-            <OtisParentDetails node={node} labels={labels} title={title} />
+          <div className="absolute end-2 top-1">
+            <OtisParentDetails node={node} labels={labels} title={title} question={question} />
           </div>
         )}
         {branch && !expanded && !lane && childCount > 0 && (
