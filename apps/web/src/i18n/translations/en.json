@@ -12819,7 +12819,6 @@
   "a3fe1dd63892577d": "Could not load done chats. Reopen Done to try again.",
   "3aa6e4672de2d638": "Otis fleet",
   "d9232238bf1e691c": "Back from {title}",
-  "e4dc84ad63135a41": "{tokens} today",
   "34f742896cfef4a4": "Open chat",
   "fe120bc687c8cde6": "No fleet nodes yet.",
   "3955db21d2d8175b": "Other chats · {count}",
@@ -12905,5 +12904,15 @@
   "ee6d842dbdf7090f": "of the week",
   "f1f093465790ad64": "pull requests",
   "f510a9d12401d25a": "{to} will leave about {unused}% unused when it resets {time}. Move {from} work to {to} until then.",
-  "fa2b44bb9e249872": "No plan has spare room this week."
+  "fa2b44bb9e249872": "No plan has spare room this week.",
+  "e3ce159867fa8a98": "No model assigned",
+  "cbd347984e2e4ca1": "Cost unknown",
+  "68ece0dc7d72ac90": "{cost} today",
+  "8dcb9966faed20e9": "Running workers: {count}",
+  "f389254cdfc8c0e7": "Details for {title}",
+  "7ca0897e31c7a7aa": "API-equivalent cost today: {cost}",
+  "f9542c595df3565f": "{tokens} tokens today",
+  "cf6adaf48988e348": "{count} failed since the parent started",
+  "6fc06fe33fb219d5": "Parent turn running",
+  "5e729fc4c34f2821": "{count} queued"
 }

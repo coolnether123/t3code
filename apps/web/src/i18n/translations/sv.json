@@ -12817,7 +12817,6 @@
   "a3fe1dd63892577d": "Det gick inte att läsa in avslutade chattar. Öppna avsnittet igen.",
   "3aa6e4672de2d638": "Otis-flottan",
   "d9232238bf1e691c": "Tillbaka från {title}",
-  "e4dc84ad63135a41": "{tokens} i dag",
   "34f742896cfef4a4": "Öppna chatt",
   "fe120bc687c8cde6": "Flottan har inga noder än.",
   "3955db21d2d8175b": "Andra chattar · {count}",
@@ -12903,5 +12902,15 @@
   "ee6d842dbdf7090f": "av veckans kvot",
   "f1f093465790ad64": "pull requests",
   "f510a9d12401d25a": "{to} har cirka {unused} % över vid återställningen {time}. Flytta arbete från {from} till {to} fram till dess.",
-  "fa2b44bb9e249872": "Inget abonnemang har utrymme kvar den här veckan."
+  "fa2b44bb9e249872": "Inget abonnemang har utrymme kvar den här veckan.",
+  "e3ce159867fa8a98": "Ingen modell tilldelad",
+  "cbd347984e2e4ca1": "Okänd kostnad",
+  "68ece0dc7d72ac90": "{cost} i dag",
+  "8dcb9966faed20e9": "Aktiva arbetare: {count}",
+  "f389254cdfc8c0e7": "Detaljer för {title}",
+  "7ca0897e31c7a7aa": "API-motsvarande kostnad i dag: {cost}",
+  "f9542c595df3565f": "{tokens} token i dag",
+  "cf6adaf48988e348": "{count} misslyckades sedan den överordnade agenten startade",
+  "6fc06fe33fb219d5": "Den överordnade agentens tur pågår",
+  "5e729fc4c34f2821": "{count} i kö"
 }

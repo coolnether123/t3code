@@ -12810,7 +12810,6 @@
   "a3fe1dd63892577d": "Abgeschlossene Chats konnten nicht geladen werden. Öffne den Abschnitt erneut.",
   "3aa6e4672de2d638": "Otis-Flotte",
   "d9232238bf1e691c": "Zurück von {title}",
-  "e4dc84ad63135a41": "{tokens} heute",
   "34f742896cfef4a4": "Chat öffnen",
   "fe120bc687c8cde6": "Noch keine Einträge in der Flotte.",
   "3955db21d2d8175b": "Weitere Chats · {count}",
@@ -12896,5 +12895,15 @@
   "ee6d842dbdf7090f": "für diese Woche",
   "f1f093465790ad64": "Pull Requests",
   "f510a9d12401d25a": "Bei der Rücksetzung {time} bleiben bei {to} etwa {unused} % übrig. Bis dahin Arbeit von {from} zu {to} verlagern.",
-  "fa2b44bb9e249872": "Kein Abo hat diese Woche Spielraum."
+  "fa2b44bb9e249872": "Kein Abo hat diese Woche Spielraum.",
+  "e3ce159867fa8a98": "Kein Modell zugewiesen",
+  "cbd347984e2e4ca1": "Kosten unbekannt",
+  "68ece0dc7d72ac90": "{cost} heute",
+  "8dcb9966faed20e9": "Laufende Worker: {count}",
+  "f389254cdfc8c0e7": "Details zu {title}",
+  "7ca0897e31c7a7aa": "API-äquivalente Kosten heute: {cost}",
+  "f9542c595df3565f": "{tokens} Tokens heute",
+  "cf6adaf48988e348": "{count} seit dem Start des übergeordneten Agents fehlgeschlagen",
+  "6fc06fe33fb219d5": "Übergeordneter Agent arbeitet",
+  "5e729fc4c34f2821": "{count} in der Warteschlange"
 }

@@ -12810,7 +12810,6 @@
   "a3fe1dd63892577d": "Impossible de charger les discussions terminées. Rouvrez la section pour réessayer.",
   "3aa6e4672de2d638": "Flotte Otis",
   "d9232238bf1e691c": "Revenir de {title}",
-  "e4dc84ad63135a41": "{tokens} aujourd’hui",
   "34f742896cfef4a4": "Ouvrir la discussion",
   "fe120bc687c8cde6": "La flotte ne contient encore aucun nœud.",
   "3955db21d2d8175b": "Autres discussions · {count}",
@@ -12896,5 +12895,15 @@
   "ee6d842dbdf7090f": "pour la semaine",
   "f1f093465790ad64": "demandes de fusion",
   "f510a9d12401d25a": "{to} aura environ {unused} % inutilisés à sa réinitialisation à {time}. D’ici là, transférez du travail de {from} vers {to}.",
-  "fa2b44bb9e249872": "Aucun abonnement n’a de marge cette semaine."
+  "fa2b44bb9e249872": "Aucun abonnement n’a de marge cette semaine.",
+  "e3ce159867fa8a98": "Aucun modèle attribué",
+  "cbd347984e2e4ca1": "Coût inconnu",
+  "68ece0dc7d72ac90": "{cost} aujourd’hui",
+  "8dcb9966faed20e9": "Agents en cours : {count}",
+  "f389254cdfc8c0e7": "Détails de {title}",
+  "7ca0897e31c7a7aa": "Coût équivalent API aujourd’hui : {cost}",
+  "f9542c595df3565f": "{tokens} jetons aujourd’hui",
+  "cf6adaf48988e348": "{count} échecs depuis le démarrage de l’agent principal",
+  "6fc06fe33fb219d5": "Tour de l’agent principal en cours",
+  "5e729fc4c34f2821": "{count} en attente"
 }

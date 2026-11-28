@@ -12805,7 +12805,6 @@
   "a3fe1dd63892577d": "No se pudieron cargar los chats finalizados. Vuelve a abrir la sección.",
   "3aa6e4672de2d638": "Flota de Otis",
   "d9232238bf1e691c": "Volver desde {title}",
-  "e4dc84ad63135a41": "{tokens} hoy",
   "34f742896cfef4a4": "Abrir chat",
   "fe120bc687c8cde6": "Todavía no hay nodos en la flota.",
   "3955db21d2d8175b": "Otros chats · {count}",
@@ -12891,5 +12890,15 @@
   "ee6d842dbdf7090f": "de la semana",
   "f1f093465790ad64": "solicitudes de cambios",
   "f510a9d12401d25a": "A {to} le quedará cerca del {unused} % sin usar al reiniciarse {time}. Pasa trabajo de {from} a {to} hasta entonces.",
-  "fa2b44bb9e249872": "Ningún plan tiene margen esta semana."
+  "fa2b44bb9e249872": "Ningún plan tiene margen esta semana.",
+  "e3ce159867fa8a98": "Sin modelo asignado",
+  "cbd347984e2e4ca1": "Coste desconocido",
+  "68ece0dc7d72ac90": "{cost} hoy",
+  "8dcb9966faed20e9": "Trabajadores en ejecución: {count}",
+  "f389254cdfc8c0e7": "Detalles de {title}",
+  "7ca0897e31c7a7aa": "Coste equivalente de API hoy: {cost}",
+  "f9542c595df3565f": "{tokens} tokens hoy",
+  "cf6adaf48988e348": "{count} fallos desde que se inició el agente principal",
+  "6fc06fe33fb219d5": "Turno del agente principal en curso",
+  "5e729fc4c34f2821": "{count} en cola"
 }

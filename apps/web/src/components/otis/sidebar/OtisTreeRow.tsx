@@ -8,7 +8,9 @@ import { useRelativeTimeState } from "~/hooks/useRelativeTimeState";
 import { useOtisRowMenu } from "./useOtisRowMenu";
 import { runFleetAction } from "./fleetData";
 import { usePrimaryEnvironmentId } from "~/state/environments";
-import { Fragment, memo, useRef, useState } from "react";
+import { memo, useRef, useState } from "react";
+
+import { OtisParentDetails, OtisParentMeta, OtisParentTurnDot } from "./OtisParentMeta";
 
 interface Props extends ReturnType<typeof fleetRowLabels> {
   node: OtisNode;
@@ -58,7 +60,7 @@ export function NeedsYouPill({ node }: { node: OtisNode }) {
   const gt = useGT();
   const count = node.waiting + node.sub.waiting;
   return count > 0 ? (
-    <span className="ml-auto shrink-0 rounded-full bg-warning-surface px-2 text-xs font-semibold text-warning-foreground">
+    <span className="ml-auto shrink-0 whitespace-nowrap rounded-full bg-warning-surface px-1.5 text-xs font-semibold text-warning-foreground">
       {gt("{count} needs you", { count })}
     </span>
   ) : null;
@@ -72,56 +74,26 @@ export function OtisRowMeta({
   labels: ReturnType<typeof fleetRowLabels>;
 }) {
   const gt = useGT();
-  const lane = node.kind === "lane";
-  const counts = [
-    {
-      key: "running",
-      text: node.sub.running && gt("{count} running", { count: node.sub.running }),
-    },
-    { key: "queued", text: node.sub.queued && gt("{count} queued", { count: node.sub.queued }) },
-    {
-      key: "failed",
-      text: node.sub.failedUnseen && gt("{count} failed", { count: node.sub.failedUnseen }),
-    },
-    { key: "done", text: node.sub.done && gt("{count} done", { count: node.sub.done }) },
-  ].filter(({ text }) => Boolean(text));
-  const age = useRelativeTimeState(lane ? null : (node.endedAt ?? node.startedAt));
+  const age = useRelativeTimeState(node.kind === "lane" ? null : (node.endedAt ?? node.startedAt));
+  if (node.kind === "lane") return <OtisParentMeta node={node} model={labels.model} />;
   const elapsed = age.status === "relative" ? (node.endedAt ? age.label : age.value) : null;
   const detail = [
-    { key: "model", text: labels.model, nowrap: false },
-    ...(lane && counts.length > 0
-      ? counts.map((count) => ({ ...count, nowrap: true }))
-      : [
-          {
-            key: "state",
-            text: !lane && node.waiting ? gt("Needs you") : labels.state || gt("Idle"),
-            nowrap: false,
-          },
-        ]),
-    { key: "elapsed", text: elapsed, nowrap: false },
-  ].filter(({ text }) => Boolean(text));
+    labels.model,
+    node.waiting ? gt("Needs you") : labels.state || gt("Idle"),
+    elapsed,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   const cost =
     node.costSource !== "api-equivalent-t3" || node.costUsd == null
       ? // oxlint-disable-next-line t3code/no-em-dash-copy -- Specified missing-value glyph in the cost column.
         "—"
       : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(node.costUsd);
-  const metrics = [
-    cost,
-    node.tokens && (lane ? gt("{tokens} today", { tokens: labels.tokens }) : labels.tokens),
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  const metrics = [cost, node.tokens && labels.tokens].filter(Boolean).join(" · ");
   return (
     <span className="flex items-baseline justify-between gap-1 text-xs text-muted-foreground">
-      <span className="min-w-0 flex-1">
-        {detail.map(({ key, text, nowrap }, index) => (
-          <Fragment key={key}>
-            {index > 0 && " · "}
-            {nowrap ? <span className="whitespace-nowrap">{text}</span> : text}
-          </Fragment>
-        ))}
-      </span>
+      <span className="min-w-0 flex-1">{detail}</span>
       <span
         className="shrink-0 whitespace-nowrap text-right tabular-nums"
         aria-label={gt("API-equivalent cost and tokens: {metrics}", { metrics })}
@@ -181,12 +153,21 @@ export const OtisTreeRow = memo(function OtisTreeRow({
   const action = node.chat ? () => onOpen(node) : branch ? () => onExpand(node.id) : undefined;
   const name = (
     <>
-      <span className="flex min-w-0 items-center gap-1.5">
-        {!lane && <StateMark node={node} label={labels.state} />}
-        <FleetTitle
-          title={title}
-          detail={[labels.model, labels.state].filter(Boolean).join(" \u00b7 ")}
-        />
+      <span className={`flex min-w-0 items-center gap-1.5 ${lane ? "min-h-6 pe-7" : ""}`}>
+        {lane ? (
+          <>
+            <OtisParentTurnDot node={node} />
+            <span className="line-clamp-2 min-w-0 flex-1 wrap-anywhere font-medium">{title}</span>
+          </>
+        ) : (
+          <>
+            <StateMark node={node} label={labels.state} />
+            <FleetTitle
+              title={title}
+              detail={[labels.model, labels.state].filter(Boolean).join(" · ")}
+            />
+          </>
+        )}
         {lane && <NeedsYouPill node={node} />}
       </span>
       <OtisRowMeta node={node} labels={labels} />
@@ -198,7 +179,7 @@ export const OtisTreeRow = memo(function OtisTreeRow({
       <div
         {...menu}
         data-fleet-row=""
-        className={`flex min-w-0 items-center gap-1 rounded-md px-2 min-h-11 select-none [-webkit-touch-callout:none]`}
+        className={`relative flex min-w-0 items-center gap-1 rounded-md px-2 min-h-11 select-none [-webkit-touch-callout:none] ${lane ? "py-1" : ""}`}
         style={{ paddingInlineStart: 8 + (narrow ? 0 : Math.min(depth, 4) * 12) }}
       >
         {branch ? (
@@ -216,7 +197,7 @@ export const OtisTreeRow = memo(function OtisTreeRow({
             <Chevron size={14} />
           </button>
         ) : (
-          <span className="w-6 shrink-0" aria-hidden="true" />
+          !lane && <span className="w-6 shrink-0" aria-hidden="true" />
         )}
         {action ? (
           <button
@@ -229,10 +210,15 @@ export const OtisTreeRow = memo(function OtisTreeRow({
           </button>
         ) : (
           <div
-            tabIndex={0}
+            tabIndex={lane ? undefined : 0}
             className="min-w-0 flex-1 focus-visible:outline-2 focus-visible:outline-ring"
           >
             {name}
+          </div>
+        )}
+        {lane && (
+          <div className="absolute end-2 top-0">
+            <OtisParentDetails node={node} labels={labels} title={title} />
           </div>
         )}
         {branch && !expanded && !lane && childCount > 0 && (

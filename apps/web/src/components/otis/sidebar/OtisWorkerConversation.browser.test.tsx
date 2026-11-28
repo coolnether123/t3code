@@ -2,7 +2,7 @@ import { createMemoryHistory } from "@tanstack/react-router";
 import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
 import type * as Context from "effect/Context";
 import { expect, it, vi } from "vite-plus/test";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import { AppRoot } from "~/AppRoot";
 import "~/components/ChatView";
 import "~/index.css";
@@ -38,10 +38,18 @@ it("opens a managed worker directly and replies in its live transcript", async (
   const decode = Schema.decodeUnknownSync(Schema.fromJsonString(OtisTreeBatch));
   const [roots, children] = fixture.split("\n");
   const nodes = [...decode(roots!).nodes, ...decode(children!).nodes];
-  const doneCounts = new Map([
-    ["lane:otis-1", 103],
-    ["lane:facilities", 57],
-  ]);
+  const parent = nodes.find((node) => node.id === "lane:otis-1")!;
+  const activeParent: OtisNode = {
+    ...parent,
+    title: "Synthetic release parent",
+    state: "running",
+    waiting: 1,
+    model: "Synthetic model",
+    costSource: "api-equivalent-t3",
+    costUsd: 42.17,
+    tokens: { in: 1200000, out: 0, cached: 0, total: 1200000 },
+    sub: { ...parent.sub, failedUnseen: 4, failed: 9, done: 103, running: 0 },
+  };
   const b = nodes.find((node) => node.kind === "run")!;
   const worker: OtisNode = {
     ...b,
@@ -105,18 +113,9 @@ it("opens a managed worker directly and replies in its live transcript", async (
   await writer.write({
     type: "snapshot",
     seq: 1,
-    nodes: nodes.map((node) => {
-      if (node.id === worker.id) return worker;
-      const done = doneCounts.get(node.id);
-      return done === undefined
-        ? node
-        : {
-            ...node,
-            model: "GPT-6.2 Sol",
-            tokens: { in: 1200000, out: 0, cached: 0, total: 1200000 },
-            sub: { ...node.sub, failedUnseen: 4, done },
-          };
-    }),
+    nodes: nodes.map((node) =>
+      node.id === worker.id ? worker : node.id === parent.id ? activeParent : node,
+    ),
     waiting: null,
     load: null,
   });
@@ -130,25 +129,28 @@ it("opens a managed worker directly and replies in its live transcript", async (
     .closest<HTMLElement>('[data-slot="sidebar-wrapper"]')!
     .style.setProperty("--sidebar-width", "230px");
   expect(sidebar.getBoundingClientRect().width).toBe(230);
-  const countBounds = [];
-  for (const label of ["4 failed", ...Array.from(doneCounts.values(), (done) => done + " done")]) {
-    const counts = page.getByText(label, { exact: true });
-    expect(counts.elements(), label).toHaveLength(label === "4 failed" ? 2 : 1);
-    for (const count of counts.all()) {
-      const range = document.createRange();
-      range.selectNodeContents(count.element());
-      const rects = Array.from(range.getClientRects(), ({ x, y, width, height }) => ({
-        x,
-        y,
-        width,
-        height,
-      }));
-      expect(rects).toHaveLength(1);
-      countBounds.push({ label, rect: rects[0] });
-    }
-  }
-  console.info("230 px Otis sidebar count bounds", JSON.stringify(countBounds));
-  await page.screenshot({ element: sidebar, path: "__screenshots__/otis-sidebar-230px.png" });
+  const failureChip = page.getByText("4 failed", { exact: true });
+  await expect.element(failureChip).toBeVisible();
+  const range = document.createRange();
+  range.selectNodeContents(failureChip.element());
+  expect(range.getClientRects()).toHaveLength(1);
+  await expect.element(page.getByRole("img", { name: "Parent turn running" })).toBeVisible();
+  await expect.element(page.getByText("103 done", { exact: true })).not.toBeInTheDocument();
+  const details = page.getByRole("button", { name: "Details for Synthetic release parent" });
+  (details.element() as HTMLElement).focus();
+  await userEvent.keyboard("{Enter}");
+  await expect.element(page.getByText("103 done", { exact: true })).toBeVisible();
+  await expect.element(page.getByText("1,200,000 tokens today")).toBeVisible();
+  await writer.write({
+    type: "delta",
+    seq: 2,
+    nodes: [
+      { ...activeParent, rev: activeParent.rev + 1, sub: { ...activeParent.sub, failedUnseen: 0 } },
+    ],
+  });
+  await expect.element(failureChip).not.toBeInTheDocument();
+  await expect.element(page.getByText("9 failed since the parent started")).toBeVisible();
+  await userEvent.keyboard("{Escape}");
   await toggle.click();
   await expect.element(toggle).toHaveAttribute("aria-expanded", "true");
   await expect.element(workers.getByRole("button", { name: pastWorker.title })).toBeVisible();
@@ -165,7 +167,7 @@ it("opens a managed worker directly and replies in its live transcript", async (
   });
   await writer.write({
     type: "delta",
-    seq: 2,
+    seq: 3,
     nodes: [{ ...worker, tailSeq: 20, rev: worker.rev + 1 }],
   });
   await expect.element(page.getByText("I checked the receipt.")).toBeVisible();

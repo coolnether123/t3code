@@ -12810,7 +12810,6 @@
   "a3fe1dd63892577d": "Não foi possível carregar as conversas concluídas. Reabra a seção para tentar de novo.",
   "3aa6e4672de2d638": "Frota do Otis",
   "d9232238bf1e691c": "Voltar de {title}",
-  "e4dc84ad63135a41": "{tokens} hoje",
   "34f742896cfef4a4": "Abrir conversa",
   "fe120bc687c8cde6": "A frota ainda não tem nós.",
   "3955db21d2d8175b": "Outras conversas · {count}",
@@ -12896,5 +12895,15 @@
   "ee6d842dbdf7090f": "da semana",
   "f1f093465790ad64": "pull requests",
   "f510a9d12401d25a": "{to} terá cerca de {unused}% sem uso ao redefinir em {time}. Até lá, passe trabalho de {from} para {to}.",
-  "fa2b44bb9e249872": "Nenhum plano tem margem nesta semana."
+  "fa2b44bb9e249872": "Nenhum plano tem margem nesta semana.",
+  "e3ce159867fa8a98": "Nenhum modelo atribuído",
+  "cbd347984e2e4ca1": "Custo desconhecido",
+  "68ece0dc7d72ac90": "{cost} hoje",
+  "8dcb9966faed20e9": "Trabalhadores em execução: {count}",
+  "f389254cdfc8c0e7": "Detalhes de {title}",
+  "7ca0897e31c7a7aa": "Custo equivalente de API hoje: {cost}",
+  "f9542c595df3565f": "{tokens} tokens hoje",
+  "cf6adaf48988e348": "{count} falhas desde o início do agente principal",
+  "6fc06fe33fb219d5": "Turno do agente principal em andamento",
+  "5e729fc4c34f2821": "{count} na fila"
 }

@@ -25,6 +25,7 @@ import { OtisButton } from "../OtisButton";
 import { OtisPlanStrip } from "./OtisPlanStrip";
 import { OtisDoneFold } from "./OtisDoneFold";
 import { OtisTreeRow, NeedsYouPill, OtisRowMeta } from "./OtisTreeRow";
+import { OtisParentDetails, OtisParentTurnDot } from "./OtisParentMeta";
 import { useOtisRowMenu } from "./useOtisRowMenu";
 import { readWorkerNodes, useFleet } from "./fleetData";
 import { useConnectingParents } from "./MakeParent";
@@ -60,6 +61,7 @@ function FleetList({
   const nodes = fleet.nodes;
   const path = phonePath.filter((id) => nodes.has(id));
   const parent = isMobile ? nodes.get(path.at(-1) ?? "") : undefined;
+  const parentLabels = parent && fleetRowLabels(parent, nodes, false);
   const expanded = new Set(isMobile ? path : expandedIds);
   const rows = flattenFleet(nodes, expanded);
   const visibleTreeNodes = new Set(rows.map(({ node }) => node.id));
@@ -193,22 +195,29 @@ function FleetList({
       aria-label={gt("Otis fleet")}
       className="flex h-full min-h-0 flex-col bg-sidebar text-sm text-sidebar-foreground"
     >
-      {parent ? (
+      {parent && parentLabels ? (
         <header
           {...parentMenu}
           className="border-b px-2 py-1 select-none [-webkit-touch-callout:none]"
         >
-          <button
-            data-fleet-link=""
-            onClick={() => setPhonePath(path.slice(0, -1))}
-            aria-label={gt("Back from {title}", { title: parent.title })}
-          >
-            <ChevronLeft size={16} />
-            <span className="truncate">{path.map((id) => nodes.get(id)?.title).join(" / ")}</span>
-            {parent.kind === "lane" && <NeedsYouPill node={parent} />}
-          </button>
+          <div className="flex items-center">
+            <button
+              data-fleet-link=""
+              className="min-w-0 flex-1"
+              onClick={() => setPhonePath(path.slice(0, -1))}
+              aria-label={gt("Back from {title}", { title: parent.title })}
+            >
+              <ChevronLeft size={16} className="shrink-0" />
+              {parent.kind === "lane" && <OtisParentTurnDot node={parent} />}
+              <span className="truncate">{path.map((id) => nodes.get(id)?.title).join(" / ")}</span>
+              {parent.kind === "lane" && <NeedsYouPill node={parent} />}
+            </button>
+            {parent.kind === "lane" && (
+              <OtisParentDetails node={parent} labels={parentLabels} title={parent.title} />
+            )}
+          </div>
           <div className="px-3">
-            <OtisRowMeta node={parent} labels={fleetRowLabels(parent, nodes, false)} />
+            <OtisRowMeta node={parent} labels={parentLabels} />
           </div>
           {parent.chat && (
             <button data-fleet-link="" aria-haspopup="menu" onClick={() => open(parent)}>

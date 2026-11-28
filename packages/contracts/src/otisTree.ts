@@ -40,6 +40,7 @@ export const OtisNode = S.Struct({
     running: count,
     waiting: count,
     failedUnseen: count,
+    failed: S.optionalKey(count),
     done: S.optionalKey(count),
     queued: S.optionalKey(count),
     tokens: count,
